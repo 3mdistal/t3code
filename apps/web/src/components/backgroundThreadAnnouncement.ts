@@ -1,51 +1,69 @@
+import type { OrchestrationV2RunStatus, RunId } from "@t3tools/contracts";
+
 import type { SidebarThreadSummary } from "../types";
-import { THREAD_STATUS_TEXT } from "./chat/threadActivityAnnouncement";
-import { hasUnseenCompletion, resolveSidebarThreadStatus } from "./Sidebar.logic";
+import { runOutcomeText, THREAD_STATUS_TEXT } from "./chat/threadActivityAnnouncement";
 
-export type BackgroundThreadStatus = keyof typeof THREAD_STATUS_TEXT;
+export interface BackgroundThreadSnapshot {
+  readonly key: string;
+  readonly title: string;
+  readonly request: "approval" | "input" | null;
+  readonly runId: RunId | null;
+  readonly runStatus: OrchestrationV2RunStatus | null;
+  /** A snoozed thread stays hidden until its timer, so it stays quiet too. */
+  readonly snoozed: boolean;
+}
 
-/** The statuses worth interrupting someone for: the ones a sidebar row flags. */
-export function resolveBackgroundThreadStatus(
-  thread: SidebarThreadSummary,
-  lastVisitedAt: string | undefined,
-): BackgroundThreadStatus | null {
-  const status = resolveSidebarThreadStatus(thread);
-  if (status === "approval" || status === "input") return status;
-  if (status === "failed" || status === "limited") return "failed";
-  if (status === "ready" && hasUnseenCompletion({ ...thread, lastVisitedAt })) return "done";
+export function resolveBackgroundThreadRequest(
+  thread: Pick<
+    SidebarThreadSummary,
+    "hasPendingApprovals" | "hasPendingUserInput" | "pendingSubagentRequest"
+  >,
+): BackgroundThreadSnapshot["request"] {
+  if (thread.hasPendingApprovals || thread.pendingSubagentRequest === "approval") {
+    return "approval";
+  }
+  if (thread.hasPendingUserInput || thread.pendingSubagentRequest === "user_input") {
+    return "input";
+  }
   return null;
 }
 
-export interface BackgroundThreadEntry {
-  readonly key: string;
-  readonly title: string;
-  readonly status: BackgroundThreadStatus | null;
+interface BackgroundThreadMemoryEntry {
+  readonly request: BackgroundThreadSnapshot["request"];
+  /** The last run whose ending is known, so each run's ending is announced once. */
+  readonly settledRunId: RunId | null;
 }
 
-export type BackgroundThreadMemory = ReadonlyMap<string, BackgroundThreadStatus | null>;
+export type BackgroundThreadMemory = ReadonlyMap<string, BackgroundThreadMemoryEntry>;
 
 /**
  * Decides what a screen reader hears when a thread other than the open one
- * changes status. `threads` holds only threads whose environment is live, so a
- * thread is silent the first time it's seen: opening the app or reconnecting
- * takes a baseline instead of reading out every thread.
+ * asks for something or ends a run. `threads` holds only threads whose
+ * environment is live, so a thread is silent the first time it's seen:
+ * opening the app or reconnecting takes a baseline instead of reading out
+ * every thread.
  */
 export function nextBackgroundThreadAnnouncement(
   previous: BackgroundThreadMemory,
-  threads: ReadonlyArray<BackgroundThreadEntry>,
+  threads: ReadonlyArray<BackgroundThreadSnapshot>,
   openThreadKey: string | null,
 ): { readonly memory: BackgroundThreadMemory; readonly announcement: string | null } {
-  const memory = new Map<string, BackgroundThreadStatus | null>();
+  const memory = new Map<string, BackgroundThreadMemoryEntry>();
   const announcements: string[] = [];
   for (const thread of threads) {
-    memory.set(thread.key, thread.status);
-    if (
-      thread.status !== null &&
-      thread.key !== openThreadKey &&
-      previous.has(thread.key) &&
-      previous.get(thread.key) !== thread.status
-    ) {
-      announcements.push(`${THREAD_STATUS_TEXT[thread.status]}: ${thread.title}`);
+    const before = previous.get(thread.key);
+    const outcome = runOutcomeText(thread.runStatus);
+    const settled = outcome !== null || thread.runStatus === "rolled_back";
+    memory.set(thread.key, {
+      request: thread.request,
+      settledRunId: settled ? thread.runId : (before?.settledRunId ?? null),
+    });
+    if (before === undefined || thread.key === openThreadKey || thread.snoozed) continue;
+    if (thread.request !== null && thread.request !== before.request) {
+      announcements.push(`${THREAD_STATUS_TEXT[thread.request]}: ${thread.title}`);
+    }
+    if (outcome !== null && thread.runId !== before.settledRunId) {
+      announcements.push(`${outcome}: ${thread.title}`);
     }
   }
   return {

@@ -1,5 +1,6 @@
 import { useAtomValue } from "@effect/atom-react";
 import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
+import { effectiveSnoozed } from "@t3tools/client-runtime/state/thread-settled";
 import { useEffect, useRef } from "react";
 
 import { useComposerDraftStore } from "../composerDraftStore";
@@ -7,14 +8,12 @@ import { useThreadRouteTarget } from "../hooks/useThreadRouteTarget";
 import { useQuietThreadShells } from "../state/entities";
 import { liveShellEnvironmentIdsAtom } from "../state/shell";
 import { resolveActiveThreadRouteRef } from "../threadRoutes";
-import { useUiStateStore } from "../uiStateStore";
 import {
-  type BackgroundThreadEntry,
   type BackgroundThreadMemory,
+  type BackgroundThreadSnapshot,
   nextBackgroundThreadAnnouncement,
-  resolveBackgroundThreadStatus,
+  resolveBackgroundThreadRequest,
 } from "./backgroundThreadAnnouncement";
-import { resolveThreadLastVisitedAt } from "./Sidebar.logic";
 
 /**
  * Speaks status changes for threads other than the open one. It lives outside
@@ -23,7 +22,6 @@ import { resolveThreadLastVisitedAt } from "./Sidebar.logic";
 export function BackgroundThreadAnnouncer() {
   const threads = useQuietThreadShells();
   const liveEnvironmentIds = useAtomValue(liveShellEnvironmentIdsAtom);
-  const localLastVisitedAtById = useUiStateStore((state) => state.threadLastVisitedAtById);
   const routeTarget = useThreadRouteTarget();
   const routeDraftThread = useComposerDraftStore((store) =>
     routeTarget?.kind === "draft" ? store.getDraftSession(routeTarget.draftId) : null,
@@ -34,25 +32,25 @@ export function BackgroundThreadAnnouncer() {
   const memoryRef = useRef<BackgroundThreadMemory>(new Map());
 
   useEffect(() => {
-    const entries: BackgroundThreadEntry[] = [];
+    const now = new Date().toISOString();
+    const snapshots: BackgroundThreadSnapshot[] = [];
     for (const thread of threads) {
       // Subagents have no row of their own; their requests surface on the parent.
       if (thread.archivedAt !== null || thread.lineage.relationshipToParent === "subagent")
         continue;
       if (!liveEnvironmentIds.has(thread.environmentId)) continue;
-      const key = scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
-      entries.push({
-        key,
+      snapshots.push({
+        key: scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
         title: thread.title,
-        status: resolveBackgroundThreadStatus(
-          thread,
-          resolveThreadLastVisitedAt(thread.lastVisitedAt, localLastVisitedAtById[key]),
-        ),
+        request: resolveBackgroundThreadRequest(thread),
+        runId: thread.latestRun?.runId ?? null,
+        runStatus: thread.latestRun?.status ?? null,
+        snoozed: effectiveSnoozed(thread, { now }),
       });
     }
     const { memory, announcement } = nextBackgroundThreadAnnouncement(
       memoryRef.current,
-      entries,
+      snapshots,
       openThreadKey,
     );
     memoryRef.current = memory;
@@ -61,7 +59,7 @@ export function BackgroundThreadAnnouncer() {
     // Screen readers ignore a write that leaves the text unchanged, so a repeat
     // gets a trailing non-breaking space to count as new.
     region.textContent = region.textContent === announcement ? `${announcement} ` : announcement;
-  }, [threads, liveEnvironmentIds, localLastVisitedAtById, openThreadKey]);
+  }, [threads, liveEnvironmentIds, openThreadKey]);
 
   return <div ref={regionRef} role="status" aria-live="polite" className="sr-only" />;
 }

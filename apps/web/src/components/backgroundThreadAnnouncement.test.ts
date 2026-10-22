@@ -1,25 +1,39 @@
+import { RunId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
-  type BackgroundThreadEntry,
   type BackgroundThreadMemory,
+  type BackgroundThreadSnapshot,
   nextBackgroundThreadAnnouncement,
+  resolveBackgroundThreadRequest,
 } from "./backgroundThreadAnnouncement";
 
-const login = (status: BackgroundThreadEntry["status"]): BackgroundThreadEntry => ({
-  key: "env:login",
-  title: "Fix login redirect",
-  status,
-});
-const docs = (status: BackgroundThreadEntry["status"]): BackgroundThreadEntry => ({
-  key: "env:docs",
-  title: "Update docs",
-  status,
-});
+const firstRun = RunId.make("run-1");
+const secondRun = RunId.make("run-2");
+
+function thread(
+  key: string,
+  title: string,
+  state: Partial<Omit<BackgroundThreadSnapshot, "key" | "title">> = {},
+): BackgroundThreadSnapshot {
+  return {
+    key,
+    title,
+    request: null,
+    runId: firstRun,
+    runStatus: "running",
+    snoozed: false,
+    ...state,
+  };
+}
+const login = (state?: Partial<BackgroundThreadSnapshot>) =>
+  thread("env:login", "Fix login redirect", state);
+const docs = (state?: Partial<BackgroundThreadSnapshot>) =>
+  thread("env:docs", "Update docs", state);
 
 function speak(
   frames: ReadonlyArray<{
-    readonly threads: ReadonlyArray<BackgroundThreadEntry>;
+    readonly threads: ReadonlyArray<BackgroundThreadSnapshot>;
     readonly open?: string;
   }>,
 ) {
@@ -37,30 +51,50 @@ describe("nextBackgroundThreadAnnouncement", () => {
   it("names the thread with the same words the open thread uses", () => {
     expect(
       speak([
-        { threads: [login(null)] },
-        { threads: [login("approval")] },
-        { threads: [login(null)] },
-        { threads: [login("input")] },
-        { threads: [login("done")] },
-        { threads: [login(null)] },
-        { threads: [login("failed")] },
+        { threads: [login()] },
+        { threads: [login({ request: "approval" })] },
+        { threads: [login()] },
+        { threads: [login({ request: "input" })] },
+        { threads: [login({ runStatus: "completed" })] },
+        { threads: [login({ runId: secondRun, runStatus: "failed" })] },
+        { threads: [login({ runId: RunId.make("run-3"), runStatus: "interrupted" })] },
       ]),
     ).toEqual([
       "Needs approval: Fix login redirect",
       "Needs your input: Fix login redirect",
       "Done: Fix login redirect",
       "Failed: Fix login redirect",
+      "Stopped: Fix login redirect",
     ]);
+  });
+
+  it("announces each run's ending once", () => {
+    expect(
+      speak([
+        { threads: [login()] },
+        { threads: [login({ runStatus: "completed" })] },
+        // Marking the thread unread or renaming it changes nothing about the run.
+        { threads: [login({ runStatus: "completed", title: "Fix the login redirect" })] },
+        // The next run can finish between two updates, so it never looks busy here.
+        { threads: [login({ runId: secondRun, runStatus: "completed" })] },
+        { threads: [login({ runId: RunId.make("run-3"), runStatus: "rolled_back" })] },
+      ]),
+    ).toEqual(["Done: Fix login redirect", "Done: Fix login redirect"]);
   });
 
   it("stays quiet for threads it sees for the first time, like on launch or reconnect", () => {
     expect(
       speak([
-        { threads: [login("done"), docs("approval")] },
-        { threads: [login("done"), docs("approval")] },
+        { threads: [login({ runStatus: "completed" }), docs({ request: "approval" })] },
+        { threads: [login({ runStatus: "completed" }), docs({ request: "approval" })] },
         // The environment drops out while it resyncs, then comes back changed.
         { threads: [] },
-        { threads: [login("failed"), docs("done")] },
+        {
+          threads: [
+            login({ runId: secondRun, runStatus: "failed" }),
+            docs({ runStatus: "completed" }),
+          ],
+        },
       ]),
     ).toEqual([]);
   });
@@ -68,10 +102,24 @@ describe("nextBackgroundThreadAnnouncement", () => {
   it("leaves the open thread to its own announcer", () => {
     expect(
       speak([
-        { threads: [login(null), docs(null)], open: "env:login" },
-        { threads: [login("done"), docs(null)], open: "env:login" },
-        // Switching away from a thread doesn't replay its status.
-        { threads: [login("done"), docs(null)], open: "env:docs" },
+        { threads: [login(), docs()], open: "env:login" },
+        { threads: [login({ runStatus: "completed" }), docs()], open: "env:login" },
+        // Switching away from a thread doesn't replay its ending.
+        { threads: [login({ runStatus: "completed" }), docs()], open: "env:docs" },
+        {
+          threads: [login({ runStatus: "completed" }), docs({ request: "input" })],
+          open: "env:login",
+        },
+      ]),
+    ).toEqual(["Needs your input: Update docs"]);
+  });
+
+  it("keeps a snoozed thread quiet, even after it wakes", () => {
+    expect(
+      speak([
+        { threads: [login({ snoozed: true })] },
+        { threads: [login({ snoozed: true, runStatus: "completed" })] },
+        { threads: [login({ runStatus: "completed" })] },
       ]),
     ).toEqual([]);
   });
@@ -79,9 +127,22 @@ describe("nextBackgroundThreadAnnouncement", () => {
   it("speaks threads that change together in one announcement", () => {
     expect(
       speak([
-        { threads: [login(null), docs(null)] },
-        { threads: [login("done"), docs("approval")] },
+        { threads: [login(), docs()] },
+        { threads: [login({ runStatus: "completed" }), docs({ request: "approval" })] },
       ]),
     ).toEqual(["Done: Fix login redirect. Needs approval: Update docs"]);
+  });
+});
+
+describe("resolveBackgroundThreadRequest", () => {
+  it("raises a subagent's request on the thread that owns its row", () => {
+    const quiet = { hasPendingApprovals: false, hasPendingUserInput: false };
+    expect(resolveBackgroundThreadRequest({ ...quiet, pendingSubagentRequest: "approval" })).toBe(
+      "approval",
+    );
+    expect(resolveBackgroundThreadRequest({ ...quiet, pendingSubagentRequest: "user_input" })).toBe(
+      "input",
+    );
+    expect(resolveBackgroundThreadRequest({ ...quiet, pendingSubagentRequest: null })).toBeNull();
   });
 });

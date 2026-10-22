@@ -9,6 +9,7 @@ export const THREAD_STATUS_TEXT = {
   input: "Needs your input",
   done: "Done",
   failed: "Failed",
+  stopped: "Stopped",
 } as const;
 
 export interface ThreadActivitySnapshot {
@@ -45,7 +46,7 @@ const STARTING_RUN_STATUSES: ReadonlySet<OrchestrationV2RunStatus | null> = new 
   "starting",
 ]);
 
-function runOutcomeText(status: OrchestrationV2RunStatus | null): string | null {
+export function runOutcomeText(status: OrchestrationV2RunStatus | null): string | null {
   switch (status) {
     case "completed":
       return THREAD_STATUS_TEXT.done;
@@ -53,7 +54,7 @@ function runOutcomeText(status: OrchestrationV2RunStatus | null): string | null 
       return THREAD_STATUS_TEXT.failed;
     case "interrupted":
     case "cancelled":
-      return "Stopped";
+      return THREAD_STATUS_TEXT.stopped;
     default:
       return null;
   }
