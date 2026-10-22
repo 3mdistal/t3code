@@ -7,8 +7,12 @@ export interface BackgroundThreadSnapshot {
   readonly key: string;
   readonly title: string;
   readonly request: "approval" | "input" | null;
+  /** Null for a subagent's request, which the parent's shell only knows by kind. */
+  readonly requestId: string | null;
   readonly runId: RunId | null;
   readonly runStatus: OrchestrationV2RunStatus | null;
+  /** The run doing work now, which can be older than a queued run cancelled while it ran. */
+  readonly activeRunId: RunId | null;
   /** A snoozed thread stays hidden until its timer, so it stays quiet too. */
   readonly snoozed: boolean;
 }
@@ -30,6 +34,7 @@ export function resolveBackgroundThreadRequest(
 
 interface BackgroundThreadMemoryEntry {
   readonly request: BackgroundThreadSnapshot["request"];
+  readonly requestId: string | null;
   /** The last run whose ending is known, so each run's ending is announced once. */
   readonly settledRunId: RunId | null;
 }
@@ -56,13 +61,21 @@ export function nextBackgroundThreadAnnouncement(
     const settled = outcome !== null || thread.runStatus === "rolled_back";
     memory.set(thread.key, {
       request: thread.request,
+      requestId: thread.requestId,
       settledRunId: settled ? thread.runId : (before?.settledRunId ?? null),
     });
     if (before === undefined || thread.key === openThreadKey || thread.snoozed) continue;
-    if (thread.request !== null && thread.request !== before.request) {
+    if (
+      thread.request !== null &&
+      (thread.request !== before.request || thread.requestId !== before.requestId)
+    ) {
       announcements.push(`${THREAD_STATUS_TEXT[thread.request]}: ${thread.title}`);
     }
-    if (outcome !== null && thread.runId !== before.settledRunId) {
+    // While another run still works, the latest run's ending (a queued message
+    // cancelled before it started) isn't the thread finishing. The shell then
+    // only reports the latest run, so the working run's own ending stays quiet.
+    const anotherRunWorking = thread.activeRunId !== null && thread.activeRunId !== thread.runId;
+    if (outcome !== null && thread.runId !== before.settledRunId && !anotherRunWorking) {
       announcements.push(`${outcome}: ${thread.title}`);
     }
   }

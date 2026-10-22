@@ -20,8 +20,10 @@ function thread(
     key,
     title,
     request: null,
+    requestId: null,
     runId: firstRun,
     runStatus: "running",
+    activeRunId: null,
     snoozed: false,
     ...state,
   };
@@ -80,6 +82,28 @@ describe("nextBackgroundThreadAnnouncement", () => {
         { threads: [login({ runId: RunId.make("run-3"), runStatus: "rolled_back" })] },
       ]),
     ).toEqual(["Done: Fix login redirect", "Done: Fix login redirect"]);
+  });
+
+  it("announces a second request of the same kind", () => {
+    expect(
+      speak([
+        { threads: [login()] },
+        { threads: [login({ request: "approval", requestId: "request-1" })] },
+        { threads: [login({ request: "approval", requestId: "request-2" })] },
+      ]),
+    ).toEqual(["Needs approval: Fix login redirect", "Needs approval: Fix login redirect"]);
+  });
+
+  it("doesn't call a thread stopped when a queued message is cancelled while it works", () => {
+    expect(
+      speak([
+        { threads: [login({ activeRunId: firstRun })] },
+        {
+          threads: [login({ runId: secondRun, runStatus: "cancelled", activeRunId: firstRun })],
+        },
+        { threads: [login({ runId: secondRun, runStatus: "cancelled" })] },
+      ]),
+    ).toEqual([]);
   });
 
   it("stays quiet for threads it sees for the first time, like on launch or reconnect", () => {

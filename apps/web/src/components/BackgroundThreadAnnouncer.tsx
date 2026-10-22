@@ -43,8 +43,10 @@ export function BackgroundThreadAnnouncer() {
         key: scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
         title: thread.title,
         request: resolveBackgroundThreadRequest(thread),
+        requestId: thread.source.pendingRuntimeRequest?.id ?? null,
         runId: thread.latestRun?.runId ?? null,
         runStatus: thread.latestRun?.status ?? null,
+        activeRunId: thread.runtime?.activeRunId ?? null,
         snoozed: effectiveSnoozed(thread, { now }),
       });
     }
