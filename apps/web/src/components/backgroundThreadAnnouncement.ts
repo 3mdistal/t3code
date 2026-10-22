@@ -17,19 +17,21 @@ export interface BackgroundThreadSnapshot {
   readonly snoozed: boolean;
 }
 
+/** The request and its id come from the same source, so a subagent's request never takes the parent's id. */
 export function resolveBackgroundThreadRequest(
   thread: Pick<
     SidebarThreadSummary,
     "hasPendingApprovals" | "hasPendingUserInput" | "pendingSubagentRequest"
-  >,
-): BackgroundThreadSnapshot["request"] {
-  if (thread.hasPendingApprovals || thread.pendingSubagentRequest === "approval") {
-    return "approval";
-  }
-  if (thread.hasPendingUserInput || thread.pendingSubagentRequest === "user_input") {
-    return "input";
-  }
-  return null;
+  > & {
+    readonly source: Pick<SidebarThreadSummary["source"], "pendingRuntimeRequest">;
+  },
+): Pick<BackgroundThreadSnapshot, "request" | "requestId"> {
+  const ownRequestId = thread.source.pendingRuntimeRequest?.id ?? null;
+  if (thread.hasPendingApprovals) return { request: "approval", requestId: ownRequestId };
+  if (thread.pendingSubagentRequest === "approval") return { request: "approval", requestId: null };
+  if (thread.hasPendingUserInput) return { request: "input", requestId: ownRequestId };
+  if (thread.pendingSubagentRequest === "user_input") return { request: "input", requestId: null };
+  return { request: null, requestId: null };
 }
 
 interface BackgroundThreadMemoryEntry {

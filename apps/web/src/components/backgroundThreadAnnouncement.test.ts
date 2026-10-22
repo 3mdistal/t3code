@@ -1,4 +1,5 @@
-import { RunId } from "@t3tools/contracts";
+import { RunId, RuntimeRequestId } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -159,14 +160,30 @@ describe("nextBackgroundThreadAnnouncement", () => {
 });
 
 describe("resolveBackgroundThreadRequest", () => {
-  it("raises a subagent's request on the thread that owns its row", () => {
-    const quiet = { hasPendingApprovals: false, hasPendingUserInput: false };
-    expect(resolveBackgroundThreadRequest({ ...quiet, pendingSubagentRequest: "approval" })).toBe(
-      "approval",
-    );
-    expect(resolveBackgroundThreadRequest({ ...quiet, pendingSubagentRequest: "user_input" })).toBe(
-      "input",
-    );
-    expect(resolveBackgroundThreadRequest({ ...quiet, pendingSubagentRequest: null })).toBeNull();
+  const question = (id: string) => ({
+    id: RuntimeRequestId.make(id),
+    kind: "user_input" as const,
+    createdAt: DateTime.makeUnsafe(0),
+  });
+  const childApproval = (parentQuestion: string | null) =>
+    resolveBackgroundThreadRequest({
+      hasPendingApprovals: false,
+      hasPendingUserInput: parentQuestion !== null,
+      pendingSubagentRequest: "approval",
+      source: { pendingRuntimeRequest: parentQuestion === null ? null : question(parentQuestion) },
+    });
+
+  it("raises a subagent's request on the parent without borrowing the parent's request id", () => {
+    expect(childApproval(null)).toEqual({ request: "approval", requestId: null });
+    // The parent's own questions come and go while the child's approval waits.
+    expect(
+      speak([
+        { threads: [login()] },
+        { threads: [login(childApproval(null))] },
+        { threads: [login(childApproval("question-1"))] },
+        { threads: [login(childApproval("question-2"))] },
+        { threads: [login(childApproval(null))] },
+      ]),
+    ).toEqual(["Needs approval: Fix login redirect"]);
   });
 });

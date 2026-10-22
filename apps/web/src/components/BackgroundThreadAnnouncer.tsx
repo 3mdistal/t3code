@@ -42,8 +42,7 @@ export function BackgroundThreadAnnouncer() {
       snapshots.push({
         key: scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
         title: thread.title,
-        request: resolveBackgroundThreadRequest(thread),
-        requestId: thread.source.pendingRuntimeRequest?.id ?? null,
+        ...resolveBackgroundThreadRequest(thread),
         runId: thread.latestRun?.runId ?? null,
         runStatus: thread.latestRun?.status ?? null,
         activeRunId: thread.runtime?.activeRunId ?? null,
