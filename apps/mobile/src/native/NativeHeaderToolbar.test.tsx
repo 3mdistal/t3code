@@ -1,5 +1,5 @@
 import type { NativeStackHeaderItem } from "@react-navigation/native-stack";
-import { act, createContext, type ReactElement } from "react";
+import { act, createContext, useState, type ReactElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, expect, it, vi } from "vite-plus/test";
 
@@ -58,6 +58,39 @@ function DocumentToolbar(props: { readonly path: string; readonly placement: Pla
         </NativeHeaderToolbar.MenuAction>
       </NativeHeaderToolbar.Menu>
     </NativeHeaderToolbar>
+  );
+}
+
+function PairingForm(props: {
+  readonly placement: Placement;
+  readonly onPair: (host: string, code: string) => void;
+}) {
+  const [host, setHost] = useState("");
+  const [code, setCode] = useState("");
+  const pair = () => props.onPair(host, code);
+  return (
+    <>
+      <input
+        aria-label="Host"
+        value={host}
+        onInput={(event) => setHost(event.currentTarget.value)}
+      />
+      <input
+        aria-label="Code"
+        value={code}
+        onInput={(event) => setCode(event.currentTarget.value)}
+      />
+      <NativeHeaderToolbar placement={props.placement}>
+        <NativeHeaderToolbar.Button label="Pair" disabled={!host} onPress={pair} />
+        <NativeHeaderToolbar.Menu title="Pairing">
+          <NativeHeaderToolbar.Menu title="Actions">
+            <NativeHeaderToolbar.MenuAction disabled={!host} onPress={pair}>
+              Pair
+            </NativeHeaderToolbar.MenuAction>
+          </NativeHeaderToolbar.Menu>
+        </NativeHeaderToolbar.Menu>
+      </NativeHeaderToolbar>
+    </>
   );
 }
 
@@ -132,6 +165,53 @@ it.each(["left", "right", "bottom"] as const)(
     openRenderedDocument();
 
     expect(harness.openedDocuments).toEqual(["first/guide.pdf", "second/guide.pdf"]);
+  },
+);
+
+it.each(["left", "right", "bottom"] as const)(
+  "pairs with current form values through retained %s button and nested menu actions",
+  (placement) => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const container = document.createElement("div");
+    root = createRoot(container);
+    const onPair = vi.fn();
+    act(() => root!.render(<PairingForm placement={placement} onPair={onPair} />));
+
+    const edit = (label: string, value: string) => {
+      const input = container.querySelector<HTMLInputElement>(`input[aria-label="${label}"]`)!;
+      act(() => {
+        input.value = value;
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+    };
+    edit("Host", "h");
+
+    const button = harness.renderedItems[0];
+    if (button?.type !== "button") throw new Error("Expected the native Pair button");
+    expect(button.disabled).toBe(false);
+    const menu = harness.renderedItems[1];
+    if (menu?.type !== "menu") throw new Error("Expected the native pairing menu");
+    const submenu = menu.menu.items[0];
+    if (submenu?.type !== "submenu") throw new Error("Expected the nested actions menu");
+    const action = submenu.items[0];
+    if (action?.type !== "action") throw new Error("Expected the native Pair action");
+    expect(action.disabled).toBe(false);
+    const applied = harness.setOptionsCalls;
+    const params = harness.params;
+
+    edit("Host", "https://my-server.example");
+    edit("Code", "123456");
+
+    expect(harness.params).toBe(params);
+    expect(harness.setOptionsCalls).toBe(applied);
+    expect(harness.renderedItems[0]).toBe(button);
+    expect(harness.renderedItems[1]).toBe(menu);
+    button.onPress?.();
+    action.onPress?.();
+    expect(onPair.mock.calls).toEqual([
+      ["https://my-server.example", "123456"],
+      ["https://my-server.example", "123456"],
+    ]);
   },
 );
 

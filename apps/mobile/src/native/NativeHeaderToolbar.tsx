@@ -8,8 +8,10 @@ import type {
 import {
   Children,
   isValidElement,
+  useCallback,
   useLayoutEffect,
   useMemo,
+  useRef,
   use,
   type ReactElement,
   type ReactNode,
@@ -226,6 +228,34 @@ function collectToolbarItems(children: ReactNode): NativeToolbarItem[] {
   return items;
 }
 
+function stabilizeItemCallbacks<
+  T extends NativeToolbarItem | NativeStackHeaderItemMenu["menu"]["items"][number],
+>(item: T, path: string, register: (path: string, handler: () => void) => () => void): T {
+  if (item.type === "button" || item.type === "action") {
+    return { ...item, onPress: register(path, item.onPress) };
+  }
+  if (item.type === "menu") {
+    return {
+      ...item,
+      menu: {
+        ...item.menu,
+        items: item.menu.items.map((child, index) =>
+          stabilizeItemCallbacks(child, `${path}.${index}`, register),
+        ),
+      },
+    };
+  }
+  if (item.type === "submenu") {
+    return {
+      ...item,
+      items: item.items.map((child, index) =>
+        stabilizeItemCallbacks(child, `${path}.${index}`, register),
+      ),
+    };
+  }
+  return item;
+}
+
 function NativeHeaderToolbarRoot(props: {
   readonly placement?: "left" | "right" | "bottom";
   readonly children?: ReactNode;
@@ -234,7 +264,24 @@ function NativeHeaderToolbarRoot(props: {
   const route = useRoute();
   const tabActivity = use(NativeWorkspaceTabActivityContext);
   const isTabActive = tabActivity?.isActive;
-  const items = useMemo(() => collectToolbarItems(props.children), [props.children]);
+  const committedHandlers = useRef(new Map<string, () => void>());
+  const dispatch = useCallback((path: string) => committedHandlers.current.get(path)?.(), []);
+  const { items, handlers } = useMemo(() => {
+    const handlers = new Map<string, () => void>();
+    const register = (path: string, handler: () => void) => {
+      handlers.set(path, handler);
+      return () => dispatch(path);
+    };
+    const items = collectToolbarItems(props.children).map((item, index) =>
+      stabilizeItemCallbacks(item, String(index), register),
+    );
+    return { items, handlers };
+  }, [props.children, dispatch]);
+  // Native actions outlive their render when screen options dedupe unchanged presentation.
+  // Publish handlers on every commit, even when the native item factories never run again.
+  useLayoutEffect(() => {
+    committedHandlers.current = handlers;
+  });
   // UIKit's search placement item belongs to the toolbar, never a header group.
   const headerItems = useMemo(
     () => items.filter((item): item is NativeStackHeaderItem => item.type !== "searchBarPlacement"),
