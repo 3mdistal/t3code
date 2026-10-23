@@ -4,6 +4,9 @@ const expoMocks = vi.hoisted(() => ({
   requireNativeView: vi.fn(),
 }));
 
+vi.mock("react-native", () => ({ View: () => null }));
+vi.mock("../../components/ui/EmptyState", () => ({ EmptyState: () => null }));
+
 vi.mock("expo", () => ({
   requireNativeView: expoMocks.requireNativeView,
 }));
