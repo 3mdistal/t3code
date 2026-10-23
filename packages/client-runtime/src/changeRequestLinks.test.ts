@@ -1,4 +1,9 @@
-import { EnvironmentId, ProjectId, type RepositoryIdentity } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  ProjectId,
+  type RepositoryIdentity,
+  SourceControlProviderKind,
+} from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -15,7 +20,7 @@ describe("findProjectForChangeRequest", () => {
     const projects = [
       project({
         canonicalKey: "gitlab.com/t3tools/platform/t3code",
-        provider: "gitlab",
+        provider: SourceControlProviderKind.make("gitlab"),
         displayName: "t3tools/platform/t3code",
         owner: "t3tools",
         name: "t3code",
@@ -34,7 +39,7 @@ describe("findProjectForChangeRequest", () => {
     const projects = [
       project({
         canonicalKey: "github.com/pingdotgg/t3code",
-        provider: "github",
+        provider: SourceControlProviderKind.make("github"),
         owner: "pingdotgg",
         name: "t3code",
       }),
@@ -56,7 +61,7 @@ describe("resolvePullRequestPreviewTarget", () => {
     environmentId,
     repositoryIdentity: {
       canonicalKey: "github.com/acme/web",
-      provider: "github",
+      provider: SourceControlProviderKind.make("github"),
       displayName: "acme/web",
       locator: { source: "git-remote", remoteName: "origin", remoteUrl: "git@github.com:acme/web" },
     } satisfies RepositoryIdentity,
@@ -81,7 +86,7 @@ describe("resolvePullRequestPreviewTarget", () => {
 describe("projectChangeRequestUrl", () => {
   const identity = (provider: string): RepositoryIdentity => ({
     canonicalKey: "github.com/acme/default",
-    provider,
+    provider: SourceControlProviderKind.make(provider),
     locator: {
       source: "git-remote",
       remoteName: "origin",

@@ -5,7 +5,6 @@ import type {
   RepositoryIdentity,
 } from "@t3tools/contracts";
 import type { ChangeRequestLink } from "@t3tools/source-control-core/client/definition";
-import { sourceControlRepositorySelector } from "@t3tools/shared/sourceControl";
 
 import { sourceControlClients } from "./sourceControlClients.ts";
 
@@ -53,7 +52,8 @@ export function resolvePullRequestPreviewTarget({
     input: {
       projectId: project.id,
       host: parsed.authority ?? parsed.host,
-      repository: sourceControlRepositorySelector(project.repositoryIdentity) ?? parsed.repository,
+      repository:
+        sourceControlClients.repositorySelector(project.repositoryIdentity) ?? parsed.repository,
       number: parsed.number,
     },
   };
