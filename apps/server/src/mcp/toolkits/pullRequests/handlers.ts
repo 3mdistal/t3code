@@ -15,7 +15,7 @@ import * as Orchestrator from "../../../orchestration-v2/Orchestrator.ts";
 import * as ProjectService from "../../../project/ProjectService.ts";
 import * as PullRequestReviewGuideService from "../../../pullRequest/PullRequestReviewGuideService.ts";
 import { pullRequestSyncKey } from "../../../pullRequest/pullRequestSyncKey.ts";
-import { sourceControlClients } from "../../../sourceControl/sourceControlClients.ts";
+import { sourceControlDefinitions } from "../../../sourceControl/sourceControlDefinitions.ts";
 import {
   normalizeThreadPullRequestKey,
   resolveThreadPullRequestChains,
@@ -62,7 +62,7 @@ function projectHostAndProvider(project: OrchestrationProjectShell | undefined):
   const kind = identity?.provider ?? null;
   if (!identity || kind === null) return { host: null, kind: null };
   return {
-    host: sourceControlClients.changeRequestHost(identity, kind),
+    host: sourceControlDefinitions.changeRequestHost(identity, kind),
     kind,
   };
 }
@@ -72,7 +72,7 @@ const resolveTarget = Effect.fn("PullRequestsToolkit.resolveTarget")(function* (
   project: OrchestrationProjectShell | undefined,
 ) {
   if (input.url !== undefined) {
-    const parsed = sourceControlClients.parseChangeRequestUrl(input.url)?.link;
+    const parsed = sourceControlDefinitions.parseChangeRequestUrl(input.url)?.link;
     if (parsed === undefined) {
       return yield* new PullRequestUrlInvalidError({});
     }
@@ -91,7 +91,7 @@ const resolveTarget = Effect.fn("PullRequestsToolkit.resolveTarget")(function* (
   const url =
     projectHost.kind === null
       ? null
-      : sourceControlClients.get(projectHost.kind).changeRequestUrl({
+      : sourceControlDefinitions.get(projectHost.kind).changeRequestUrl({
           host,
           repository,
           number: input.number,
@@ -169,7 +169,8 @@ function projectForPullRequest(
         : pullRequestSyncKey(
             {
               projectId: project.id,
-              repository: sourceControlClients.repositorySelector(project.repositoryIdentity) ?? "",
+              repository:
+                sourceControlDefinitions.repositorySelector(project.repositoryIdentity) ?? "",
               number: 1,
             },
             project.repositoryIdentity,
