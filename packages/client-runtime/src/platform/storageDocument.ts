@@ -9,7 +9,7 @@ import {
 } from "../connection/catalog.ts";
 import { type ConnectionTarget, PersistedConnectionTarget } from "../connection/model.ts";
 import * as TokenStore from "../authorization/tokenStore.ts";
-import { StoredGitHubRoutingPermission } from "../connection/githubRoutingPermissions.ts";
+import { StoredPullRequestRoutingPermission } from "../connection/pullRequestRoutingPermissions.ts";
 
 export const StoredConnectionCredential = Schema.Struct({
   connectionId: Schema.String,
@@ -23,7 +23,11 @@ export const ConnectionCatalogDocument = Schema.Struct({
   profiles: Schema.Array(ConnectionProfile),
   credentials: Schema.Array(StoredConnectionCredential),
   remoteDpopTokens: Schema.Array(TokenStore.RemoteDpopAccessToken),
-  githubRoutingPermissions: Schema.optionalKey(Schema.Array(StoredGitHubRoutingPermission)),
+  pullRequestRoutingPermissions: Schema.optionalKey(
+    Schema.Array(StoredPullRequestRoutingPermission),
+  ),
+  /** The same grants under their name before the rename, read until the first write replaces them. */
+  githubRoutingPermissions: Schema.optionalKey(Schema.Array(StoredPullRequestRoutingPermission)),
   disabledEnvironmentIds: Schema.Array(EnvironmentId).pipe(
     Schema.withDecodingDefaultKey(Effect.succeed([])),
   ),
@@ -154,7 +158,7 @@ export function removeConnectionFromCatalog(
   environmentId: EnvironmentId,
 ): ConnectionCatalogDocument {
   const next = setRoutesInCatalog(document, environmentId, []);
-  return {
+  const withoutConnection: ConnectionCatalogDocument = {
     ...next,
     remoteDpopTokens: removeCatalogValue(
       next.remoteDpopTokens,
@@ -166,14 +170,28 @@ export function removeConnectionFromCatalog(
       (value) => value,
       environmentId,
     ),
-    ...(next.githubRoutingPermissions === undefined
-      ? {}
-      : {
-          githubRoutingPermissions: next.githubRoutingPermissions.filter(
-            (permission) => permission.environmentId !== environmentId,
-          ),
-        }),
   };
+  const permissions = pullRequestRoutingPermissionsInCatalog(next);
+  return permissions.some((permission) => permission.environmentId === environmentId)
+    ? setPullRequestRoutingPermissionsInCatalog(
+        withoutConnection,
+        permissions.filter((permission) => permission.environmentId !== environmentId),
+      )
+    : withoutConnection;
+}
+
+export function pullRequestRoutingPermissionsInCatalog(
+  document: ConnectionCatalogDocument,
+): ReadonlyArray<StoredPullRequestRoutingPermission> {
+  return document.pullRequestRoutingPermissions ?? document.githubRoutingPermissions ?? [];
+}
+
+export function setPullRequestRoutingPermissionsInCatalog(
+  document: ConnectionCatalogDocument,
+  permissions: ReadonlyArray<StoredPullRequestRoutingPermission>,
+): ConnectionCatalogDocument {
+  const { githubRoutingPermissions: _legacy, ...rest } = document;
+  return { ...rest, pullRequestRoutingPermissions: permissions };
 }
 
 export function setConnectionEnabledInCatalog(

@@ -1,6 +1,7 @@
 import {
   ConnectionTransientError,
   PrimaryConnectionTarget,
+  pullRequestRoutingConnectionKey,
 } from "@t3tools/client-runtime/connection";
 import { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { ConnectionCatalogDocument, Persistence } from "@t3tools/client-runtime/platform";
@@ -197,7 +198,59 @@ describe("IndexedDB connection closed without a close event", () => {
   );
 });
 
-describe("browser GitHub routing permissions", () => {
+describe("browser pull request routing permissions", () => {
+  it.effect("reads grants saved under the old key until a write replaces them", () =>
+    Effect.gen(function* () {
+      const values = new Map<string, string>();
+      const localStorage: Storage = {
+        get length() {
+          return values.size;
+        },
+        key: (index) => [...values.keys()][index] ?? null,
+        getItem: (key) => values.get(key) ?? null,
+        setItem: (key, value) => {
+          values.set(key, value);
+        },
+        removeItem: (key) => {
+          values.delete(key);
+        },
+        clear: () => {
+          values.clear();
+        },
+      };
+      const entry = {
+        target: new PrimaryConnectionTarget({
+          environmentId: EnvironmentId.make("first"),
+          label: "First",
+          httpBaseUrl: "http://localhost:3000",
+          wsBaseUrl: "ws://localhost:3000",
+        }),
+        profile: Option.none(),
+        enabled: true,
+      };
+      const legacy = {
+        environmentId: "first",
+        connectionKey: pullRequestRoutingConnectionKey(entry),
+        permission: "read",
+      };
+      values.set("t3code:github-routing:first", JSON.stringify(legacy));
+      const permissions = ConnectionStorage.makeBrowserPullRequestRoutingPermissions(
+        Object.assign(new EventTarget(), { localStorage }),
+      );
+      expect(yield* permissions.get(entry)).toBe("read");
+      expect(Option.getOrThrow(yield* Stream.runHead(permissions.changes))).toEqual([legacy]);
+
+      yield* permissions.set(entry, "off");
+      expect([...values.keys()]).toEqual([]);
+      expect(yield* permissions.get(entry)).toBe("off");
+
+      values.set("t3code:github-routing:first", JSON.stringify(legacy));
+      yield* permissions.set(entry, "read-write");
+      expect([...values.keys()]).toEqual(["t3code:pull-request-routing:first"]);
+      expect(yield* permissions.get(entry)).toBe("read-write");
+    }).pipe(Effect.scoped),
+  );
+
   it.effect("revokes across runtimes before storage events and resists stale catalog writes", () =>
     Effect.gen(function* () {
       const values = new Map<string, string>();
@@ -219,8 +272,8 @@ describe("browser GitHub routing permissions", () => {
       };
       const firstBrowser = Object.assign(new EventTarget(), { localStorage });
       const secondBrowser = Object.assign(new EventTarget(), { localStorage });
-      const first = ConnectionStorage.makeBrowserGitHubRoutingPermissions(firstBrowser);
-      const second = ConnectionStorage.makeBrowserGitHubRoutingPermissions(secondBrowser);
+      const first = ConnectionStorage.makeBrowserPullRequestRoutingPermissions(firstBrowser);
+      const second = ConnectionStorage.makeBrowserPullRequestRoutingPermissions(secondBrowser);
       const entry = {
         target: new PrimaryConnectionTarget({
           environmentId: EnvironmentId.make("first"),
@@ -244,7 +297,7 @@ describe("browser GitHub routing permissions", () => {
       const oldPermissions = Option.getOrThrow(yield* Stream.runHead(first.changes));
       const staleCatalog = yield* ConnectionStorage.makeCatalogStore({
         read: Effect.succeed(
-          encodeCatalog({ ...emptyCatalog, githubRoutingPermissions: oldPermissions }),
+          encodeCatalog({ ...emptyCatalog, pullRequestRoutingPermissions: oldPermissions }),
         ),
         write: () => Effect.void,
       });
@@ -268,7 +321,7 @@ describe("browser GitHub routing permissions", () => {
       expect(yield* second.get(entry)).toBe("off");
       expect(yield* first.get(other)).toBe("read");
       expect(
-        yield* ConnectionStorage.makeBrowserGitHubRoutingPermissions(firstBrowser).get(entry),
+        yield* ConnectionStorage.makeBrowserPullRequestRoutingPermissions(firstBrowser).get(entry),
       ).toBe("off");
 
       yield* first.set(entry, "read-write");

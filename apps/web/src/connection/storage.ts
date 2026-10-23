@@ -23,10 +23,10 @@ import {
   ConnectionBlockedError,
   CredentialStore,
   ProfileStore,
-  GitHubRoutingPermissions,
-  StoredGitHubRoutingPermission,
-  gitHubRoutingConnectionKey,
-  gitHubRoutingPermissionFor,
+  PullRequestRoutingPermissions,
+  StoredPullRequestRoutingPermission,
+  pullRequestRoutingConnectionKey,
+  pullRequestRoutingPermissionFor,
 } from "@t3tools/client-runtime/connection";
 import { EnvironmentId, ServerConfig, ThreadId, VcsListRefsResult } from "@t3tools/contracts";
 import * as Context from "effect/Context";
@@ -496,85 +496,98 @@ export const makeCatalogStore = Effect.fn("web.connectionStorage.makeCatalogStor
   return { read, update } satisfies CatalogStore;
 });
 
-const GITHUB_ROUTING_KEY_PREFIX = "t3code:github-routing:";
-const GITHUB_ROUTING_CHANGED = "t3code:github-routing-changed";
-const isStoredGitHubRoutingPermission = Schema.is(StoredGitHubRoutingPermission);
-const encodeStoredGitHubRoutingPermission = Schema.encodeSync(
-  Schema.fromJsonString(StoredGitHubRoutingPermission),
+const PULL_REQUEST_ROUTING_KEY_PREFIX = "t3code:pull-request-routing:";
+/** Where grants were saved before the rename; read when no grant exists under the new key. */
+const LEGACY_PULL_REQUEST_ROUTING_KEY_PREFIX = "t3code:github-routing:";
+const PULL_REQUEST_ROUTING_CHANGED = "t3code:pull-request-routing-changed";
+const isStoredPullRequestRoutingPermission = Schema.is(StoredPullRequestRoutingPermission);
+const encodeStoredPullRequestRoutingPermission = Schema.encodeSync(
+  Schema.fromJsonString(StoredPullRequestRoutingPermission),
 );
 
+const isPullRequestRoutingKey = (key: string) =>
+  key.startsWith(PULL_REQUEST_ROUTING_KEY_PREFIX) ||
+  key.startsWith(LEGACY_PULL_REQUEST_ROUTING_KEY_PREFIX);
+
 /** Each grant has its own key so stale tabs and unrelated catalog saves cannot restore trust. */
-export function makeBrowserGitHubRoutingPermissions(
+export function makeBrowserPullRequestRoutingPermissions(
   browser: Pick<Window, "localStorage"> & EventTarget = window,
 ) {
-  const read = (key: string): StoredGitHubRoutingPermission | null => {
+  // Every write removes the legacy key, so a legacy grant is current while no new key exists.
+  const read = (environmentId: string): StoredPullRequestRoutingPermission | null => {
     try {
-      const raw = browser.localStorage.getItem(key);
+      const raw =
+        browser.localStorage.getItem(`${PULL_REQUEST_ROUTING_KEY_PREFIX}${environmentId}`) ??
+        browser.localStorage.getItem(`${LEGACY_PULL_REQUEST_ROUTING_KEY_PREFIX}${environmentId}`);
       const value: unknown = raw === null ? null : JSON.parse(raw);
-      return isStoredGitHubRoutingPermission(value) &&
-        key === `${GITHUB_ROUTING_KEY_PREFIX}${value.environmentId}`
+      return isStoredPullRequestRoutingPermission(value) && value.environmentId === environmentId
         ? value
         : null;
     } catch {
       return null;
     }
   };
-  const readAll = (): ReadonlyArray<StoredGitHubRoutingPermission> => {
+  const readAll = (): ReadonlyArray<StoredPullRequestRoutingPermission> => {
     try {
-      const values: StoredGitHubRoutingPermission[] = [];
+      const environmentIds = new Set<string>();
       const storage = browser.localStorage;
       for (let index = 0; index < storage.length; index++) {
         const key = storage.key(index);
-        if (key?.startsWith(GITHUB_ROUTING_KEY_PREFIX)) {
-          const value = read(key);
-          if (value !== null) values.push(value);
+        for (const prefix of [
+          PULL_REQUEST_ROUTING_KEY_PREFIX,
+          LEGACY_PULL_REQUEST_ROUTING_KEY_PREFIX,
+        ]) {
+          if (key?.startsWith(prefix)) environmentIds.add(key.slice(prefix.length));
         }
       }
-      return values;
+      return [...environmentIds].flatMap((environmentId) => read(environmentId) ?? []);
     } catch {
       return [];
     }
   };
-  const write = (environmentId: EnvironmentId, value: StoredGitHubRoutingPermission | null) =>
+  const write = (environmentId: EnvironmentId, value: StoredPullRequestRoutingPermission | null) =>
     Effect.try({
       try: () => {
-        const key = `${GITHUB_ROUTING_KEY_PREFIX}${environmentId}`;
+        const key = `${PULL_REQUEST_ROUTING_KEY_PREFIX}${environmentId}`;
         if (value === null) browser.localStorage.removeItem(key);
-        else browser.localStorage.setItem(key, encodeStoredGitHubRoutingPermission(value));
-        browser.dispatchEvent(new Event(GITHUB_ROUTING_CHANGED));
+        else browser.localStorage.setItem(key, encodeStoredPullRequestRoutingPermission(value));
+        browser.localStorage.removeItem(
+          `${LEGACY_PULL_REQUEST_ROUTING_KEY_PREFIX}${environmentId}`,
+        );
+        browser.dispatchEvent(new Event(PULL_REQUEST_ROUTING_CHANGED));
       },
-      catch: (cause) => catalogError("save GitHub routing permissions in", cause),
+      catch: (cause) => catalogError("save pull request routing permissions in", cause),
     });
-  return GitHubRoutingPermissions.of({
+  return PullRequestRoutingPermissions.of({
     get: (entry) =>
       Effect.sync(() => {
-        const value = read(`${GITHUB_ROUTING_KEY_PREFIX}${entry.target.environmentId}`);
-        return gitHubRoutingPermissionFor(entry, value === null ? [] : [value]);
+        const value = read(entry.target.environmentId);
+        return pullRequestRoutingPermissionFor(entry, value === null ? [] : [value]);
       }),
-    changes: Stream.callback<ReadonlyArray<StoredGitHubRoutingPermission>>((queue) =>
+    changes: Stream.callback<ReadonlyArray<StoredPullRequestRoutingPermission>>((queue) =>
       Effect.acquireRelease(
         Effect.sync(() => {
           const listener = (event: Event) => {
             if (event.type === "storage") {
               const key = (event as StorageEvent).key;
-              if (key !== null && !key?.startsWith(GITHUB_ROUTING_KEY_PREFIX)) return;
+              if (key !== null && !isPullRequestRoutingKey(key)) return;
             }
             Queue.offerUnsafe(queue, readAll());
           };
           browser.addEventListener("storage", listener);
-          browser.addEventListener(GITHUB_ROUTING_CHANGED, listener);
+          browser.addEventListener(PULL_REQUEST_ROUTING_CHANGED, listener);
           Queue.offerUnsafe(queue, readAll());
           return listener;
         }),
         (listener) =>
           Effect.sync(() => {
             browser.removeEventListener("storage", listener);
-            browser.removeEventListener(GITHUB_ROUTING_CHANGED, listener);
+            browser.removeEventListener(PULL_REQUEST_ROUTING_CHANGED, listener);
           }),
       ).pipe(Effect.asVoid),
     ),
     set: (entry, permission) => {
-      const connectionKey = gitHubRoutingConnectionKey(entry);
+      const connectionKey = pullRequestRoutingConnectionKey(entry);
       if (connectionKey === null)
         return Effect.fail(
           new ConnectionBlockedError({
@@ -623,7 +636,7 @@ export const layer = Layer.effectContext(
       (owned) => owned.close,
     );
     const catalog = yield* makeCatalogStore(makeCatalogBackend(database));
-    const githubRoutingPermissions = makeBrowserGitHubRoutingPermissions();
+    const pullRequestRoutingPermissions = makeBrowserPullRequestRoutingPermissions();
     // Remembers each thread row's encoding, so a save only encodes rows that changed.
     const encodeStoredShellSnapshot = makeStoredShellSnapshotEncoder({
       yieldToHost: yieldToBrowserTask,
@@ -930,7 +943,7 @@ export const layer = Layer.effectContext(
     });
 
     return Context.make(Persistence.ConnectionTargetStore, targetStore).pipe(
-      Context.add(GitHubRoutingPermissions, githubRoutingPermissions),
+      Context.add(PullRequestRoutingPermissions, pullRequestRoutingPermissions),
       Context.add(Persistence.ConnectionRegistrationStore, registrationStore),
       Context.add(ProfileStore.ConnectionProfileStore, profileStore),
       Context.add(CredentialStore.ConnectionCredentialStore, credentialStore),
