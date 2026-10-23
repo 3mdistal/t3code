@@ -12,6 +12,19 @@ import type { ReviewParsedDiff } from "../review/reviewModel";
 import { createPullRequestDiffHighlightFiles } from "./pullRequestDiffHighlightFiles";
 import { pullRequestTarget, type PullRequestDiffParams } from "./usePullRequestDiff";
 
+function traceSourceEndpoint(environmentId: string, url: string) {
+  try {
+    const endpoint = new URL(url);
+    traceDiffHighlight("source-endpoint", {
+      environment: diffHighlightTraceHash(environmentId),
+      origin: diffHighlightTraceHash(endpoint.origin),
+      port: endpoint.port || (endpoint.protocol === "https:" ? "443" : "80"),
+    });
+  } catch {
+    traceDiffHighlight("source-endpoint-invalid");
+  }
+}
+
 export function usePullRequestDiffHighlightFiles(
   params: PullRequestDiffParams,
   parsed: ReviewParsedDiff,
@@ -33,16 +46,7 @@ export function usePullRequestDiffHighlightFiles(
             ? profile.httpBaseUrl
             : undefined;
       if (url) {
-        try {
-          const endpoint = new URL(url);
-          traceDiffHighlight("source-endpoint", {
-            environment: diffHighlightTraceHash(environmentId),
-            origin: diffHighlightTraceHash(endpoint.origin),
-            port: endpoint.port || (endpoint.protocol === "https:" ? "443" : "80"),
-          });
-        } catch {
-          traceDiffHighlight("source-endpoint-invalid");
-        }
+        traceSourceEndpoint(environmentId, url);
       } else traceDiffHighlight("source-endpoint-unavailable");
     }
     return createPullRequestDiffHighlightFiles(
