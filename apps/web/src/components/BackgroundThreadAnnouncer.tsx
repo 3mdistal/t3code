@@ -4,6 +4,7 @@ import { effectiveSnoozed } from "@t3tools/client-runtime/state/thread-settled";
 import { useEffect, useRef } from "react";
 
 import { useComposerDraftStore } from "../composerDraftStore";
+import { useClientSettings } from "../hooks/useSettings";
 import { useThreadRouteTarget } from "../hooks/useThreadRouteTarget";
 import { useQuietThreadShells } from "../state/entities";
 import { liveShellEnvironmentIdsAtom } from "../state/shell";
@@ -22,6 +23,8 @@ import {
 export function BackgroundThreadAnnouncer() {
   const threads = useQuietThreadShells();
   const liveEnvironmentIds = useAtomValue(liveShellEnvironmentIdsAtom);
+  // In-app notification toasts land in a polite live region that already speaks these.
+  const toastsSpeak = useClientSettings((settings) => settings.inAppNotificationsEnabled);
   const routeTarget = useThreadRouteTarget();
   const routeDraftThread = useComposerDraftStore((store) =>
     routeTarget?.kind === "draft" ? store.getDraftSession(routeTarget.draftId) : null,
@@ -56,11 +59,11 @@ export function BackgroundThreadAnnouncer() {
     );
     memoryRef.current = memory;
     const region = regionRef.current;
-    if (region === null || announcement === null) return;
+    if (region === null || announcement === null || toastsSpeak) return;
     // Screen readers ignore a write that leaves the text unchanged, so a repeat
     // gets a trailing non-breaking space to count as new.
     region.textContent = region.textContent === announcement ? `${announcement} ` : announcement;
-  }, [threads, liveEnvironmentIds, openThreadKey]);
+  }, [threads, liveEnvironmentIds, openThreadKey, toastsSpeak]);
 
   // No role="status": Orca 50 maps it to a status bar in Chromium and drops its updates.
   return <div ref={regionRef} aria-live="polite" className="sr-only" />;
