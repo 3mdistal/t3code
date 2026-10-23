@@ -1,5 +1,7 @@
 import {
   EnvironmentId,
+  EnvironmentThemeId,
+  UsageLimitSourceId,
   type ServerConfig,
   type ServerConfigStreamEvent,
   type ServerLifecycleWelcomePayload,
@@ -17,6 +19,7 @@ import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
+import * as TestClock from "effect/testing/TestClock";
 import { RpcClientError } from "effect/rpc";
 import * as Socket from "effect/socket/Socket";
 
@@ -207,7 +210,165 @@ describe("update restart reconnect nudges", () => {
   );
 });
 
+const makeConfigPersistenceHarness = Effect.fn("test.makeConfigPersistenceHarness")(function* (
+  saveServerConfig: Persistence.EnvironmentCacheStore["Service"]["saveServerConfig"],
+) {
+  const events = yield* Queue.unbounded<ServerConfigStreamEvent>();
+  const client = {
+    [WS_METHODS.subscribeServerConfig]: () => Stream.fromQueue(events),
+  } as unknown as WsRpcProtocolClient;
+  const supervisor = EnvironmentSupervisor.EnvironmentSupervisor.of({
+    target: TARGET,
+    state: yield* SubscriptionRef.make(AVAILABLE_CONNECTION_STATE),
+    session: yield* SubscriptionRef.make(Option.some(session(client))),
+    prepared: yield* SubscriptionRef.make(Option.none<PreparedConnection>()),
+    connect: Effect.void,
+    disconnect: Effect.void,
+    retryNow: Effect.void,
+  });
+  const cache = Persistence.EnvironmentCacheStore.of({
+    loadShell: () => Effect.succeedNone,
+    saveShell: () => Effect.void,
+    loadThread: () => Effect.succeedNone,
+    saveThread: () => Effect.void,
+    removeThread: () => Effect.void,
+    loadServerConfig: () => Effect.succeedSome(CONFIG),
+    saveServerConfig,
+    loadVcsRefs: () => Effect.succeedNone,
+    saveVcsRefs: () => Effect.void,
+    removeVcsRefs: () => Effect.void,
+    clearVcsRefs: () => Effect.void,
+    clear: () => Effect.void,
+  });
+  const state = yield* makeEnvironmentServerConfigState({
+    environmentThemes: true,
+    usageLimitSources: true,
+  }).pipe(
+    Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+    Effect.provideService(Persistence.EnvironmentCacheStore, cache),
+  );
+  const send = Effect.fn("test.sendConfigEvent")(function* (event: ServerConfigStreamEvent) {
+    yield* Queue.offer(events, event);
+    return yield* SubscriptionRef.changes(state).pipe(
+      Stream.filter(Option.isSome),
+      Stream.map((value) => value.value),
+      Stream.filter((projection) => projection.latestEvent === event),
+      Stream.runHead,
+      Effect.map(Option.getOrThrow),
+    );
+  });
+  return { send };
+});
+
 describe("server state projection", () => {
+  it.effect("saves once across transient themes, usage sources and stall updates", () =>
+    Effect.gen(function* () {
+      const saved = yield* Ref.make<ReadonlyArray<ServerConfig>>([]);
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const h = yield* makeConfigPersistenceHarness((_id, config) =>
+            Ref.update(saved, (values) => [...values, config]),
+          );
+          yield* h.send(snapshotEvent(CONFIG));
+          yield* TestClock.adjust("500 millis");
+          expect((yield* Ref.get(saved)).length).toBe(1);
+          for (const event of [
+            {
+              version: 1,
+              type: "environmentThemesUpdated",
+              payload: {
+                themes: [
+                  {
+                    id: EnvironmentThemeId.make("theme-test"),
+                    name: "Test theme",
+                    appearance: "dark",
+                  },
+                ],
+              },
+            },
+            {
+              version: 1,
+              type: "usageLimitSourcesUpdated",
+              payload: {
+                sources: [
+                  {
+                    id: UsageLimitSourceId.make("source-test"),
+                    kind: "cliproxy",
+                    label: "Test source",
+                    checkedAt: "2026-10-20T07:50:37.633Z",
+                    accounts: [],
+                  },
+                ],
+              },
+            },
+            snapshotEvent({
+              ...CONFIG,
+              lastEventLoopStall: {
+                detectedAt: "2026-10-20T07:50:37.633Z",
+                durationMs: 1000,
+                loadAverage: 1,
+                cpuCount: 8,
+              },
+            }),
+          ] satisfies ReadonlyArray<ServerConfigStreamEvent>) {
+            const projection = yield* h.send(event);
+            expect(projection.latestEvent).toBe(event);
+            if (event.type === "environmentThemesUpdated")
+              expect(projection.config.environmentThemes).toEqual(event.payload.themes);
+            if (event.type === "usageLimitSourcesUpdated")
+              expect(projection.config.usageLimitSources).toEqual(event.payload.sources);
+            yield* TestClock.adjust("10 seconds");
+          }
+        }),
+      );
+      expect(yield* Ref.get(saved)).toEqual([CONFIG]);
+    }),
+  );
+
+  it.effect("flushes pending durable changes after a transient event", () =>
+    Effect.gen(function* () {
+      const saved = yield* Ref.make<ReadonlyArray<ServerConfig>>([]);
+      const changed = { ...CONFIG, keybindingsConfigPath: "/changed/keybindings.json" };
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const h = yield* makeConfigPersistenceHarness((_id, config) =>
+            Ref.update(saved, (values) => [...values, config]),
+          );
+          yield* h.send(snapshotEvent(CONFIG));
+          yield* TestClock.adjust("500 millis");
+          yield* h.send(snapshotEvent(changed));
+          yield* h.send({ version: 1, type: "environmentThemesUpdated", payload: { themes: [] } });
+        }),
+      );
+      expect(yield* Ref.get(saved)).toEqual([CONFIG, changed]);
+    }),
+  );
+
+  it.effect("retries a failed durable save on a transient event", () =>
+    Effect.gen(function* () {
+      const attempts = yield* Ref.make<ReadonlyArray<ServerConfig>>([]);
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const h = yield* makeConfigPersistenceHarness((_id, config) =>
+            Effect.gen(function* () {
+              const values = yield* Ref.updateAndGet(attempts, (values) => [...values, config]);
+              if (values.length === 1)
+                return yield* new Persistence.ConnectionPersistenceError({
+                  operation: "save-server-config",
+                  message: "test failure",
+                });
+            }),
+          );
+          yield* h.send(snapshotEvent(CONFIG));
+          yield* TestClock.adjust("500 millis");
+          yield* h.send({ version: 1, type: "usageLimitSourcesUpdated", payload: { sources: [] } });
+          yield* TestClock.adjust("10 seconds");
+        }),
+      );
+      expect(yield* Ref.get(attempts)).toEqual([CONFIG, CONFIG]);
+    }),
+  );
+
   it("only treats a legacy transport interruption as an unacknowledged handoff", () => {
     expect(isLegacyUpdateHandoffLoss(Cause.interrupt(1))).toBe(true);
     expect(

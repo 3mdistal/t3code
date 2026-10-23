@@ -383,13 +383,30 @@ export const makeEnvironmentServerConfigState = Effect.fn("EnvironmentServerConf
     );
     const persistence = yield* Queue.sliding<ServerConfig>(1);
     const pendingPersistence = yield* Ref.make<Option.Option<ServerConfig>>(Option.none());
+    let lastPersisted: ServerConfig | undefined;
 
     const persist = Effect.fn("EnvironmentServerConfigState.persist")(function* (
       config: ServerConfig,
     ) {
       // A cached stall would read as a fresh freeze on the next launch.
-      const { lastEventLoopStall: _stall, ...cacheable } = withoutEnvironmentThemes(config);
-      return yield* cache.saveServerConfig(environmentId, cacheable).pipe(
+      const {
+        environmentThemes: _themes,
+        usageLimitSources: _sources,
+        lastEventLoopStall: _stall,
+        ...cacheable
+      } = config;
+      const previous = lastPersisted;
+      if (
+        previous !== undefined &&
+        Object.keys(previous).length === Object.keys(cacheable).length &&
+        Object.entries(cacheable).every(
+          ([key, value]) =>
+            Object.hasOwn(previous, key) && previous[key as keyof ServerConfig] === value,
+        )
+      ) {
+        return true;
+      }
+      const saved = yield* cache.saveServerConfig(environmentId, cacheable).pipe(
         Effect.as(true),
         Effect.catch((error) =>
           Effect.logWarning("Could not persist cached server configuration.").pipe(
@@ -401,6 +418,8 @@ export const makeEnvironmentServerConfigState = Effect.fn("EnvironmentServerConf
           ),
         ),
       );
+      if (saved) lastPersisted = cacheable;
+      return saved;
     });
 
     const persistPending = Effect.fn("EnvironmentServerConfigState.persistPending")(function* (
