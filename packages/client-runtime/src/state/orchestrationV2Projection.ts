@@ -15,6 +15,36 @@ export type ApplyOrchestrationV2ProjectionEventOptions = {
   readonly latestLocalTurnOrdinal?: number | null;
 };
 
+// Both sides are weak keys: comparison hints must not retain old streaming
+// arrays (and their text) for the lifetime of the thread.
+const arrayReplacements = new WeakMap<
+  ReadonlyArray<unknown>,
+  WeakMap<ReadonlyArray<unknown>, number>
+>();
+
+export function getProjectionArrayReplacementIndex(
+  previous: ReadonlyArray<unknown>,
+  next: ReadonlyArray<unknown>,
+): number | undefined {
+  return arrayReplacements.get(previous)?.get(next);
+}
+
+function replaceProjectionArrayItem<T>(
+  items: ReadonlyArray<T>,
+  index: number,
+  item: T,
+): ReadonlyArray<T> {
+  const next = items.slice();
+  next[index] = item;
+  let replacements = arrayReplacements.get(items);
+  if (replacements === undefined) {
+    replacements = new WeakMap();
+    arrayReplacements.set(items, replacements);
+  }
+  replacements.set(next, index);
+  return next;
+}
+
 function upsertEntity<T extends { readonly id: unknown }>(
   items: ReadonlyArray<T>,
   item: T,
@@ -174,6 +204,14 @@ function upsertVisibleTurnItem(
     return rows;
   }
   if (
+    previous !== undefined &&
+    previous.visibility === next.visibility &&
+    previous.sourceThreadId === next.sourceThreadId &&
+    previous.item.ordinal === item.ordinal
+  ) {
+    return replaceProjectionArrayItem(rows, index, { ...next, position: previous.position });
+  }
+  if (
     index === -1 &&
     partialTimeline &&
     shouldDropMissingPartialTurnItem(projection, item, latestLocalTurnOrdinal)
@@ -326,9 +364,10 @@ export function applyOrchestrationV2ProjectionEvent(
       ) {
         return projection;
       }
-      const turnItems = [...projection.turnItems];
-      if (itemIndex === -1) turnItems.push(event.payload);
-      else turnItems[itemIndex] = event.payload;
+      const turnItems =
+        itemIndex === -1
+          ? [...projection.turnItems, event.payload]
+          : replaceProjectionArrayItem(projection.turnItems, itemIndex, event.payload);
       const next = { ...base, turnItems };
       // Only interrupt requests can change another item's visibility. Streaming
       // text/tool updates must not recheck every row against every run.
