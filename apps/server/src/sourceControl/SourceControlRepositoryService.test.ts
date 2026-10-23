@@ -101,6 +101,32 @@ function layer(input: {
     : layerService.pipe(Layer.provideMerge(NodeServices.layer));
 }
 
+it.effect("tells the user what the host said was wrong with a repository lookup", () =>
+  Effect.gen(function* () {
+    const service = yield* SourceControlRepositoryService.SourceControlRepositoryService;
+    const error = yield* service
+      .lookupRepository({ provider: SourceControlProviderKind.make("bitbucket"), repository: "x" })
+      .pipe(Effect.flip);
+    assert.strictEqual(error.detail, "Repositories are named workspace/repository.");
+  }).pipe(
+    Effect.provide(
+      layer({
+        provider: makeProvider({
+          getRepositoryCloneUrls: (input) =>
+            Effect.fail(
+              new SourceControlProviderError({
+                provider: SourceControlProviderKind.make("bitbucket"),
+                operation: "getRepositoryCloneUrls",
+                cwd: input.cwd,
+                detail: "Repositories are named workspace/repository.",
+              }),
+            ),
+        }),
+      }),
+    ),
+  ),
+);
+
 it.effect("clones a looked-up repository after creating missing parent directories", () =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
