@@ -261,6 +261,50 @@ const makeConfigPersistenceHarness = Effect.fn("test.makeConfigPersistenceHarnes
 });
 
 describe("server state projection", () => {
+  it.effect("skips duplicate keybinding saves but persists changed keybindings", () =>
+    Effect.gen(function* () {
+      const saved = yield* Ref.make<ReadonlyArray<ServerConfig>>([]);
+      const keybindingsEvent = (key: string): ServerConfigStreamEvent => ({
+        version: 1,
+        type: "keybindingsUpdated",
+        payload: {
+          keybindings: [
+            {
+              command: "terminal.toggle",
+              shortcut: {
+                key,
+                metaKey: false,
+                ctrlKey: false,
+                shiftKey: false,
+                altKey: false,
+                modKey: true,
+              },
+            },
+          ],
+          issues: [],
+        },
+      });
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const h = yield* makeConfigPersistenceHarness((_id, config) =>
+            Ref.update(saved, (values) => [...values, config]),
+          );
+          const first = yield* h.send(keybindingsEvent("p"));
+          yield* TestClock.adjust("500 millis");
+          expect(yield* Ref.get(saved)).toEqual([first.config]);
+
+          yield* h.send(keybindingsEvent("p"));
+          yield* TestClock.adjust("10 seconds");
+          expect(yield* Ref.get(saved)).toEqual([first.config]);
+
+          const changed = yield* h.send(keybindingsEvent("q"));
+          yield* TestClock.adjust("10 seconds");
+          expect(yield* Ref.get(saved)).toEqual([first.config, changed.config]);
+        }),
+      );
+    }),
+  );
+
   it.effect("saves once across transient themes, usage sources and stall updates", () =>
     Effect.gen(function* () {
       const saved = yield* Ref.make<ReadonlyArray<ServerConfig>>([]);
