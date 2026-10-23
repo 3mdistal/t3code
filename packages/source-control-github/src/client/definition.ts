@@ -110,6 +110,7 @@ export const definition = defineSourceControlClient({
     "approve-workflows",
   ] as const),
   checkoutCommand: ({ number }) => `gh pr checkout ${number}`,
+  changeRequestCloseCommand: /\bgh\s+(?:pr\s+(?:merge|close)|stack\s+merge)\b/u,
   authorProfileUrl: (login, repositoryUrl) =>
     login.endsWith("[bot]")
       ? null
