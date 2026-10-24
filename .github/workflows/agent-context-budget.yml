@@ -4,8 +4,10 @@ name: Agent Context Budget
 # keeps that file equal to the measured context, so the context cannot grow by editing the file.
 # To accept growth on purpose, a maintainer adds the agent-context-increase label.
 on:
-  pull_request:
-    types: [opened, synchronize, reopened, labeled, unlabeled]
+  # fork: upstream's triggers, commented out so this never runs on the fork (see FORK.md):
+  # pull_request:
+  #   types: [opened, synchronize, reopened, labeled, unlabeled]
+  workflow_call:
 
 permissions:
   contents: read

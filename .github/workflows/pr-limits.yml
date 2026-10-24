@@ -8,16 +8,18 @@ name: PR Limits
 # sweep reads the variable once when it starts; to stop one, cancel the run.
 
 on:
-  pull_request_target:
-    types: [opened, reopened]
-  schedule:
-    - cron: "23 5 * * *"
-  workflow_dispatch:
-    inputs:
-      dry_run:
-        description: Log what the sweep would do without labeling, commenting, or closing.
-        type: boolean
-        default: true
+  # fork: upstream's triggers, commented out so this never runs on the fork (see FORK.md):
+  # pull_request_target:
+  #   types: [opened, reopened]
+  # schedule:
+  #   - cron: "23 5 * * *"
+  # workflow_dispatch:
+  #   inputs:
+  #     dry_run:
+  #       description: Log what the sweep would do without labeling, commenting, or closing.
+  #       type: boolean
+  #       default: true
+  workflow_call:
 
 permissions:
   contents: read

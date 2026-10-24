@@ -10,8 +10,10 @@ name: Mobile EAS Preview (Fork)
 # Same-repo PRs deploy on every push while labeled, via mobile-eas-preview.yml.
 
 on:
-  pull_request_target:
-    types: [labeled]
+  # fork: upstream's triggers, commented out so this never runs on the fork (see FORK.md):
+  # pull_request_target:
+  #   types: [labeled]
+  workflow_call:
 
 permissions:
   contents: read

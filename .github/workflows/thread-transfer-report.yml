@@ -1,9 +1,11 @@
 name: Thread Transfer Report
 
 on:
-  workflow_run:
-    workflows: [CI]
-    types: [completed]
+  # fork: upstream's triggers, commented out so this never runs on the fork (see FORK.md):
+  # workflow_run:
+  #   workflows: [CI]
+  #   types: [completed]
+  workflow_call:
 
 permissions:
   actions: read
