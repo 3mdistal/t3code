@@ -18,6 +18,7 @@ import {
   GitBranchIcon,
   GlobeIcon,
   InfoIcon,
+  LayersIcon,
   MessageSquareTextIcon,
   MessagesSquareIcon,
   PanelsTopLeftIcon,
@@ -47,6 +48,7 @@ import {
 } from "../ui/sidebar";
 import { scrollToSettingsTarget } from "./settingsLayout";
 import {
+  hasProviderPoolsEnvironment,
   searchSettings,
   revealSettingsSearchTarget,
   SETTINGS_NAV_GROUPS,
@@ -58,6 +60,7 @@ import { useAvailableSettingsSearchItems } from "./useAvailableSettingsSearchIte
 import { validateSettingsScopeSearch } from "./settingsScope";
 import { useSettingsSectionNavigation } from "./useSettingsSectionNavigation";
 import { workspaceAreaProps } from "../../lib/workspaceFocus";
+import { useEnvironments } from "~/state/environments";
 
 const SnapShotIcon = createLucideIcon("snap-shot", [
   [
@@ -94,6 +97,7 @@ const SETTINGS_SECTION_ICONS: Readonly<
   "/settings/keybindings": KeyboardIcon,
   "/settings/snap-shot": SnapShotIcon,
   "/settings/providers": BotIcon,
+  "/settings/account-pools": LayersIcon,
   "/settings/threads": MessagesSquareIcon,
   "/settings/browser": GlobeIcon,
   "/settings/devices": SmartphoneIcon,
@@ -137,6 +141,8 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
       navPaths[0] ??
       "",
   );
+  const { environments } = useEnvironments();
+  const providerPoolsAvailable = hasProviderPoolsEnvironment(environments);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [query, setQuery] = useState("");
   // Below md the nav is an icon rail; searching expands it over the page.
@@ -399,6 +405,9 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
                       ) : null}
                       <SidebarMenu role="presentation">
                         {group.paths.map((to) => {
+                          // Only where a server supports account pools.
+                          if (to === "/settings/account-pools" && !providerPoolsAvailable)
+                            return null;
                           const Icon = SETTINGS_SECTION_ICONS[to];
                           const isActive = activePath === to || activePath.startsWith(`${to}/`);
                           return (

@@ -1324,6 +1324,7 @@ it.layer(
               refresh: Effect.succeed(provider),
               streamChanges: Stream.empty,
               applyUsageLimits: () => Effect.void,
+              markLimited: () => Effect.void, // fork: see FORK.md.
             },
             snapshotForCwd: () =>
               Ref.update(scans, (count) => count + 1).pipe(

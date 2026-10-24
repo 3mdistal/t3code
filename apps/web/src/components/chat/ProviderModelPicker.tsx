@@ -87,6 +87,7 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
   triggerClassName?: string;
   triggerLabel?: string;
   triggerAriaLabel?: string;
+  activeAccount?: { readonly poolName: string; readonly memberName: string } | null;
   onOpenChange?: (open: boolean) => void;
   onOpenProviderSetup?: (instanceId: ProviderInstanceId) => void;
   getModelDisabledReason?: (instanceId: ProviderInstanceId, model: string) => string | null;
@@ -120,6 +121,7 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
   const triggerLabel = selectedModel
     ? `${getDisplayModelName(selectedModel)}${selectedModel.isUnavailable ? " (Unavailable)" : ""}`
     : triggerTitle;
+  const accountSuffix = props.activeAccount ? ` · ${props.activeAccount.memberName}` : "";
   const showInstanceBadge =
     activeEntry !== null && shouldShowInstanceBadge(activeEntry, props.instanceEntries);
 
@@ -169,9 +171,13 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
   const allModelNames = selectedEntries
     ? selectedEntries.map((selection) => selection.fullLabel).join(", ") || "Choose models"
     : undefined;
-  const triggerTooltipContent = shortcutLabel
-    ? `${props.triggerLabel ?? allModelNames ?? triggerLabel} · ${shortcutLabel}`
-    : (props.triggerLabel ?? allModelNames ?? triggerLabel);
+  const tooltipLabel =
+    props.triggerLabel ??
+    allModelNames ??
+    (props.activeAccount
+      ? `${triggerLabel} · ${props.activeAccount.poolName} · ${props.activeAccount.memberName}`
+      : triggerLabel);
+  const triggerTooltipContent = shortcutLabel ? `${tooltipLabel} · ${shortcutLabel}` : tooltipLabel;
 
   return (
     <Popover
@@ -261,7 +267,7 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
                 />
               }
             >
-              {props.triggerLabel ?? multipleLabel ?? triggerTitle}
+              {props.triggerLabel ?? multipleLabel ?? `${triggerTitle}${accountSuffix}`}
             </TooltipTrigger>
             <TooltipPopup side="top">{triggerTooltipContent}</TooltipPopup>
           </Tooltip>

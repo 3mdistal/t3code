@@ -1,3 +1,4 @@
+import { composerModelSelectionFor } from "@t3tools/client-runtime/provider-pools";
 import {
   type DraftId,
   deriveEffectiveComposerModelState,
@@ -11,8 +12,8 @@ import {
   type ServerProvider,
 } from "@t3tools/contracts";
 import {
+  deriveComposerProviderInstanceEntries,
   NO_PROVIDER_MODEL_SELECTION,
-  providerInstanceEntriesFor,
   type ProviderInstanceEntry,
 } from "../../providerInstances";
 import { type UnifiedSettings } from "@t3tools/contracts/settings";
@@ -27,7 +28,7 @@ const NO_PROVIDER_MODELS: ServerProvider["models"] = [];
  * hook here; in the composer body they would straddle its later hooks and lose their cache.
  */
 export function useComposerProviderModel(
-  input: Omit<Parameters<typeof resolveComposerProviderSelection>[0], "entries"> & {
+  input: Omit<Parameters<typeof resolveComposerProviderSelection>[0], "entries" | "providers"> & {
     readonly providerStatuses: ReadonlyArray<ServerProvider>;
     readonly settings: UnifiedSettings;
     readonly activeProjectId: ProjectId | null;
@@ -50,13 +51,11 @@ export function useComposerProviderModel(
     lockedInstanceId,
   } = input;
   const draftModelState = useComposerDraftModelState(threadRef);
-  const providerInstanceEntries: ReadonlyArray<ProviderInstanceEntry> = providerInstanceEntriesFor(
-    providerStatuses,
-    settings,
-    activeProjectId,
-  );
+  const providerInstanceEntries: ReadonlyArray<ProviderInstanceEntry> =
+    deriveComposerProviderInstanceEntries(providerStatuses, settings, activeProjectId);
   const selection = resolveComposerProviderSelection({
     entries: providerInstanceEntries,
+    providers: providerStatuses,
     candidateInstanceIds,
     lockedProvider,
     lockedInstanceId,
@@ -70,8 +69,10 @@ export function useComposerProviderModel(
     providers: providerStatuses,
     selectedProvider,
     selectedInstanceId,
-    threadModelSelection,
-    projectModelSelection,
+    threadModelSelection:
+      threadModelSelection && composerModelSelectionFor(providerStatuses, threadModelSelection),
+    projectModelSelection:
+      projectModelSelection && composerModelSelectionFor(providerStatuses, projectModelSelection),
     settings,
   });
   const selectedProviderModels = selection.selectedProviderEntry?.models ?? NO_PROVIDER_MODELS;

@@ -28,6 +28,7 @@ export type SettingsPath =
   | "/settings/threads"
   | "/settings/browser"
   | "/settings/devices"
+  | "/settings/account-pools"
   | "/settings/scheduled-tasks"
   | "/settings/source-control"
   | "/settings/worktrees"
@@ -68,6 +69,7 @@ export interface SettingsSearchItem {
   readonly peerLinksOnly?: boolean;
   readonly secondary?: boolean;
   readonly requiresThreadAutoSettlement?: boolean;
+  readonly requiresProviderPools?: boolean;
 }
 
 export interface SettingsSearchAvailability {
@@ -79,6 +81,7 @@ export interface SettingsSearchAvailability {
   readonly canManageLocalBackend: boolean;
   readonly isWslSettingsRowVisible: boolean;
   readonly hasThreadAutoSettlement: boolean;
+  readonly hasProviderPools: boolean;
   readonly managedTunnelActive?: boolean;
   readonly hasPeerLinkHost?: boolean;
 }
@@ -96,6 +99,7 @@ export const SETTINGS_SECTION_LABELS: Readonly<Record<SettingsPath, string>> = {
   "/settings/threads": "Threads",
   "/settings/browser": "Browser",
   "/settings/devices": "Devices",
+  "/settings/account-pools": "Account pools",
   "/settings/scheduled-tasks": "Scheduled tasks",
   "/settings/source-control": "Source control",
   "/settings/worktrees": "Worktrees",
@@ -127,6 +131,7 @@ export const SETTINGS_NAV_GROUPS: ReadonlyArray<{
     heading: "Agents",
     paths: [
       "/settings/providers",
+      "/settings/account-pools",
       "/settings/threads",
       "/settings/browser",
       "/settings/devices",
@@ -782,6 +787,15 @@ export const SETTINGS_SEARCH_ITEMS = [
     ],
   },
   {
+    id: "account-pools",
+    title: "Account pools",
+    to: "/settings/account-pools",
+    searchTerms: [
+      "load balance load balancing failover multiple accounts pool usage limit quota rotate switch claude codex",
+    ],
+    requiresProviderPools: true,
+  },
+  {
     id: "usage-providers",
     title: "Usage providers",
     to: "/settings/providers",
@@ -1159,6 +1173,7 @@ const SETTINGS_CATEGORY_SCOPES: Readonly<Record<SettingsPath, SettingsSearchScop
   "/settings/threads": null,
   "/settings/browser": null,
   "/settings/devices": null,
+  "/settings/account-pools": null,
   "/settings/source-control": "environment-defaults",
   "/settings/worktrees": "project-defaults",
   "/settings/connections": "connections",
@@ -1244,6 +1259,20 @@ export function getThreadAutoSettlementSearchAvailability(
   };
 }
 
+interface ProviderPoolsSearchEnvironment {
+  readonly serverConfig: {
+    readonly environment: { readonly capabilities: { readonly providerPools?: boolean } };
+  } | null;
+}
+
+export function hasProviderPoolsEnvironment(
+  environments: readonly ProviderPoolsSearchEnvironment[],
+): boolean {
+  return environments.some(
+    (environment) => environment.serverConfig?.environment.capabilities.providerPools === true,
+  );
+}
+
 export function isSettingsSearchScopeAvailable(
   requiredScope: SettingsSearchScope | null,
   scopeKind: ResolvedSettingsScope["kind"],
@@ -1291,6 +1320,7 @@ export function filterAvailableSettingsSearchItems(
       (!item.localEnvironmentOnly || !availability.localEnvironmentDisabled) &&
       (!item.wslAvailableOnly || availability.isWslSettingsRowVisible) &&
       (!item.requiresThreadAutoSettlement || availability.hasThreadAutoSettlement) &&
+      (!item.requiresProviderPools || availability.hasProviderPools) &&
       (!item.managedTunnelOnly || availability.managedTunnelActive === true) &&
       (!item.peerLinksOnly || availability.hasPeerLinkHost === true),
   );

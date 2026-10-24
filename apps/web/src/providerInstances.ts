@@ -153,7 +153,7 @@ function applyProviderInstanceBranding(
 /** Picker order: each driver's default instance first, then its custom instances. */
 export function providerInstanceEntriesFor(
   providers: ReadonlyArray<ServerProvider>,
-  settings: Pick<ServerSettings, "providerInstances" | "projectSettingsOverrides">,
+  settings: ProviderInstanceSettings,
   projectId: ProjectId | null,
 ): ReadonlyArray<ProviderInstanceEntry> {
   return pipe(
@@ -187,20 +187,14 @@ function sortProviderInstanceEntries(
 
 /**
  * The catalog composer-style pickers offer: an active pool stands in for its member accounts.
- * Settings pickers keep `deriveProviderInstanceEntries` so every account stays selectable there.
+ * Settings pickers keep `providerInstanceEntriesFor` so every account stays selectable there.
  */
 export function deriveComposerProviderInstanceEntries(
   providers: ReadonlyArray<ServerProvider>,
   settings: ProviderInstanceSettings,
   projectId: ProjectId | null,
 ): ReadonlyArray<ProviderInstanceEntry> {
-  return sortProviderInstanceEntries(
-    applyProviderInstanceSettings(
-      deriveProviderInstanceEntries(foldProviderPoolsForComposer(providers)),
-      settings,
-      projectId,
-    ),
-  );
+  return providerInstanceEntriesFor(foldProviderPoolsForComposer(providers), settings, projectId);
 }
 
 function getProviderInstanceEntry(
