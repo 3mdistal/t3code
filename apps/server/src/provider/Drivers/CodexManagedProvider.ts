@@ -311,6 +311,9 @@ export const makeManagedCodexProvider = Effect.fn("makeManagedCodexProvider")(fu
             }),
             Effect.scoped,
             Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+            // fork: reading SKILL.md for the `$` menu needs these. See FORK.md.
+            Effect.provideService(FileSystem.FileSystem, fileSystem),
+            Effect.provideService(Path.Path, path),
             // Fail rather than return the machine snapshot: the registry
             // publishes any returned snapshot as this workspace's inventory.
             Effect.mapError(
