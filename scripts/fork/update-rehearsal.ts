@@ -205,8 +205,8 @@ async function update(from: string, to: string, env: Record<string, string>): Pr
     await call("installUpdate").catch(() => undefined);
     await closed;
   } catch (error) {
+    await printUpdaterErrors();
     await app.close().catch(() => undefined);
-    printUpdaterErrors();
     throw error;
   }
   await waitFor(`${to} to install`, 300_000, () => (registeredVersion() === to ? true : undefined));
@@ -224,21 +224,35 @@ async function expectUpToDate(version: string, env: Record<string, string>): Pro
     NodeAssert.equal(checked.status, "up-to-date", JSON.stringify(checked));
     log(`${version} sees no update.`);
   } catch (error) {
-    printUpdaterErrors();
+    await printUpdaterErrors();
     throw error;
   } finally {
     await app.close().catch(() => undefined);
   }
 }
 
-/** The updater's own errors, with their causes, are only in the app's trace log. */
-function printUpdaterErrors(): void {
-  const logs = NodePath.join(home, "userdata", "logs");
-  for (const file of NodeFS.existsSync(logs) ? NodeFS.readdirSync(logs) : []) {
-    const errors = NodeFS.readFileSync(NodePath.join(logs, file), "utf8")
-      .split("\n")
-      .filter((line) => /updater/i.test(line) && /error|fail/i.test(line));
-    for (const line of errors.slice(-5)) console.log(`${file}: ${line.slice(0, 4000)}`);
+/**
+ * The updater logs its errors, with their causes, only to the app's trace,
+ * which it writes in one-second batches, so this waits for one first.
+ */
+async function printUpdaterErrors(): Promise<void> {
+  await NodeTimers.setTimeout(5_000);
+  const trace = NodePath.join(home, "userdata", "logs", "desktop.trace.ndjson");
+  if (!NodeFS.existsSync(trace)) return;
+  type Span = { events?: Array<{ name: string; attributes?: Record<string, unknown> }> };
+  const events = NodeFS.readFileSync(trace, "utf8")
+    .split("\n")
+    .filter((line) => line.includes("desktop-updater"))
+    .flatMap((line) => {
+      try {
+        return (JSON.parse(line) as Span).events ?? [];
+      } catch {
+        return [];
+      }
+    })
+    .filter((event) => /ERROR|WARN/.test(String(event.attributes?.["effect.logLevel"])));
+  for (const event of events.slice(-5)) {
+    console.log(`updater ${event.name}: ${JSON.stringify(event.attributes).slice(0, 4000)}`);
   }
 }
 
