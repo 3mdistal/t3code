@@ -54,6 +54,7 @@ import {
 } from "@t3tools/shared/serverSettings";
 import * as ServerSecretStore from "./auth/ServerSecretStore.ts";
 import { secretProviderDefinitions } from "./secrets/secretProviderDefinitions.ts";
+import { withStorablePoolSelections } from "./orchestration-v2/ProviderPoolRouting.ts"; // fork: see FORK.md.
 import {
   readSecretFieldValues,
   sourceControlHostSecretName,
@@ -120,6 +121,7 @@ const normalizeServerSettings = (
     Effect.map(foldProviderInstanceEnabledFlags),
     Effect.map((next) => withIdleCompaction(next, globalIdleCompaction(next))),
     Effect.map((next) => ({ ...next, ...deriveLegacyProjectOverrides(next) })),
+    Effect.map(withStorablePoolSelections), // fork: saved model choices name an account, see FORK.md.
     Effect.mapError(
       (cause) =>
         new ServerSettingsError({
