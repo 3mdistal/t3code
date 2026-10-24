@@ -104,6 +104,7 @@ import { ProviderAuthenticationSection } from "./ProviderAuthenticationSection";
 import { CodexSetupSection, CodexManagedRuntimeFields } from "./CodexSetupSection";
 import { readCodexSetupMode } from "./CodexSetupSection.logic";
 import { providerClients } from "./providerDriverMeta";
+import { resolveProviderPoolName } from "./ProviderPoolsSettings.logic";
 import { searchableSetting } from "./settingsSearch";
 import {
   backgroundActivityOverrideSettings,
@@ -943,6 +944,9 @@ export function EnvironmentProviderSettings({
 
   const representativeProjectId = projectIds[0];
   const renderProviderInstance = (row: InstanceRow, mode: "list" | "editor") => {
+    const liveProvider = serverProviders.find(
+      (candidate) => candidate.instanceId === row.instanceId,
+    );
     const showProjectOverride =
       representativeProjectId !== undefined && supportsProjectProviderOverrides;
     return (
@@ -959,7 +963,8 @@ export function EnvironmentProviderSettings({
         selected={mode === "list" && selectedRow?.instanceId === row.instanceId}
         readOnly={readOnly}
         canWriteSettings={canWriteSettings}
-        liveProvider={serverProviders.find((candidate) => candidate.instanceId === row.instanceId)}
+        liveProvider={liveProvider}
+        poolName={resolveProviderPoolName(serverProviders, liveProvider)}
         isUpdateDispatching={updatingProviderInstanceIds.has(row.instanceId)}
         showProjectOverride={showProjectOverride}
         projectOverrideValue={
@@ -1246,6 +1251,7 @@ function ProviderInstanceRow({
   readOnly,
   canWriteSettings,
   liveProvider,
+  poolName,
   isUpdateDispatching,
   showProjectOverride,
   projectOverrideValue,
@@ -1266,6 +1272,7 @@ function ProviderInstanceRow({
   readonly readOnly: boolean;
   readonly canWriteSettings: boolean;
   readonly liveProvider: ServerProvider | undefined;
+  readonly poolName: string | undefined;
   readonly isUpdateDispatching: boolean;
   readonly showProjectOverride: boolean;
   readonly projectOverrideValue: boolean | undefined;
@@ -1324,6 +1331,7 @@ function ProviderInstanceRow({
       instance={instance}
       driverOption={driverOption}
       liveProvider={liveProvider}
+      poolName={poolName}
       mode={mode}
       selected={selected}
       onSelect={mode === "list" ? () => actions.selectInstance(instanceId) : undefined}
