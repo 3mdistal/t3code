@@ -103,16 +103,22 @@ the Account pools section of `docs/user/providers-claude.md`.
   - `apps/server/src/provider/ProviderRegistry.ts`: publishes each pool as a provider and remembers limited
     accounts.
   - `apps/server/src/serverSettings.ts`: the `providerPools` key, and the reserved `pool_` instance ids.
-  - The web model picker and the Providers settings.
+  - The web model picker, the Providers settings, and the project default model picker, which lists the pool in
+    place of its accounts as the composer does.
 - Stock compatibility:
   - Pools live under the new `providerPools` settings key.
   - Failover emits only `turn-item.updated` and `system_notice`.
-  - Scheduled tasks save the pool's first account rather than the pool's id.
+  - Every saved model choice names an account, never the pool: scheduled tasks, the default model in settings and
+    project overrides, the project's own default, and the commit message, title and review guide models. Each
+    stores the pool's first enabled account, which stock T3 runs as is. On the fork, a thread started on a pooled
+    account still uses the pool. Settings saves do this in `serverSettings.ts`, and project updates in
+    `ProjectService.ts`.
   - Stock T3 drops `providerPools` the next time it saves settings, so after a rollback the accounts stay but
     the pool is gone.
 - Tests: `ProviderPoolRouting.test.ts`, `ProviderPoolFailover.test.ts`, `ProviderPoolFailover.integration.test.ts`,
   `providerPoolSnapshot.test.ts`, `providerPool.test.ts`, `providerPools.test.ts` and
-  `ProviderPoolsSettings.logic.test.ts`, plus pool cases inside upstream test files.
+  `ProviderPoolsSettings.logic.test.ts`, `serverSettings.fork.test.ts` and `ProjectService.fork.test.ts`, plus
+  pool cases inside upstream test files.
 
 ## Versions
 

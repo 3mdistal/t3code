@@ -4,6 +4,7 @@ import {
   type ProviderInstanceId,
   type WorktreeSubmodules,
 } from "@t3tools/contracts";
+import { composerModelSelectionFor } from "@t3tools/client-runtime/provider-pools"; // fork: see FORK.md.
 import { createModelSelection } from "@t3tools/shared/model";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import { useNavigate } from "@tanstack/react-router";
@@ -15,9 +16,9 @@ import {
 } from "../../modelSelection";
 import {
   applyProviderInstanceSettings,
+  deriveComposerProviderInstanceEntries, // fork: see FORK.md.
   deriveProviderInstanceEntries,
   resolveDefaultProviderModelSelection,
-  sortProviderInstanceEntries,
 } from "../../providerInstances";
 import { useEnvironmentProviders, useEnvironments } from "../../state/environments";
 import { EMPTY_SERVER_PROVIDERS } from "../../state/server";
@@ -64,20 +65,22 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
     (representative?.serverConfig
       ? providersByEnvironment.get(representative.environmentId)
       : undefined) ?? EMPTY_SERVER_PROVIDERS;
-  const storedSelection = resolveDefaultProviderModelSelection(
+  const resolvedSelection = resolveDefaultProviderModelSelection(
     providers,
     settings.defaultModelSelection,
   );
+  // fork: new threads start here as from the composer, so a pool stands in for its accounts, and
+  // a default that resolves to a pooled account, saved or automatic, shows as the pool. See FORK.md.
+  const storedSelection =
+    resolvedSelection && composerModelSelectionFor(providers, resolvedSelection);
   const selection = storedSelection
     ? resolveEffectiveDefaultModelSelection(settings, providers, storedSelection)
     : null;
-  const entries = sortProviderInstanceEntries(
-    applyProviderInstanceSettings(
-      deriveProviderInstanceEntries(providers),
-      settings,
-      target?.projectId ?? null,
-    ),
-  );
+  const entries = deriveComposerProviderInstanceEntries(
+    providers,
+    settings,
+    target?.projectId ?? null,
+  ); // fork: see FORK.md.
   const modelOptions = getCustomModelOptionsByInstance(
     settings,
     providers,
