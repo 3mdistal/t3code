@@ -206,6 +206,7 @@ async function update(from: string, to: string, env: Record<string, string>): Pr
     await closed;
   } catch (error) {
     await app.close().catch(() => undefined);
+    printUpdaterErrors();
     throw error;
   }
   await waitFor(`${to} to install`, 300_000, () => (registeredVersion() === to ? true : undefined));
@@ -222,8 +223,22 @@ async function expectUpToDate(version: string, env: Record<string, string>): Pro
     const checked = await settled("the check to finish", 120_000, ["idle", "checking"]);
     NodeAssert.equal(checked.status, "up-to-date", JSON.stringify(checked));
     log(`${version} sees no update.`);
+  } catch (error) {
+    printUpdaterErrors();
+    throw error;
   } finally {
     await app.close().catch(() => undefined);
+  }
+}
+
+/** The updater's own errors, with their causes, are only in the app's trace log. */
+function printUpdaterErrors(): void {
+  const logs = NodePath.join(home, "userdata", "logs");
+  for (const file of NodeFS.existsSync(logs) ? NodeFS.readdirSync(logs) : []) {
+    const errors = NodeFS.readFileSync(NodePath.join(logs, file), "utf8")
+      .split("\n")
+      .filter((line) => /updater/i.test(line) && /error|fail/i.test(line));
+    for (const line of errors.slice(-5)) console.log(`${file}: ${line.slice(0, 4000)}`);
   }
 }
 

@@ -236,7 +236,5 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: rehearsal-logs-${{ matrix.feed }}
-          path: |
-            ${{ runner.temp }}/t3-rehearsal-home/**/logs/**
-            ~/AppData/Roaming/t3code-v2/logs/**
+          path: ${{ runner.temp }}/t3-rehearsal-home/userdata/logs/
           if-no-files-found: ignore
