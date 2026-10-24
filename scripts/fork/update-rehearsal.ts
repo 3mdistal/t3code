@@ -191,10 +191,18 @@ async function update(from: string, to: string, env: Record<string, string>): Pr
   try {
     NodeAssert.equal(await app.evaluate(({ app }) => app.getVersion()), from);
     NodeAssert.equal((await state()).notAppliedVersion, undefined, "the last update didn't apply");
-    await call("checkForUpdate");
-    const offered = await settled(`the check to offer ${to}`, 120_000, ["idle", "checking"]);
+    // github.com's latest-release answers lag a release change by a different
+    // while for each client, so a check can still see the old release. The
+    // app's periodic check gets there later; this checks again sooner.
+    const offered = await waitFor(`a check to offer ${to}`, 900_000, async () => {
+      await call("checkForUpdate");
+      const checked = await settled("the check to finish", 120_000, ["idle", "checking"]);
+      if (checked.status === "available" && checked.availableVersion === to) return checked;
+      log(`The check found ${checked.availableVersion ?? checked.status}; checking again.`);
+      await NodeTimers.setTimeout(15_000);
+      return undefined;
+    });
     NodeAssert.equal(offered.status, "available", JSON.stringify(offered));
-    NodeAssert.equal(offered.availableVersion, to);
     await call("downloadUpdate");
     const downloaded = await settled(`${to} to download`, 600_000, ["available", "downloading"]);
     NodeAssert.equal(downloaded.status, "downloaded", JSON.stringify(downloaded));
@@ -334,6 +342,7 @@ async function rehearseGitHub(builds: ReadonlyArray<Build>): Promise<void> {
     );
   }
   const published: Array<string> = [];
+  let latest = latestBefore;
   const feed = NodePath.join(scratch, "github-feed");
   try {
     await install(builds[0]!);
@@ -370,13 +379,28 @@ async function rehearseGitHub(builds: ReadonlyArray<Build>): Promise<void> {
       );
       if (deleted.status !== 0) log(`Couldn't delete ${tag}: ${deleted.stderr.trim()}`);
     }
-    sh("gh", ["release", "edit", latestBefore, "--repo", repository, "--latest"]);
-    log(`${latestBefore} is the latest release again.`);
+    latest = newestRealRelease(published);
+    sh("gh", ["release", "edit", latest, "--repo", repository, "--latest"]);
+    log(`${latest} is the latest release again.`);
   }
-  NodeAssert.equal(latestTag(), latestBefore);
-  await waitForLatestRedirect(latestBefore);
-  await update(builds.at(-1)!.version, latestBefore.slice(1), {});
-  await expectUpToDate(latestBefore.slice(1), {});
+  NodeAssert.equal(latestTag(), latest);
+  await waitForLatestRedirect(latest);
+  await update(builds.at(-1)!.version, latest.slice(1), {});
+  await expectUpToDate(latest.slice(1), {});
+}
+
+/** Fork release may publish while this runs, so the newest real release, not the one latest before, goes back to latest. */
+function newestRealRelease(testTags: ReadonlyArray<string>): string {
+  const tags = lines(
+    sh("gh", ["release", "list", "--repo", repository, "--limit", "100", "--json", "tagName", "--jq", ".[].tagName"]),
+  ).filter((tag) => /^v\d+\.\d+\.\d+-alice\.\d+$/.test(tag) && !testTags.includes(tag));
+  const newest = tags.toSorted((left, right) => compareVersions(right.slice(1), left.slice(1)))[0];
+  if (newest === undefined) throw new Error("No real fork release to make latest again");
+  return newest;
+}
+
+function lines(output: string): Array<string> {
+  return output.split(/\r?\n/).filter((line) => line.length > 0);
 }
 
 const [feed, ...dirs] = process.argv.slice(2);
