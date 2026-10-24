@@ -2917,7 +2917,9 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
           role: "Viewer",
         },
       ],
-      ...(signed ? { sign: path.join(repoRoot, "scripts/sign-macos.ts") } : {}),
+      // fork: an unsigned build is signed ad hoc, so Apple silicon runs it
+      // after the quarantine flag is cleared (see FORK.md).
+      ...(signed ? { sign: path.join(repoRoot, "scripts/sign-macos.ts") } : { identity: "-" }),
       ...(macPasskeySigning
         ? {
             entitlements: macPasskeySigning.entitlementsPath,
@@ -3845,8 +3847,13 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
   const stageProdResourcesDir = path.join(stageAppDir, "apps/desktop/prod-resources");
   yield* fs.copy(stageResourcesDir, stageProdResourcesDir);
 
+  // fork: a signed build without T3CODE_MACOS_PROVISIONING_PROFILE skips the
+  // passkey entitlements, which need upstream's App ID, and electron-builder
+  // signs with apps/desktop/resources/entitlements.mac.plist (see FORK.md).
   const configuredMacPasskeySigning =
-    options.platform === "mac" && options.signed
+    options.platform === "mac" &&
+    options.signed &&
+    loadRepoEnv({ repoRoot }).T3CODE_MACOS_PROVISIONING_PROFILE?.trim()
       ? yield* Effect.try({
           try: () => resolveMacPasskeySigningConfiguration(loadRepoEnv({ repoRoot })),
           catch: MacPasskeySigningConfigurationResolutionError.fromCause,
