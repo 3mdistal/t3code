@@ -113,7 +113,7 @@ function SettingsContentLayout() {
   useEscapeToGoBack(navigateToMainApp);
   const { search, environment } = useSettingsScope();
   const contentScopeKey =
-    location.pathname === "/settings/diagnostics" ||
+    location.pathname === "/settings/diagnostics" || // fork: see FORK.md.
     location.pathname === "/settings/providers" ||
     location.pathname === "/settings/account-pools"
       ? environment?.environmentId
@@ -154,7 +154,7 @@ function SettingsRouteLayout() {
     <SettingsScopeProvider
       search={rawSearch}
       singleEnvironment={
-        pathname === "/settings/providers" || pathname === "/settings/account-pools"
+        pathname === "/settings/providers" || pathname === "/settings/account-pools" // fork: see FORK.md.
       }
       onChange={(next) => {
         // Send every axis so the retain middleware sees an explicit target

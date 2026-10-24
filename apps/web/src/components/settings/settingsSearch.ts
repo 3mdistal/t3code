@@ -21,7 +21,7 @@ export type SettingsPath =
   | "/settings/keybindings"
   | "/settings/snap-shot"
   | "/settings/providers"
-  | "/settings/account-pools"
+  | "/settings/account-pools" // fork: see FORK.md.
   | "/settings/integrations"
   | "/settings/scheduled-tasks"
   | "/settings/source-control"
@@ -58,7 +58,7 @@ export interface SettingsSearchItem {
   readonly managedTunnelOnly?: boolean;
   readonly secondary?: boolean;
   readonly requiresThreadAutoSettlement?: boolean;
-  readonly requiresProviderPools?: boolean;
+  readonly requiresProviderPools?: boolean; // fork: see FORK.md.
 }
 
 export interface SettingsSearchAvailability {
@@ -70,7 +70,7 @@ export interface SettingsSearchAvailability {
   readonly canManageLocalBackend: boolean;
   readonly isWslSettingsRowVisible: boolean;
   readonly hasThreadAutoSettlement: boolean;
-  readonly hasProviderPools: boolean;
+  readonly hasProviderPools: boolean; // fork: see FORK.md.
   readonly managedTunnelActive?: boolean;
 }
 
@@ -82,7 +82,7 @@ export const SETTINGS_SECTION_LABELS: Readonly<Record<SettingsPath, string>> = {
   "/settings/keybindings": "Keybindings",
   "/settings/snap-shot": "SnapShots",
   "/settings/providers": "Providers",
-  "/settings/account-pools": "Account pools",
+  "/settings/account-pools": "Account pools", // fork: see FORK.md.
   "/settings/integrations": "Integrations",
   "/settings/scheduled-tasks": "Scheduled Tasks",
   "/settings/source-control": "Source Control",
@@ -652,7 +652,7 @@ export const SETTINGS_SEARCH_ITEMS = [
     ],
   },
   {
-    id: "account-pools",
+    id: "account-pools", // fork: see FORK.md.
     title: "Account pools",
     to: "/settings/account-pools",
     searchTerms: [
@@ -1027,7 +1027,7 @@ const SETTINGS_CATEGORY_SCOPES: Readonly<Record<SettingsPath, SettingsSearchScop
   "/settings/snap-shot": null,
   "/settings/keybindings": null,
   "/settings/providers": null,
-  "/settings/account-pools": null,
+  "/settings/account-pools": null, // fork: see FORK.md.
   "/settings/integrations": null,
   "/settings/source-control": "environment-defaults",
   "/settings/storage": "project-defaults",
@@ -1087,6 +1087,7 @@ export function getThreadAutoSettlementSearchAvailability(
   };
 }
 
+// fork: whether any environment supports account pools, see FORK.md.
 interface ProviderPoolsSearchEnvironment {
   readonly serverConfig: {
     readonly environment: { readonly capabilities: { readonly providerPools?: boolean } };
@@ -1160,7 +1161,7 @@ export function filterAvailableSettingsSearchItems(
       (!item.localEnvironmentOnly || !availability.localEnvironmentDisabled) &&
       (!item.wslAvailableOnly || availability.isWslSettingsRowVisible) &&
       (!item.requiresThreadAutoSettlement || availability.hasThreadAutoSettlement) &&
-      (!item.requiresProviderPools || availability.hasProviderPools) &&
+      (!item.requiresProviderPools || availability.hasProviderPools) && // fork: see FORK.md.
       (!item.managedTunnelOnly || availability.managedTunnelActive === true),
   );
 }

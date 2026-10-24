@@ -29,7 +29,7 @@ export function resolvePendingHandoff(
   if (from === undefined || selection == null) return null;
   const source = providers.find((provider) => provider.instanceId === from.instanceId);
   const target = providers.find((provider) => provider.instanceId === selection.instanceId);
-  // A pool keeps a thread on the account that last ran it, so it counts as that account.
+  // fork: a pool keeps a thread on its last account, so it counts as that account. See FORK.md.
   const staysOnSource =
     from.instanceId === selection.instanceId ||
     (target?.pool?.role === "pool" && target.pool.memberInstanceIds.includes(from.instanceId));

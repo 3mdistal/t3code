@@ -2,18 +2,23 @@ import {
   defaultInstanceIdForDriver,
   findProviderPool,
   isProviderAvailable,
+  isProviderDriverKind,
   providerLimitedUntilMs,
   providerPoolDriver,
   resolveProjectProviderInstanceEnabled,
   type ModelSelection,
   type ProjectId,
   type ProjectSettingsOverrides,
+  ServerSettingsError,
+  type ProviderDriverKind,
   type ProviderInstanceId,
   type ServerProvider,
   type ServerSettings,
+  type ServerSettingsPatch,
   type ThreadId,
 } from "@t3tools/contracts";
 import { isModelSelectionProviderEnabled } from "@t3tools/shared/serverSettings";
+import * as Effect from "effect/Effect";
 import * as Record from "effect/Record";
 
 export interface PoolMemberHealth {
@@ -306,4 +311,54 @@ export function withStorablePoolSelections(settings: ServerSettings): ServerSett
       settings.reviewGuideModelSelection && store(settings.reviewGuideModelSelection),
     projectSettingsOverrides: Record.map(settings.projectSettingsOverrides, storeOverrides),
   };
+}
+
+/** A removed account leaves every pool it was in. */
+export function withoutPoolMember(
+  settings: ServerSettings,
+  instanceId: ProviderInstanceId,
+): ServerSettings {
+  return {
+    ...settings,
+    providerPools: Record.map(settings.providerPools, (pool) => ({
+      ...pool,
+      memberInstanceIds: pool.memberInstanceIds.filter((memberId) => memberId !== instanceId),
+    })),
+  };
+}
+
+/**
+ * A built-in driver's default instance exists without a settings entry, and
+ * its id is the driver kind, so an unconfigured member resolves that way.
+ */
+const configuredInstanceDriver = (
+  settings: ServerSettings,
+  instanceId: ProviderInstanceId,
+): ProviderDriverKind | undefined =>
+  settings.providerInstances[instanceId]?.driver ??
+  (isProviderDriverKind(instanceId) ? instanceId : undefined);
+
+/** Fails a write that changes pools when a member is repeated or runs another driver. */
+export function validatedProviderPools(
+  next: ServerSettings,
+  patch: ServerSettingsPatch,
+  settingsPath: string,
+): Effect.Effect<ServerSettings, ServerSettingsError> {
+  if (patch.providerPools === undefined) return Effect.succeed(next);
+  for (const [driver, pool] of Object.entries(next.providerPools)) {
+    const seen = new Set<ProviderInstanceId>();
+    for (const memberId of pool.memberInstanceIds) {
+      if (seen.has(memberId) || configuredInstanceDriver(next, memberId) !== driver) {
+        return Effect.fail(
+          new ServerSettingsError({
+            settingsPath,
+            operation: "validate-provider-pool",
+            providerInstanceId: memberId,
+          }),
+        );
+      }
+      seen.add(memberId);
+    }
+  }
+  return Effect.succeed(next);
 }

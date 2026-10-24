@@ -400,9 +400,9 @@ it.effect(
         }),
         Layer.mock(ProviderRegistry.ProviderRegistry)({
           getProviders: Effect.succeed([]),
-          getPublishedProviders: Effect.succeed([]),
+          getPublishedProviders: Effect.succeed([]), // fork: see FORK.md.
           streamChanges: Stream.never,
-          streamPublishedChanges: Stream.never,
+          streamPublishedChanges: Stream.never, // fork: see FORK.md.
         }),
         Layer.mock(UsageLimitSources.UsageLimitSources)({ streamChanges: Stream.make([]) }),
         Layer.mock(RemoteOpenTargets.RemoteOpenTargets)({
