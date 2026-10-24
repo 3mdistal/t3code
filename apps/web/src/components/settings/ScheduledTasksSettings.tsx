@@ -48,14 +48,11 @@ import {
 import { formatRelativeTime } from "../../timestampFormat";
 import { useEnvironmentSettings } from "../../hooks/useSettings";
 import { getCustomModelOptionsByInstance } from "../../modelSelection";
-import {
-  applyProviderInstanceSettings,
-  deriveProviderInstanceEntries,
-  sortProviderInstanceEntries,
-} from "../../providerInstances";
+import { deriveComposerProviderInstanceEntries } from "../../providerInstances";
 import { usePrimaryCloudLinkState } from "../../cloud/primaryCloudLinkState";
 import { requestConfirmDialog } from "../../confirmDialog";
 import { webhookAddress } from "@t3tools/client-runtime/webhook-address";
+import { composerModelSelectionFor } from "@t3tools/client-runtime/provider-pools";
 import { Link } from "@tanstack/react-router";
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { useNowMinute } from "../../hooks/useNowMinute";
@@ -1137,16 +1134,22 @@ function ScheduledTaskEditorForm({
     : task;
   const selectedProjectId = draft.projectId || projects[0]?.id || "";
   const selectedProject = projects.find((project) => project.id === selectedProjectId);
-  const instanceEntries = sortProviderInstanceEntries(
-    applyProviderInstanceSettings(
-      deriveProviderInstanceEntries(providers),
-      settings,
-      selectedProject?.id ?? null,
-    ),
+  // A task's runs start threads the way the composer does, so it offers a pool in place of its
+  // accounts, and shows a task saved on the pool's first account as the pool.
+  const instanceEntries = deriveComposerProviderInstanceEntries(
+    providers,
+    settings,
+    selectedProject?.id ?? null,
   );
 
   const firstInstance = instanceEntries[0];
-  const draftSelection = draft.modelKey ? splitModelKey(draft.modelKey) : null;
+  const keyedSelection = draft.modelKey ? splitModelKey(draft.modelKey) : null;
+  const draftSelection =
+    keyedSelection === null ? null : composerModelSelectionFor(providers, keyedSelection);
+  const baseModelSelection =
+    draft.baseModelSelection === null
+      ? null
+      : composerModelSelectionFor(providers, draft.baseModelSelection);
   const activeSelection =
     draftSelection &&
     instanceEntries.some((entry) => entry.instanceId === draftSelection.instanceId && entry.enabled)
@@ -1224,10 +1227,10 @@ function ScheduledTaskEditorForm({
       return;
     }
     const modelSelection =
-      draft.baseModelSelection !== null &&
-      draft.baseModelSelection.instanceId === selection.instanceId &&
-      draft.baseModelSelection.model === selection.model
-        ? draft.baseModelSelection
+      baseModelSelection !== null &&
+      baseModelSelection.instanceId === selection.instanceId &&
+      baseModelSelection.model === selection.model
+        ? baseModelSelection
         : selection;
     const workspaceStrategy: OrchestrationV2ThreadLaunchWorkspaceStrategy =
       draft.workspaceMode === "root"

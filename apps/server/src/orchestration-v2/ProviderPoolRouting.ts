@@ -238,3 +238,19 @@ export function routeModelSelection(input: {
     decision,
   };
 }
+
+/**
+ * Stock T3 has no pool ids, so a selection saved for later names the pool's
+ * first account instead. Here that account still routes through the pool;
+ * after a rollback to stock T3 the saved selection still runs on it.
+ */
+export function storableModelSelection(
+  providers: ReadonlyArray<ServerProvider>,
+  selection: ModelSelection,
+): ModelSelection {
+  const owner = findProviderPool(providers, selection.instanceId);
+  const firstMember = owner?.members[0];
+  return owner?.pool.instanceId === selection.instanceId && firstMember !== undefined
+    ? { ...selection, instanceId: firstMember.instanceId }
+    : selection;
+}
