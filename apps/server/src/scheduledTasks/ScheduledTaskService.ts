@@ -50,6 +50,8 @@ import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/sql/SqlClient";
 
+import { ProviderPoolCatalog } from "../orchestration-v2/ProviderPoolCatalog.ts";
+import { storableModelSelection } from "../orchestration-v2/ProviderPoolRouting.ts";
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
 import * as Metrics from "../observability/Metrics.ts";
@@ -509,6 +511,7 @@ export const layer = Layer.effect(
       webhookPolicyBlock !== undefined && task.schedule.type === "webhook"
         ? { ...task, blockedByPolicy: webhookPolicyBlock }
         : task;
+    const poolCatalog = yield* ProviderPoolCatalog;
     const webhookPermits = yield* Ref.make<ReadonlyMap<ScheduledTaskId, Semaphore.Semaphore>>(
       new Map(),
     );
@@ -1607,7 +1610,10 @@ export const layer = Layer.effect(
         threadId,
         threadMode,
         workspaceStrategy,
-        modelSelection: input.modelSelection,
+        modelSelection: storableModelSelection(
+          yield* poolCatalog.getPublishedProviders,
+          input.modelSelection,
+        ),
         runtimeMode: input.runtimeMode,
         interactionMode: input.interactionMode,
         createdBy: existingTask?.createdBy ?? input.createdBy ?? "user",
