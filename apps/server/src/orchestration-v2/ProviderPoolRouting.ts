@@ -7,10 +7,14 @@ import {
   resolveProjectProviderInstanceEnabled,
   type ModelSelection,
   type ProjectId,
+  type ProjectSettingsOverrides,
   type ProviderInstanceId,
   type ServerProvider,
+  type ServerSettings,
   type ThreadId,
 } from "@t3tools/contracts";
+import { isModelSelectionProviderEnabled } from "@t3tools/shared/serverSettings";
+import * as Record from "effect/Record";
 
 export interface PoolMemberHealth {
   readonly instanceId: ProviderInstanceId;
@@ -252,4 +256,53 @@ export function storableModelSelection(
   return owner?.pool.instanceId === selection.instanceId && firstMember !== undefined
     ? { ...selection, instanceId: firstMember.instanceId }
     : selection;
+}
+
+/**
+ * The same rule for a selection saved in settings, which sit below the
+ * provider registry and so can only see the configured pool: its first
+ * enabled account.
+ */
+export function storableSettingsModelSelection(
+  settings: ServerSettings,
+  selection: ModelSelection,
+): ModelSelection {
+  const driver = providerPoolDriver(selection.instanceId);
+  const member = driver
+    ? settings.providerPools[driver]?.memberInstanceIds.find((instanceId) =>
+        isModelSelectionProviderEnabled(settings, { ...selection, instanceId }),
+      )
+    : undefined;
+  return member === undefined ? selection : { ...selection, instanceId: member };
+}
+
+/** Every model choice settings save, environment-wide and per project, names an account. */
+export function withStorablePoolSelections(settings: ServerSettings): ServerSettings {
+  const store = (selection: ModelSelection) => storableSettingsModelSelection(settings, selection);
+  const storeOverrides = (overrides: ProjectSettingsOverrides): ProjectSettingsOverrides => ({
+    ...overrides,
+    ...(overrides.defaultModelSelection
+      ? { defaultModelSelection: store(overrides.defaultModelSelection) }
+      : {}),
+    ...(overrides.textGenerationModelSelection
+      ? { textGenerationModelSelection: store(overrides.textGenerationModelSelection) }
+      : {}),
+    ...(overrides.sourceControlWriterModelSelection
+      ? { sourceControlWriterModelSelection: store(overrides.sourceControlWriterModelSelection) }
+      : {}),
+    ...(overrides.reviewGuideModelSelection
+      ? { reviewGuideModelSelection: store(overrides.reviewGuideModelSelection) }
+      : {}),
+  });
+  return {
+    ...settings,
+    defaultModelSelection: settings.defaultModelSelection && store(settings.defaultModelSelection),
+    textGenerationModelSelection: store(settings.textGenerationModelSelection),
+    sourceControlWriterModelSelection:
+      settings.sourceControlWriterModelSelection &&
+      store(settings.sourceControlWriterModelSelection),
+    reviewGuideModelSelection:
+      settings.reviewGuideModelSelection && store(settings.reviewGuideModelSelection),
+    projectSettingsOverrides: Record.map(settings.projectSettingsOverrides, storeOverrides),
+  };
 }
