@@ -769,9 +769,24 @@ const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(fun
 
   // Optional discovery must finish before the outer timeout can discard the account result.
   const deadlineMs = spawnedAtMs + input.probeTimeoutMs - CODEX_DISCOVERY_MARGIN_MS;
-  const [skillsResponse, models, { config, nativeUsage, rateLimits }] = yield* Effect.all(
+  // fork: `skills` replaces `skillsResponse`, marked within the deadline below. See FORK.md.
+  const [skills, models, { config, nativeUsage, rateLimits }] = yield* Effect.all(
     [
-      withCodexDiscoveryDeadline(client.request("skills/list", { cwds: [input.cwd] }), deadlineMs),
+      withCodexDiscoveryDeadline(
+        client.request("skills/list", { cwds: [input.cwd] }),
+        deadlineMs,
+      ).pipe(
+        // fork: hide `user-invocable: false` skills from the `$` menu, reading their SKILL.md
+        // alongside model discovery and never past its deadline. See FORK.md.
+        Effect.flatMap((skillsResponse) =>
+          skillsResponse
+            ? markCodexSkillsUserInvocable(
+                parseCodexSkillsListResponse(skillsResponse, input.cwd),
+                { deadlineMs },
+              )
+            : Effect.undefined,
+        ),
+      ),
       accountResponse.account?.type === "chatgpt"
         ? requestCodexChatGptModels({
             client,
@@ -823,10 +838,7 @@ const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(fun
     cyberAccessProgramsUnavailable:
       accountResponse.account?.type === "apiKey" &&
       (config === undefined || cyberAccess?.features?.api_key_cyber_access_programs === false),
-    skills: skillsResponse
-      ? // fork: hide `user-invocable: false` skills from the `$` menu. See FORK.md.
-        yield* markCodexSkillsUserInvocable(parseCodexSkillsListResponse(skillsResponse, input.cwd))
-      : [],
+    skills: skills ?? [], // fork: see the skills/list request above and FORK.md.
   } satisfies CodexAppServerProviderSnapshot;
 });
 
