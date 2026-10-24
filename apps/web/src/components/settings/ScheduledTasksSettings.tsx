@@ -55,10 +55,11 @@ import { m, type MessageResolver } from "../../i18n/messages";
 import { formatRelativeTime } from "../../timestampFormat";
 import { useClientSettings, useEnvironmentSettings } from "../../hooks/useSettings";
 import { getCustomModelOptionsByInstance, selectsPlanAgent } from "../../modelSelection";
-import { providerInstanceEntriesFor } from "../../providerInstances";
+import { deriveComposerProviderInstanceEntries } from "../../providerInstances";
 import { usePrimaryCloudLinkState } from "../../cloud/cloudLinkState";
 import { requestConfirmDialog } from "../../confirmDialog";
 import { webhookAddress } from "@t3tools/client-runtime/webhook-address";
+import { composerModelSelectionFor } from "@t3tools/client-runtime/provider-pools";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { useNowMinute } from "../../hooks/useNowMinute";
@@ -1547,14 +1548,19 @@ function ScheduledTaskEditorForm({
     selectedProject !== undefined &&
     automaticBaseRefs.data === null &&
     automaticBaseRefs.error === null;
-  const instanceEntries = providerInstanceEntriesFor(
+  // A task's runs start threads the way the composer does, so it offers a pool in place of its
+  // accounts, and shows a task saved on the pool's first account as the pool.
+  const instanceEntries = deriveComposerProviderInstanceEntries(
     providers,
     settings,
     selectedProject?.id ?? null,
   );
 
   const firstInstance = instanceEntries[0];
-  const draftSelection = draft.modelSelection;
+  const draftSelection =
+    draft.modelSelection === null
+      ? null
+      : composerModelSelectionFor(providers, draft.modelSelection);
   const activeSelection =
     draftSelection &&
     instanceEntries.some((entry) => entry.instanceId === draftSelection.instanceId && entry.enabled)
