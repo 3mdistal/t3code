@@ -71,6 +71,8 @@ import * as FeedbackStore from "../feedback/FeedbackStore.ts";
 import * as WorkspaceFolders from "../workspace/WorkspaceFolders.ts";
 import * as TaskFolderStore from "../workspace/TaskFolderStore.ts";
 // fork: limits, see FORK.md.
+import * as HostReadings from "../resourceLimits/HostReadings.ts";
+import * as ResourceLimitsGovernor from "../resourceLimits/Governor.ts";
 import * as ResourceLimits from "../resourceLimits/ResourceLimits.ts";
 
 export const layerEventInfrastructure = Layer.mergeAll(
@@ -472,12 +474,23 @@ export const layerProduction = Layer.mergeAll(
   layerAgentSessionScannerProvided,
   layerAgentSessionImporterProvided,
   EffectOutbox.layerPruneWorker.pipe(Layer.provide(EffectOutbox.layer)),
+  // fork: limits, see FORK.md.
+  ResourceLimitsGovernor.layer.pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        ProjectionStore.layer,
+        layerThreadManagementProvided,
+        layerProviderSessionManagerProvided,
+        HostReadings.layer,
+      ),
+    ),
+  ),
 ).pipe(
   Layer.provide(ResourceCleanupService.layer.pipe(Layer.provide(layerScheduledTaskProvided))),
   Layer.provideMerge(layerProjectService),
   Layer.provide(Scheduler.layer),
   Layer.provide(ProviderPoolCatalog.layer), // fork: account pools, see FORK.md.
-  // fork: limits, see FORK.md.
+  // fork: limits, see FORK.md. One instance for the orchestrator, the governor, and the RPC.
   Layer.provideMerge(ResourceLimits.layer.pipe(Layer.provide(ProjectionStore.layer))),
   Layer.provideMerge(layerEventInfrastructure),
 );
