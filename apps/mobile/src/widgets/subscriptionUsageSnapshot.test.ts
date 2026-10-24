@@ -100,7 +100,8 @@ describe("subscription widget snapshots", () => {
     );
     const session = snapshot.providers[0]?.windows.find((w) => w.kind === "session");
     expect(session?.accounts).toStrictEqual([
-      { name: "RE", remaining: 60, refill: 0 },
+      // fork: pools name an account without a display name by its instance id, not its email, see FORK.md.
+      { name: "Rex", remaining: 60, refill: 0 },
       {
         name: "smol",
         color: "#4c6ef5",
@@ -110,7 +111,7 @@ describe("subscription widget snapshots", () => {
         reset: expect.any(String),
         durationMs: 300 * 60_000,
       },
-      { name: "RE2" },
+      { name: "RE" }, // fork: so the relay account's initials no longer collide, see FORK.md.
     ]);
     expect(JSON.stringify(snapshot)).not.toContain("example.com");
   });

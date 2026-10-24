@@ -404,7 +404,7 @@ export function applyServerSettingsPatch(
     usageLimitSources: usageLimitSourcesPatch,
     textGenerators: textGeneratorsPatch,
     secretProviders: secretProvidersPatch,
-    providerPools: providerPoolsPatch,
+    providerPools: providerPoolsPatch, // fork: see FORK.md.
     sourceControlHosts: sourceControlHostsPatch,
     usagePriceOverrides: usagePriceOverridesPatch,
     usageModelAliases: usageModelAliasesPatch,
@@ -627,7 +627,7 @@ export function applyServerSettingsPatch(
     ...(secretProvidersPatch !== undefined
       ? { secretProviders: mergeSettingsEntries(current.secretProviders, secretProvidersPatch) }
       : {}),
-    ...(providerPoolsPatch !== undefined
+    ...(providerPoolsPatch !== undefined // fork: see FORK.md.
       ? { providerPools: mergeSettingsEntries(current.providerPools, providerPoolsPatch) }
       : {}),
     ...(usagePriceOverridesPatch !== undefined

@@ -260,7 +260,7 @@ import { Button } from "../ui/button";
 import { Spinner } from "../ui/spinner";
 import { useManagedPolicy } from "../../state/managedPolicy";
 import { hasProviderSetup } from "./ProviderStatusBanner";
-import { resolvePoolMemberLabel } from "../../providerInstances";
+import { resolvePoolMemberLabel } from "../../providerInstances"; // fork: see FORK.md.
 import { type AppModelOption, getAppModelOptionsForInstance } from "../../modelSelection";
 import type { UnifiedSettings } from "@t3tools/contracts/settings";
 import { isVideoAttachment, type SessionPhase, type Thread } from "../../types";
@@ -2734,7 +2734,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         providerStatuses,
         selectedInstanceId,
         activeThread?.runtime?.providerInstanceId,
-      )}
+      )} // fork: names the pooled account in the picker, see FORK.md.
       providerInstanceEntries={providerInstanceEntries}
       keybindings={keybindings}
       modelOptionsByInstance={modelOptionsByInstance}

@@ -12,7 +12,10 @@ import {
 
 import { getOnboardingProviderState } from "./providerReadiness.logic";
 
-type ComputerSettings = Pick<ServerSettings, "providerInstances" | "projectSettingsOverrides">;
+type ComputerSettings = Pick<
+  ServerSettings,
+  "providerInstances" | "projectSettingsOverrides" | "providerPools" // fork: see FORK.md.
+>;
 
 // Ready agents first, then ones that need a sign-in or a look. Never ranked by vendor.
 const FOUND_ORDER = { ready: 0, signIn: 1, attention: 2 } as const;
