@@ -17,7 +17,8 @@
 # instead of fetching the release again.
 set -eu
 
-repo="pingdotgg/t3code"
+# fork: installs this fork's releases (see FORK.md).
+repo="3mdistal/t3code"
 base_url="${T3CODE_RELEASE_BASE_URL:-https://github.com/${repo}/releases/download}"
 t3_home="${T3CODE_HOME:-$HOME/.t3}"
 bin_dir="${T3CODE_INSTALL_BIN_DIR:-$HOME/.local/bin}"
