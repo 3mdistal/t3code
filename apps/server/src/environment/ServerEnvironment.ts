@@ -243,6 +243,7 @@ export const make = Effect.gen(function* () {
       usagePriceOverrides: true,
       usageModelAliases: true,
       providerPools: true, // fork: account pools, see FORK.md.
+      resourceLimits: hostPlatform === "win32" || hostPlatform === "darwin", // fork: limits, see FORK.md.
       threadPinning: true,
       threadPinReorder: true,
       threadActiveReorder: true,

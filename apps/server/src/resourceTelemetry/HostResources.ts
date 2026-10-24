@@ -26,7 +26,8 @@ function readCpu() {
   return { ...cpu, count: cpus.length };
 }
 
-function darwinAvailableMemory(output: string): number | null {
+// fork: limits, see FORK.md. Exported for the limits' host readings.
+export function darwinAvailableMemory(output: string): number | null {
   const pageSize = /page size of (\d+) bytes/.exec(output)?.[1];
   const free = /^Pages free:\s+(\d+)\./m.exec(output)?.[1];
   const inactive = /^Pages inactive:\s+(\d+)\./m.exec(output)?.[1];

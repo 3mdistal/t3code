@@ -3,6 +3,8 @@ import * as Schema from "effect/Schema";
 import { NonNegativeInt, PositiveInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
 import { HostPowerSnapshot } from "./background.ts";
 import { DesktopUpdateStateSchema } from "./ipc.ts";
+// fork: limits, see FORK.md.
+import { ResourceLimitsStatus } from "./resourceLimits.ts";
 
 export const RESOURCE_MONITOR_PROTOCOL_VERSION = 3 as const;
 
@@ -12,6 +14,8 @@ export const HostResourcesSnapshot = Schema.Struct({
   cpuCount: NonNegativeInt,
   availableMemoryBytes: NonNegativeInt,
   totalMemoryBytes: NonNegativeInt,
+  // fork: limits, see FORK.md. Absent from stock servers and from machines without limits.
+  limits: Schema.optionalKey(ResourceLimitsStatus),
 });
 export type HostResourcesSnapshot = typeof HostResourcesSnapshot.Type;
 
