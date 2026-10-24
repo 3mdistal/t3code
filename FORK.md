@@ -143,7 +143,8 @@ Users read about it in the Memory and CPU limits section of `docs/user/remote-ac
   Work launched from a thread whose latest message is her "launch anyway" starts too. Idle sessions close on
   every pass over the limits, before anything waits. Below the critical line, the newest running turn is
   interrupted every 30 s, and its thread queues a resume note. Held threads start oldest first, 90 s apart.
-- Limit-only files: `apps/server/src/resourceLimits/`, and `packages/contracts/src/resourceLimits.ts`.
+- Limit-only files: `apps/server/src/resourceLimits/`, `packages/contracts/src/resourceLimits.ts`, and
+  `apps/web/src/components/settings/MachineLimits*`.
 - Upstream files it changes:
   - `apps/server/src/orchestration-v2/Orchestrator.ts`: the three places a run can start call into
     `resourceLimits/OrchestratorAdmission.ts`: `dispatchMessage`, `startNextQueuedRun`, and
@@ -154,6 +155,9 @@ Users read about it in the Memory and CPU limits section of `docs/user/remote-ac
   - `runtimeLayer.ts` wires the governor. `ws.ts` adds the limits to `serverGetHostResources`.
   - Contracts and `serverSettings.ts`: the `resourceLimits` settings key, the `resourceLimits` capability, and
     `HostResourcesSnapshot.limits`.
+  - `LoadBalancingSettings.tsx` shows each machine's limits under its row, and hands a lone machine to
+    `MachineLimitsSection`. `settingsSearch.ts` adds search terms.
+  - `packages/client-runtime/src/load-balancing.ts`: Auto balance skips a machine over its limits.
 - The memory gate's hook reads the governor's files under `<stateDir>/resource-limits/`:
   - `state.json`: state, readings, waiting threads, and each running session's thread and "launch anyway". It's
     rewritten every pass, so a stale file means T3 isn't guarding.
@@ -163,9 +167,12 @@ Users read about it in the Memory and CPU limits section of `docs/user/remote-ac
   notifications. Stock T3 drops `resourceLimits` the next time it saves settings.
 - Known gaps:
   - Forks and merge-backs aren't held.
+  - Mobile has no Load balancing settings, so limits are edited from web or desktop. Mobile's Resume starts held
+    work like web's.
   - Upstream refuses to snooze a thread with a queued message of its own. So held agent messages stay in the
     inbox, and only threads holding notifications alone (interrupted turns, refused launches) get snoozed.
-- Tests: `apps/server/src/resourceLimits/*.fork.test.ts` and `packages/shared/src/serverSettings.fork.test.ts`.
+- Tests: `apps/server/src/resourceLimits/*.fork.test.ts`, `packages/shared/src/serverSettings.fork.test.ts`,
+  `packages/client-runtime/src/load-balancing.fork.test.ts`, and `MachineLimits.logic.fork.test.ts`.
   `Governor.fork.test.ts` runs the real orchestrator with fake readings and a test clock.
 
 ## Versions
