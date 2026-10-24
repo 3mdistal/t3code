@@ -1575,7 +1575,7 @@ const make = Effect.gen(function* () {
     return { parent, target, shell, runCount } as const;
   });
 
-  const loadProviders = providerRegistry.getProviders;
+  const loadProviders = providerRegistry.getPublishedProviders;
 
   /** The folder the composer's model picker scans for this thread. */
   const parentWorkspaceCwd = (parent: Pick<OrchestrationV2ThreadProjection, "thread">) =>
@@ -1597,8 +1597,19 @@ const make = Effect.gen(function* () {
         ),
       );
 
+  // A pool has no adapter of its own; routing picks a member's at dispatch.
   const loadOrchestrationCapableInstanceIds = () =>
-    providerAdapters.list().pipe(Effect.map((instanceIds) => new Set(instanceIds)));
+    Effect.all([providerAdapters.list(), loadProviders]).pipe(
+      Effect.map(
+        ([instanceIds, providers]) =>
+          new Set([
+            ...instanceIds,
+            ...providers
+              .filter((provider) => provider.pool?.role === "pool")
+              .map((provider) => provider.instanceId),
+          ]),
+      ),
+    );
 
   /** Background agents miss foreground-only health probes; re-probe once before refusing. */
   const assertTargetEnabledForProject = (
@@ -1672,12 +1683,16 @@ const make = Effect.gen(function* () {
       const healthyCandidates = candidates.filter(
         (candidate) => providerConstraints(candidate, true).length === 0,
       );
+      const poolCandidate = healthyCandidates.find((candidate) => candidate.pool?.role === "pool");
       const inheritedCandidate = healthyCandidates.find(
         (candidate) => candidate.instanceId === input.parent.thread.modelSelection.instanceId,
       );
+      const preferred = [poolCandidate, inheritedCandidate].filter(
+        (candidate) => candidate !== undefined,
+      );
       const orderedCandidates = [
-        ...(inheritedCandidate === undefined ? [] : [inheritedCandidate]),
-        ...healthyCandidates.filter((candidate) => candidate !== inheritedCandidate),
+        ...preferred,
+        ...healthyCandidates.filter((candidate) => !preferred.includes(candidate)),
       ];
       for (const candidate of orderedCandidates) {
         const enabledForProject =
@@ -2711,10 +2726,11 @@ const make = Effect.gen(function* () {
           discard: true,
         });
       }
+      // fork: a pool lists in place of its accounts, see FORK.md.
       const providers = withWorkspaceModels(
         unscanned.length > 0 ? yield* loadProviders : machineProviders,
         cwd,
-      );
+      ).filter((provider) => provider.pool?.role !== "member");
       const orchestrationCapableInstanceIds = yield* loadOrchestrationCapableInstanceIds();
       const settings = yield* serverSettings.getSettings.pipe(
         Effect.mapError(() => failure("orchestration_error", "Unable to read server settings.")),

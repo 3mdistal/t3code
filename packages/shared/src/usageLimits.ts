@@ -20,6 +20,7 @@ import {
 import * as DateTime from "effect/DateTime";
 
 import { isLocalLoopbackHost, isWildcardHost } from "./hostClassification.ts";
+import { resolveProviderInstanceDisplayName } from "./providerInstanceDisplay.ts";
 
 const MINUTE = 60_000;
 
@@ -277,7 +278,14 @@ function hubIdentity(environmentId: EnvironmentId, source: UsageLimitSourceSnaps
 export interface LimitAccount {
   readonly key: string;
   readonly driver: ServerProvider["driver"];
+  /** The app-wide instance name; null only for an external usage source without an email or id. */
   readonly displayName: string | null;
+  /** Instances signed in as this account, in provider order. Empty for external usage sources. */
+  readonly instances: ReadonlyArray<{
+    readonly instanceId: ProviderInstanceId;
+    readonly displayName: string;
+    readonly environmentId: EnvironmentId;
+  }>;
   readonly email: string | undefined;
   readonly plan: string | undefined;
   readonly accentColor: string | undefined;
@@ -337,6 +345,17 @@ export function collectLimitAccounts(presentations: LimitPresentations): readonl
           !previous.environments.some((seen) => seen.environmentId === candidate.environmentId),
       ),
     ];
+    const instances = [
+      ...previous.instances,
+      ...next.instances.filter(
+        (candidate) =>
+          !previous.instances.some(
+            (seen) =>
+              seen.environmentId === candidate.environmentId &&
+              seen.instanceId === candidate.instanceId,
+          ),
+      ),
+    ];
     const winner = fresher ? next : previous;
     const creditSource = creditSources.get(key);
     // A hub e-mail names the account better than the driver's default instance name.
@@ -351,6 +370,7 @@ export function collectLimitAccounts(presentations: LimitPresentations): readonl
         displayName?.toLowerCase() === PROVIDER_DISPLAY_NAMES[previous.driver]?.toLowerCase()
           ? null
           : displayName,
+      instances,
       plan: planSources.get(key)?.plan ?? previous.plan ?? next.plan,
       accentColor: previous.accentColor ?? next.accentColor,
       environments,
@@ -378,10 +398,12 @@ export function collectLimitAccounts(presentations: LimitPresentations): readonl
     const label = presentation.entry.target.label;
     for (const provider of providersWithLimits(presentation.serverConfig?.providers ?? [])) {
       if (!provider.usageLimits || limitsNotice(provider.usageLimits) !== null) continue;
+      const instanceName = resolveProviderInstanceDisplayName(provider);
       merge(resolveKey(nativeReport(provider)) ?? `${environmentId}:${provider.instanceId}`, {
         key: `${environmentId}:${provider.instanceId}`,
         driver: provider.driver,
-        displayName: provider.displayName?.trim() || null,
+        displayName: instanceName,
+        instances: [{ instanceId: provider.instanceId, displayName: instanceName, environmentId }],
         email: provider.auth.email,
         plan: provider.auth.label,
         accentColor: provider.accentColor,
@@ -408,6 +430,7 @@ export function collectLimitAccounts(presentations: LimitPresentations): readonl
           key,
           driver: account.driver,
           displayName: account.email ? null : hubAccountName(account),
+          instances: [],
           email: account.email,
           plan: account.plan,
           accentColor: undefined,
