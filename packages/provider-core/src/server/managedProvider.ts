@@ -53,6 +53,25 @@ export const DeferringFailedCheck = Context.Reference<boolean>("t3/provider/Defe
   defaultValue: () => false,
 });
 
+function withLimitedUntil(
+  snapshot: ServerProvider,
+  limitedUntil: ServerProvider["limitedUntil"],
+): ServerProvider {
+  if (snapshot.limitedUntil === limitedUntil) {
+    return snapshot;
+  }
+  const { limitedUntil: _previous, ...rest } = snapshot;
+  return limitedUntil === undefined ? rest : { ...rest, limitedUntil };
+}
+
+const laterLimitedUntil = (
+  current: ServerProvider["limitedUntil"],
+  until: ServerProvider["limitedUntil"],
+): ServerProvider["limitedUntil"] =>
+  current !== undefined && until !== undefined && Date.parse(current) >= Date.parse(until)
+    ? current
+    : until;
+
 export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(function* <
   Settings,
 >(input: {
@@ -106,15 +125,18 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
       if (state.enrichmentGeneration !== generation) {
         return [null, state] as const;
       }
-      // Enrichment must not revert usage updates newer than its input snapshot.
-      const merged = withUsageLimits(
-        state.usageAuthLabel === undefined
-          ? nextSnapshot
-          : {
-              ...nextSnapshot,
-              auth: { ...nextSnapshot.auth, label: state.usageAuthLabel ?? undefined },
-            },
-        state.snapshot.usageLimits,
+      // Enrichment must not revert usage updates or cooldowns newer than its input snapshot.
+      const merged = withLimitedUntil(
+        withUsageLimits(
+          state.usageAuthLabel === undefined
+            ? nextSnapshot
+            : {
+                ...nextSnapshot,
+                auth: { ...nextSnapshot.auth, label: state.usageAuthLabel ?? undefined },
+              },
+          state.snapshot.usageLimits,
+        ),
+        state.snapshot.limitedUntil,
       );
       if (Equal.equals(state.snapshot, merged)) {
         return [null, state] as const;
@@ -238,11 +260,14 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
                 ...probedSnapshot,
                 auth: { ...probedSnapshot.auth, label: usageAuthLabel ?? undefined },
               };
-        const snapshot = withUsageLimits(
-          workspaceId && !probedSnapshot.auth.workspaceId
-            ? { ...labeledProbe, auth: { ...labeledProbe.auth, workspaceId } }
-            : labeledProbe,
-          usageLimits,
+        const snapshot = withLimitedUntil(
+          withUsageLimits(
+            workspaceId && !probedSnapshot.auth.workspaceId
+              ? { ...labeledProbe, auth: { ...labeledProbe.auth, workspaceId } }
+              : labeledProbe,
+            usageLimits,
+          ),
+          switchedAccount ? undefined : state.snapshot.limitedUntil,
         );
         return [
           { snapshot, generation },
@@ -296,6 +321,23 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
       }
     },
   );
+
+  const markLimited: ManagedServerProvider["markLimited"] = Effect.fn(
+    "ManagedServerProvider.markLimited",
+  )(function* (input) {
+    const snapshotToPublish = yield* Ref.modify(snapshotStateRef, (state) => {
+      const snapshot = withLimitedUntil(
+        state.snapshot,
+        laterLimitedUntil(state.snapshot.limitedUntil, input.until),
+      );
+      return snapshot === state.snapshot
+        ? ([null, state] as const)
+        : ([snapshot, { ...state, snapshot }] as const);
+    });
+    if (snapshotToPublish !== null) {
+      yield* PubSub.publish(changesPubSub, snapshotToPublish);
+    }
+  });
 
   const refreshSnapshot = Effect.fn("refreshSnapshot")(function* () {
     const nextSettings = yield* input.getSettings;
@@ -471,6 +513,7 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
       .pipe(Effect.andThen(refreshSnapshot), Effect.tapError(Effect.logError), Effect.orDie),
     applyUsageLimits,
     refreshUsage: refreshUsage(),
+    markLimited,
     get streamChanges() {
       return Stream.fromPubSub(changesPubSub);
     },
