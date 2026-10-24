@@ -33,6 +33,7 @@ import {
   withCodexAppServerClient,
 } from "../CodexProvider.ts";
 import { resolveCodexLaunchArgs } from "../codexLaunchArgs.ts";
+import { markCodexSkillsUserInvocable } from "../codexSkillInvocability.ts"; // fork: see FORK.md.
 import { makeManagedServerProvider } from "@t3tools/provider-core/server/managedProvider";
 import * as ModelCatalog from "@t3tools/provider-core/server/ModelCatalog";
 import { applyCodexModelCatalog } from "../codexModelCatalog.ts";
@@ -337,7 +338,16 @@ export const CodexDriver: ProviderDriver<
               launchArgs: resolveCodexLaunchArgs(effectiveConfig.launchArgs, processEnv),
               cwd,
               environment: processEnv,
-            }).pipe(Effect.timeout(resolveProviderProbeTimeoutMs("codex", 20_000, processEnv))),
+            }).pipe(
+              // fork: hide `user-invocable: false` skills from the `$` menu. See FORK.md.
+              Effect.flatMap((skills) =>
+                markCodexSkillsUserInvocable(skills).pipe(
+                  Effect.provideService(FileSystem.FileSystem, fileSystem),
+                  Effect.provideService(Path.Path, pathService),
+                ),
+              ),
+              Effect.timeout(resolveProviderProbeTimeoutMs("codex", 20_000, processEnv)),
+            ),
           ]).pipe(
             Effect.map(([machineSnapshot, skills]) => ({ ...machineSnapshot, skills })),
             Effect.mapError(
