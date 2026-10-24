@@ -1,5 +1,5 @@
 import type {
-  IsoDateTime,
+  IsoDateTime, // fork: see FORK.md.
   ProviderUsageLimitsUpdate,
   ServerProvider,
   ServerSettingsError,
@@ -30,8 +30,9 @@ export interface ManagedServerProvider {
   /** Merge windows by ID and set any authLabel; an update with no window leaves the snapshot untouched. */
   readonly applyUsageLimits: (update: ProviderUsageLimitsReport) => Effect.Effect<void>;
   /**
-   * Cools the account until `until`. Max-merge: an earlier end never shortens
-   * a cooldown already in force, so concurrent reports commute.
+   * fork: cools the account until `until`. Max-merge: an earlier end never shortens
+   * a cooldown already in force, so concurrent reports commute. Optional so upstream's
+   * hand-built snapshots in tests still type. See FORK.md.
    */
   readonly markLimited?: (input: { readonly until: IsoDateTime }) => Effect.Effect<void>;
 }

@@ -1,4 +1,4 @@
-import { isReservedProviderInstanceId } from "@t3tools/contracts";
+import { isReservedProviderInstanceId } from "@t3tools/contracts"; // fork: see FORK.md.
 import { msg } from "gt-react";
 
 import { m, type MessageResolver } from "../../i18n/messages"; // fork: see FORK.md.

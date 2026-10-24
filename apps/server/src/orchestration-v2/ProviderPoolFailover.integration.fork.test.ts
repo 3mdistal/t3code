@@ -376,8 +376,22 @@ const makeAdvancingClock = (clock: Clock.Clock) => {
   };
 };
 
-const awaitRunStatus = (threadId: ThreadId, status: "completed" | "failed" | "running") =>
-  awaitEvent(threadId, (event) => event.type === "run.updated" && event.payload.status === status);
+/**
+ * A run's turn-end checkpoint capture repeats its `completed` update, so a wait for a later run that
+ * starts before the capture commits names that run's ordinal.
+ */
+const awaitRunStatus = (
+  threadId: ThreadId,
+  status: "completed" | "failed" | "running",
+  ordinal?: number,
+) =>
+  awaitEvent(
+    threadId,
+    (event) =>
+      event.type === "run.updated" &&
+      event.payload.status === status &&
+      (ordinal === undefined || event.payload.ordinal === ordinal),
+  );
 
 /** The adapter records the start, and reads its fault, before the turn reports running. */
 const awaitProviderTurnRunning = (threadId: ThreadId) =>
@@ -416,7 +430,7 @@ it.live("moves a limited Claude turn to the other account with a summary handoff
         yield* sendMessage(threadId, "second");
         yield* Deferred.succeed(hold, undefined);
         yield* Fiber.join(firstCompleted);
-        const secondCompleted = yield* awaitRunStatus(threadId, "completed");
+        const secondCompleted = yield* awaitRunStatus(threadId, "completed", 2);
         yield* Ref.update(state, (current) => ({ ...current, holdTurn: null }));
         yield* Fiber.join(secondCompleted);
         yield* worker.drain();
@@ -776,7 +790,7 @@ it.live("starts a queued run on its pinned account when no pool member is eligib
         );
         yield* Deferred.succeed(hold, undefined);
         yield* Fiber.join(firstCompleted);
-        const queuedCompleted = yield* awaitRunStatus(threadId, "completed");
+        const queuedCompleted = yield* awaitRunStatus(threadId, "completed", 2);
         yield* Ref.update(state, (current) => ({ ...current, holdTurn: null }));
         yield* Fiber.join(queuedCompleted);
         yield* worker.drain();

@@ -30,6 +30,7 @@ import * as ModelManifest from "../provider/ModelManifest.ts";
 import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
 import * as ProviderInstanceRegistryMutator from "../provider/ProviderInstanceRegistryMutator.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
+import * as ServerSettings from "../serverSettings.ts"; // fork: see FORK.md.
 import * as SecretCheck from "./SecretCheck.ts";
 
 const FAKE_KIND = SecretProviderKind.make("fake");
@@ -191,6 +192,7 @@ const layerTest = Layer.mergeAll(
   ServerConfig.layerTest(process.cwd(), { prefix: "t3-secret-check-" }),
   ModelManifest.layerTest,
   ProviderLatestVersions.layer,
+  ServerSettings.layerTest(), // fork: account pools, see FORK.md.
   Layer.succeed(
     HttpClient.HttpClient,
     HttpClient.make((request) =>

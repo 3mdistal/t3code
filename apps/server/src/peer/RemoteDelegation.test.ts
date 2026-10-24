@@ -594,6 +594,7 @@ const boxToolkitLayer = (thread: BoxThread) => {
     Layer.provide(
       Layer.mock(ProviderRegistry.ProviderRegistry)({
         getProviders: Effect.succeed([boxClaude]),
+        getPublishedProviders: Effect.succeed([boxClaude]), // fork: pools, see FORK.md.
       }),
     ),
     Layer.provide(

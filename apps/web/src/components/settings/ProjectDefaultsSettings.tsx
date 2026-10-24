@@ -75,7 +75,7 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
   // a default that resolves to a pooled account, saved or automatic, shows as the pool. The saved
   // default is still checked against the accounts, before they fold into the pool. See FORK.md.
   const entries = deriveComposerProviderInstanceEntries(
-    providers,
+    providers, // fork: see FORK.md.
     settings,
     target?.projectId ?? null,
   );

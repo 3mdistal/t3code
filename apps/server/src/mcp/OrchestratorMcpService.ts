@@ -1634,7 +1634,7 @@ const make = Effect.gen(function* () {
     return { parent, target, shell, runCount } as const;
   });
 
-  const loadProviders = providerRegistry.getPublishedProviders;
+  const loadProviders = providerRegistry.getPublishedProviders; // fork: pools, see FORK.md.
 
   /** The folder the composer's model picker scans for this thread. */
   const parentWorkspaceCwd = (parent: Pick<OrchestrationV2ThreadProjection, "thread">) =>
@@ -1656,7 +1656,7 @@ const make = Effect.gen(function* () {
         ),
       );
 
-  // A pool has no adapter of its own; routing picks a member's at dispatch.
+  // fork: a pool has no adapter of its own; routing picks a member's at dispatch. See FORK.md.
   const loadOrchestrationCapableInstanceIds = () =>
     Effect.all([providerAdapters.list(), loadProviders]).pipe(
       Effect.map(
@@ -1742,16 +1742,17 @@ const make = Effect.gen(function* () {
       const healthyCandidates = candidates.filter(
         (candidate) => providerConstraints(candidate, true).length === 0,
       );
-      const poolCandidate = healthyCandidates.find((candidate) => candidate.pool?.role === "pool");
       const inheritedCandidate = healthyCandidates.find(
         (candidate) => candidate.instanceId === input.parent.thread.modelSelection.instanceId,
       );
+      // fork: a child task prefers the pool, see FORK.md.
+      const poolCandidate = healthyCandidates.find((candidate) => candidate.pool?.role === "pool");
       const preferred = [poolCandidate, inheritedCandidate].filter(
         (candidate) => candidate !== undefined,
       );
       const orderedCandidates = [
-        ...preferred,
-        ...healthyCandidates.filter((candidate) => !preferred.includes(candidate)),
+        ...preferred, // fork: see FORK.md.
+        ...healthyCandidates.filter((candidate) => !preferred.includes(candidate)), // fork: see FORK.md.
       ];
       for (const candidate of orderedCandidates) {
         const enabledForProject =
