@@ -56,10 +56,13 @@ Moving a thread to another Claude account continues from a summary of the
 conversation, because each account keeps its own history. The summary tells the
 new account how to read the earlier turns with `t3_thread_read`.
 
-Pooled accounts stay in **Settings**, where you can still select them and where
-**Settings > Providers** shows which pool each belongs to and when a limited account
-is available again. To bring an account back into the model picker, untick it or
-turn the pool off. Threads stay on the account that last ran them.
+Pooled accounts stay in **Settings > Providers**, which shows which pool each
+belongs to and when a limited account is available again. The default model for
+new threads offers the pool in place of its accounts, as the model picker does.
+The models for commit messages, titles and review guides still list each account,
+because that work runs on one account. To bring an account back into the model
+picker, untick it or turn the pool off. Threads stay on the account that last ran
+them.
 
 ## Compact long conversations
 
