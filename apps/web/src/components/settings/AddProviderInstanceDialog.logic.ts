@@ -1,4 +1,7 @@
+import { isReservedProviderInstanceId } from "@t3tools/contracts";
 import { msg } from "gt-react";
+
+import { m, type MessageResolver } from "../../i18n/messages"; // fork: see FORK.md.
 
 export type WizardNavigation =
   | { readonly kind: "navigate"; readonly step: number }
@@ -50,6 +53,13 @@ export function updateProviderIdentityDraft(
     ...drafts,
     [driver]: { ...getProviderIdentityDraft(drafts, driver), ...update },
   };
+}
+
+/** fork: `pool_` ids name account pools, so a provider instance can't take one. See FORK.md. */
+export function reservedInstanceIdError(id: string, resolve: MessageResolver = m): string | null {
+  return isReservedProviderInstanceId(id)
+    ? resolve(msg("Instance IDs starting with 'pool_' are reserved for account pools."))
+    : null;
 }
 
 export function isConfiguredAcpRegistryAgent(

@@ -112,6 +112,7 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
   triggerClassName?: string;
   triggerLabel?: string;
   triggerAriaLabel?: string;
+  activeAccount?: { readonly poolName: string; readonly memberName: string } | null;
   onOpenChange?: (open: boolean) => void;
   onOpenProviderSetup?: (instanceId: ProviderInstanceId) => void;
   getModelDisabledReason?: (instanceId: ProviderInstanceId, model: string) => string | null;
@@ -182,6 +183,7 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
   const triggerLabel = selectedModel
     ? withUnavailable(getDisplayModelName(selectedModel), selectedModel.isUnavailable)
     : triggerTitle;
+  const accountSuffix = props.activeAccount ? ` · ${props.activeAccount.memberName}` : "";
   const showInstanceBadge =
     activeEntry !== null && shouldShowInstanceBadge(activeEntry, props.instanceEntries);
 
@@ -273,14 +275,18 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
     ? selectedEntries.map((selection) => selection.fullLabel).join(", ") || gt("Choose models")
     : undefined;
   const triggerTooltipContent = [
-    props.triggerLabel ?? allModelNames ?? triggerLabel,
+    props.triggerLabel ??
+      allModelNames ??
+      (props.activeAccount
+        ? `${triggerLabel} · ${props.activeAccount.poolName} · ${props.activeAccount.memberName}`
+        : triggerLabel),
     props.triggerDetail,
     shortcutLabel,
   ]
     .filter(Boolean)
     .join(" · ");
 
-  const triggerText = props.triggerLabel ?? multipleLabel ?? triggerTitle;
+  const triggerText = props.triggerLabel ?? multipleLabel ?? `${triggerTitle}${accountSuffix}`;
   const triggerTextProps = {
     className: cn(
       "min-w-0 flex-1 overflow-hidden truncate",
