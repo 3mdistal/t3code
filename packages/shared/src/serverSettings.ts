@@ -405,6 +405,8 @@ export function applyServerSettingsPatch(
     textGenerators: textGeneratorsPatch,
     secretProviders: secretProvidersPatch,
     providerPools: providerPoolsPatch, // fork: see FORK.md.
+    // fork: limits, see FORK.md. Replaced whole, so an omitted limit returns to its default.
+    resourceLimits: resourceLimitsPatch,
     sourceControlHosts: sourceControlHostsPatch,
     usagePriceOverrides: usagePriceOverridesPatch,
     usageModelAliases: usageModelAliasesPatch,
@@ -630,6 +632,8 @@ export function applyServerSettingsPatch(
     ...(providerPoolsPatch !== undefined // fork: see FORK.md.
       ? { providerPools: mergeSettingsEntries(current.providerPools, providerPoolsPatch) }
       : {}),
+    // fork: limits, see FORK.md.
+    ...(resourceLimitsPatch !== undefined ? { resourceLimits: resourceLimitsPatch } : {}),
     ...(usagePriceOverridesPatch !== undefined
       ? {
           usagePriceOverrides: mergeSettingsEntries(
