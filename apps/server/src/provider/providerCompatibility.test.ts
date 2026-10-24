@@ -12,6 +12,7 @@ import * as ServerConfig from "../config.ts";
 import * as ModelManifest from "./ModelManifest.ts";
 import * as ProviderRegistry from "./ProviderRegistry.ts";
 import * as ProviderLatestVersions from "@t3tools/provider-core/server/ProviderLatestVersions";
+import * as ServerSettingsModule from "../serverSettings.ts";
 import * as ProviderInstanceRegistry from "./ProviderInstanceRegistry.ts";
 import * as ProviderInstanceRegistryMutator from "./ProviderInstanceRegistryMutator.ts";
 import type { ProviderInstance } from "@t3tools/provider-core/server/driver";
@@ -254,6 +255,7 @@ it.effect("a remote policy refresh preserves a newer health result on the regist
         refresh: Ref.get(health),
         streamChanges: Stream.empty,
         applyUsageLimits: () => Effect.void,
+        markLimited: () => Effect.void,
         resolveMaintenance: () =>
           Effect.succeed(
             makeManualOnlyProviderMaintenanceCapabilities({ provider: driver, packageName: null }),
@@ -291,6 +293,7 @@ it.effect("a remote policy refresh preserves a newer health result on the regist
       ServerConfig.layerTest(process.cwd(), { prefix: "compatibility-registry-test" }).pipe(
         Layer.provideMerge(NodeServices.layer),
       ),
+      ServerSettingsModule.layerTest(),
     );
     yield* Effect.gen(function* () {
       const registry = yield* ProviderRegistry.ProviderRegistry;
