@@ -1,3 +1,4 @@
+import { composerInstanceIdFor } from "@t3tools/client-runtime/provider-pools";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
 import type { UnifiedSettings } from "@t3tools/contracts";
 import type { Dispatch } from "react";
@@ -126,7 +127,10 @@ export function useComposerSelection(input: ComposerSelectionInput) {
   // Keyed on the fields it reads: the thread and runtime objects change with
   // every streamed event, and a new function re-renders the whole model picker.
   const hasStartedSession = activeRuntime !== null;
-  const runtimeProviderInstanceId = activeRuntime?.providerInstanceId ?? null;
+  const runtimeProviderInstanceId =
+    activeRuntime === null
+      ? null
+      : composerInstanceIdFor(providerStatuses, activeRuntime.providerInstanceId);
   const currentModelSelection = activeThread?.modelSelection ?? null;
   const getModelDisabledReason = makeModelDisabledReason(
     currentModelSelection
@@ -195,7 +199,7 @@ export function useComposerSelection(input: ComposerSelectionInput) {
       hasStartedSession: activeRuntime !== null,
       supportsProviderSwitchingViaHandoff,
       currentModelSelection: activeThread.modelSelection,
-      currentProviderInstanceId: activeRuntime?.providerInstanceId ?? null,
+      currentProviderInstanceId: runtimeProviderInstanceId,
       nextModelSelection,
     });
     if (modelChangeBlockReason) {

@@ -40,6 +40,7 @@ import {
   ACP_REGISTRY_WIZARD_STEPS,
   LOCAL_ACP_WIZARD_STEPS,
   deriveAvailableInstanceId,
+  validateInstanceId,
   resolveAcpRegistryWizardNavigation,
   resolveWizardNavigation,
   updateProviderIdentityDraft,
@@ -71,25 +72,10 @@ function deriveInstanceId(driver: ProviderDriverKind, label: string): string {
   return slug ? `${driver}_${slug}` : "";
 }
 
-const INSTANCE_ID_PATTERN = /^[a-zA-Z][a-zA-Z0-9_-]*$/;
 const DEFAULT_DRIVER_KIND = ProviderDriverKind.make("codex");
 const ACP_REGISTRY_DRIVER_KIND = ProviderDriverKind.make("acpRegistry");
 const DEFAULT_DRIVER_OPTION = providerClients.definitions[0]!;
 const EMPTY_CONFIG_DRAFT: Record<string, unknown> = {};
-/**
- * Validate an instance id against the same slug rules the server applies in
- * `ProviderInstanceId` (see `packages/contracts/src/providerInstance.ts`).
- */
-function validateInstanceId(id: string, existing: ReadonlySet<string>): string | null {
-  if (id.length === 0) return "Instance ID is required.";
-  if (id.length > 64) return "Instance ID must be 64 characters or fewer.";
-  if (!INSTANCE_ID_PATTERN.test(id)) {
-    return "Instance ID must start with a letter and use only letters, digits, '-', or '_'.";
-  }
-  if (existing.has(id)) return `An instance named '${id}' already exists.`;
-  return null;
-}
-
 interface AddProviderInstanceDialogProps {
   readonly open: boolean;
   readonly environmentId: EnvironmentId;
