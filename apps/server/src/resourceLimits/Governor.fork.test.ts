@@ -225,7 +225,7 @@ it.effect("R2: agent and schedule work waits with a notice, and Alice's own mess
     assert.deepEqual(yield* runs(mine), ["starting", "queued"]);
     const [notice] = yield* notices(theirs);
     assert.include(notice, "because This machine was over its limits (commit headroom 20.0 GiB");
-    assert.include(notice, "Held work starts on its own, one thread at a time, oldest first.");
+    assert.include(notice, "oldest first. Choose Resume to start it now.");
   }).pipe(Effect.provide(layerTest)),
 );
 
@@ -353,6 +353,27 @@ it.effect("R4: idle sessions close on every pass over the limits, before any wor
     yield* governor.pass(yield* tight);
     yield* governor.pass(yield* critical);
     assert.deepEqual(yield* governor.closings, ["ok", "paused", "paused"]);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("R1: a saved limit shows in the machine's status before the next pass", () =>
+  Effect.gen(function* () {
+    const settings = yield* ServerSettings.ServerSettingsService;
+    const limits = yield* ResourceLimits.ResourceLimits;
+    const governor = yield* Governor.make().pipe(
+      Effect.provideService(HostProcess.Platform, "win32"),
+      Effect.provideService(ServerSettings.ServerSettingsService, {
+        ...settings,
+        // One change: whatever is saved when the governor follows it.
+        streamChanges: Stream.fromEffect(Effect.orDie(settings.getSettings)),
+      }),
+    );
+    yield* governor.pass(yield* comfortable);
+    assert.equal((yield* limits.status)?.limits.pauseAvailableGiB, 8);
+
+    yield* settings.updateSettings({ resourceLimits: { pauseAvailableGiB: 9 } });
+    yield* governor.followSettings;
+    assert.equal((yield* limits.status)?.limits.pauseAvailableGiB, 9);
   }).pipe(Effect.provide(layerTest)),
 );
 
