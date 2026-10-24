@@ -93,7 +93,7 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
   triggerClassName?: string;
   triggerLabel?: string;
   triggerAriaLabel?: string;
-  activeAccount?: { readonly poolName: string; readonly memberName: string } | null;
+  activeAccount?: { readonly poolName: string; readonly memberName: string } | null; // fork: see FORK.md.
   onOpenChange?: (open: boolean) => void;
   onOpenProviderSetup?: (instanceId: ProviderInstanceId) => void;
   getModelDisabledReason?: (instanceId: ProviderInstanceId, model: string) => string | null;
@@ -142,7 +142,7 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
   const triggerLabel = selectedModel
     ? `${getDisplayModelName(selectedModel)}${selectedModel.isUnavailable ? " (Unavailable)" : ""}`
     : triggerTitle;
-  const accountSuffix = props.activeAccount ? ` · ${props.activeAccount.memberName}` : "";
+  const accountSuffix = props.activeAccount ? ` · ${props.activeAccount.memberName}` : ""; // fork: see FORK.md.
   const showInstanceBadge =
     activeEntry !== null && shouldShowInstanceBadge(activeEntry, props.instanceEntries);
 
@@ -222,6 +222,7 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
     ? selectedEntries.map((selection) => selection.fullLabel).join(", ") || "Choose models"
     : undefined;
   const triggerTooltipContent = [
+    // fork: adds the pooled account, see FORK.md.
     props.triggerLabel ??
       allModelNames ??
       (props.activeAccount
@@ -233,7 +234,7 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
     .filter(Boolean)
     .join(" · ");
 
-  const triggerText = props.triggerLabel ?? multipleLabel ?? `${triggerTitle}${accountSuffix}`;
+  const triggerText = props.triggerLabel ?? multipleLabel ?? `${triggerTitle}${accountSuffix}`; // fork: see FORK.md.
   const triggerTextProps = {
     className: "min-w-0 flex-1 overflow-hidden truncate",
     "data-chat-provider-model-picker-label": "true",

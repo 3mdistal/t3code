@@ -35,6 +35,7 @@ function withUsageLimits(
   return usageLimits ? { ...rest, usageLimits } : rest;
 }
 
+// fork: account cooldowns for account pools, see FORK.md.
 function withLimitedUntil(
   snapshot: ServerProvider,
   limitedUntil: ServerProvider["limitedUntil"],
@@ -106,7 +107,7 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
       // Enrichment must not revert usage updates or cooldowns newer than its input snapshot.
       const merged = withLimitedUntil(
         withUsageLimits(nextSnapshot, state.snapshot.usageLimits),
-        state.snapshot.limitedUntil,
+        state.snapshot.limitedUntil, // fork: keeps a cooldown, see FORK.md.
       );
       if (Equal.equals(state.snapshot, merged)) {
         return [null, state] as const;
@@ -201,7 +202,7 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
               : probedSnapshot,
             usageLimits,
           ),
-          switchedAccount ? undefined : state.snapshot.limitedUntil,
+          switchedAccount ? undefined : state.snapshot.limitedUntil, // fork: see FORK.md.
         );
         return [
           { snapshot, generation },
@@ -238,6 +239,7 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
     },
   );
 
+  // fork: see FORK.md.
   const markLimited: ManagedServerProvider["markLimited"] = Effect.fn(
     "ManagedServerProvider.markLimited",
   )(function* (input) {
@@ -383,7 +385,7 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
       .pipe(Effect.andThen(refreshSnapshot), Effect.tapError(Effect.logError), Effect.orDie),
     applyUsageLimits,
     refreshUsage: refreshUsage(),
-    markLimited,
+    markLimited, // fork: see FORK.md.
     get streamChanges() {
       return Stream.fromPubSub(changesPubSub);
     },

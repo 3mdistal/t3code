@@ -1087,7 +1087,7 @@ it.layer(
                 refresh: Ref.get(nextProvider),
                 streamChanges: Stream.empty,
                 applyUsageLimits: () => Effect.void,
-                markLimited: () => Effect.void,
+                markLimited: () => Effect.void, // fork: see FORK.md.
               },
               orchestrationAdapter: {} as ProviderInstance["orchestrationAdapter"],
               textGeneration: {} as ProviderInstance["textGeneration"],
@@ -1223,7 +1223,7 @@ it.layer(
               refresh: Ref.get(nextProvider),
               streamChanges: Stream.empty,
               applyUsageLimits: () => Effect.void,
-              markLimited: () => Effect.void,
+              markLimited: () => Effect.void, // fork: see FORK.md.
             },
             orchestrationAdapter: {} as ProviderInstance["orchestrationAdapter"],
             textGeneration: {} as ProviderInstance["textGeneration"],
@@ -1620,7 +1620,7 @@ it.layer(
             refresh: Effect.succeed(unhealthyProvider),
             streamChanges: Stream.empty,
             applyUsageLimits: () => Effect.void,
-            markLimited: () => Effect.void,
+            markLimited: () => Effect.void, // fork: see FORK.md.
           },
           snapshotForCwd: () => Ref.get(scanResult),
           orchestrationAdapter: {} as ProviderInstance["orchestrationAdapter"],
@@ -1742,7 +1742,7 @@ it.layer(
               }),
               streamChanges: Stream.empty,
               applyUsageLimits: () => Effect.void,
-              markLimited: () => Effect.void,
+              markLimited: () => Effect.void, // fork: see FORK.md.
             },
             orchestrationAdapter: {} as ProviderInstance["orchestrationAdapter"],
             textGeneration: {} as ProviderInstance["textGeneration"],
@@ -1849,7 +1849,7 @@ it.layer(
             refresh: Effect.succeed(refreshedProvider),
             streamChanges: Stream.fromPubSub(changes),
             applyUsageLimits: () => Effect.void,
-            markLimited: () => Effect.void,
+            markLimited: () => Effect.void, // fork: see FORK.md.
           },
           orchestrationAdapter: {} as ProviderInstance["orchestrationAdapter"],
           textGeneration: {} as ProviderInstance["textGeneration"],
@@ -1979,7 +1979,7 @@ it.layer(
               refresh: Effect.succeed(authoritativeProvider),
               streamChanges: Stream.fromPubSub(changes),
               applyUsageLimits: () => Effect.void,
-              markLimited: () => Effect.void,
+              markLimited: () => Effect.void, // fork: see FORK.md.
             },
             orchestrationAdapter: {} as ProviderInstance["orchestrationAdapter"],
             textGeneration: {} as ProviderInstance["textGeneration"],
@@ -2084,7 +2084,7 @@ it.layer(
             refresh: Effect.die(new Error("simulated refresh failure")),
             streamChanges: Stream.empty,
             applyUsageLimits: () => Effect.void,
-            markLimited: () => Effect.void,
+            markLimited: () => Effect.void, // fork: see FORK.md.
           },
           orchestrationAdapter: {} as ProviderInstance["orchestrationAdapter"],
           textGeneration: {} as ProviderInstance["textGeneration"],

@@ -63,7 +63,7 @@ export const isCachedProviderCorrelated = (input: {
 export const hydrateCachedProvider = (input: {
   readonly cachedProvider: ServerProvider;
   readonly fallbackProvider: ServerProvider;
-  readonly nowMs: number;
+  readonly nowMs: number; // fork: see FORK.md.
 }): ServerProvider => {
   if (!isCachedProviderCorrelated(input)) {
     return input.fallbackProvider;
@@ -87,6 +87,7 @@ export const hydrateCachedProvider = (input: {
     checkedAt: input.cachedProvider.checkedAt,
     slashCommands: input.cachedProvider.slashCommands,
     skills: input.cachedProvider.skills,
+    // fork: a pooled account's cooldown survives a restart, see FORK.md.
     ...(input.cachedProvider.limitedUntil !== undefined &&
     Date.parse(input.cachedProvider.limitedUntil) > input.nowMs
       ? { limitedUntil: input.cachedProvider.limitedUntil }

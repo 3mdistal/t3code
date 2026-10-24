@@ -52,7 +52,7 @@ import {
   ProviderPoolSettings,
   ProviderPoolSettingsPatch,
   providerPoolDriver,
-} from "./providerPool.ts";
+} from "./providerPool.ts"; // fork: see FORK.md.
 import { PullRequestMergeMethod } from "./pullRequest.ts";
 
 export const TimestampFormat = Schema.Literals(["locale", "12-hour", "24-hour"]);
@@ -1344,7 +1344,7 @@ export const ServerSettings = Schema.Struct({
   providerInstances: Schema.Record(ProviderInstanceId, ProviderInstanceConfig).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
-  providerPools: ProviderPoolSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
+  providerPools: ProviderPoolSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))), // fork: see FORK.md.
   observability: ObservabilitySettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   sourceControlHosts: Schema.Record(Schema.String, SourceControlHostSettings).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
@@ -1408,13 +1408,13 @@ export const resolveProviderInstanceEnabled = (
 };
 
 /**
- * A pool id is enabled when any of its configured members is, so a pooled
- * selection is never rejected while one account can still take the turn.
+ * fork: a pool id is enabled when any of its configured members is, so a pooled
+ * selection is never rejected while one account can still take the turn. See FORK.md.
  */
 export const resolveProjectProviderInstanceEnabled = (
   settings: Pick<
     ServerSettings,
-    "providerInstances" | "projectSettingsOverrides" | "providerPools"
+    "providerInstances" | "projectSettingsOverrides" | "providerPools" // fork: upstream's body moved below, see FORK.md.
   >,
   projectId: ProjectId | null,
   instanceId: ProviderInstanceId,
@@ -1502,7 +1502,7 @@ export const ServerSettingsOperation = Schema.Literals([
   "normalize",
   "check-exists",
   "create-provider-instance",
-  "validate-provider-pool",
+  "validate-provider-pool", // fork: see FORK.md.
   "read-file",
   "read-provider-history",
   "read-project-settings",
@@ -1700,7 +1700,7 @@ export const ServerSettingsPatch = Schema.Struct({
   secretProviders: Schema.optionalKey(
     Schema.Record(SecretProviderId, Schema.NullOr(SecretProviderConfigWrite)),
   ),
-  // Per-entry for the same reason as `usageLimitSources`.
+  // fork: per-entry for the same reason as `usageLimitSources`. See FORK.md.
   providerPools: Schema.optionalKey(ProviderPoolSettingsPatch),
   cursorKeychainUsageEnabled: Schema.optionalKey(Schema.Boolean),
 
@@ -1726,7 +1726,7 @@ export function requiredScopesForServerSettingsPatch(
       key === "providerInstances" ||
       key === "usageLimitSources" ||
       key === "secretProviders" ||
-      key === "providerPools"
+      key === "providerPools" // fork: see FORK.md.
     ) {
       changesProviders = true;
     } else {

@@ -53,7 +53,7 @@ import {
   makeProviderFailureTurnItem,
 } from "@t3tools/provider-core/server/failure";
 import * as RunFinalizationService from "./RunFinalizationService.ts";
-import { ProviderUsageLimitHook } from "./ProviderPoolFailover.ts";
+import { ProviderUsageLimitHook } from "./ProviderPoolFailover.ts"; // fork: see FORK.md.
 import * as TurnItemPositionStore from "./TurnItemPositionStore.ts";
 import { userFacingDatabaseErrorMessage } from "./UserFacingErrors.ts";
 
@@ -616,7 +616,7 @@ export const layer: Layer.Layer<
     const previewAgentActivity = yield* PreviewAgentActivity.PreviewAgentActivity;
     const turnItemPositions = yield* TurnItemPositionStore.TurnItemPositionStoreV2;
     const finalizationObserver = yield* RunFinalizationService.RunFinalizationObserver;
-    const usageLimitHook = yield* ProviderUsageLimitHook;
+    const usageLimitHook = yield* ProviderUsageLimitHook; // fork: see FORK.md.
 
     const writeFinalRunEvents = Effect.fn("RunExecutionService.writeFinalRunEvents")(
       function* (input: {
@@ -1047,11 +1047,12 @@ export const layer: Layer.Layer<
         >(new Set(inheritedBackgroundTurnItemsById.keys()));
         const openRunOwnedSubagents = yield* Ref.make(emptyOpenRunOwnedSubagentProjection());
         const finalizeRootRun = Effect.fn("RunExecutionService.finalizeRootRun")(function* (
-          reported: ProviderTerminalEvent,
+          reported: ProviderTerminalEvent, // fork: see FORK.md.
         ) {
           if (yield* Ref.get(rootRunFinalized)) {
             return;
           }
+          // fork: a usage limit on a pooled account fails over, see FORK.md.
           const resolution =
             reported.status === "failed" && reported.failure.class === "usage_limit"
               ? yield* usageLimitHook.onUsageLimit({
@@ -1090,7 +1091,7 @@ export const layer: Layer.Layer<
             ...(input.shouldFinalizeRun === undefined
               ? {}
               : { shouldFinalizeRun: input.shouldFinalizeRun }),
-            // Stop, or a pool failover that won, may commit between the
+            // fork: stop, or a pool failover that won, may commit between the
             // ownership read and this terminal write. Gate the events and
             // checkpoint together.
             ...(input.shouldFinalizeRun === undefined && resolution === null
@@ -1111,7 +1112,7 @@ export const layer: Layer.Layer<
               : { loadRunInterruptReason: input.loadRunInterruptReason }),
             openRunOwnedSubagents: openSubagents,
             terminal,
-            failureItemPersisted: terminal === reported && terminal.status === "failed",
+            failureItemPersisted: terminal === reported && terminal.status === "failed", // fork: see FORK.md.
             refreshAfterTurn,
           }).pipe(
             Effect.mapError((cause) => new RunExecutionIngestError({ runId: input.run.id, cause })),
