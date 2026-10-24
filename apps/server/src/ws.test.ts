@@ -582,9 +582,9 @@ it.effect(
         }),
         Layer.mock(ProviderRegistry.ProviderRegistry)({
           getProviders: Effect.succeed([]),
-          getPublishedProviders: Effect.succeed([]),
+          getPublishedProviders: Effect.succeed([]), // fork: see FORK.md.
           streamChanges: Stream.never,
-          streamPublishedChanges: Stream.never,
+          streamPublishedChanges: Stream.never, // fork: see FORK.md.
         }),
         Layer.mock(UsageLimitSources.UsageLimitSources)({ streamChanges: Stream.make([]) }),
         Layer.mock(RemoteOpenTargets.RemoteOpenTargets)({
@@ -754,8 +754,14 @@ it.effect("on-demand clients get provider config without workspace snapshots", (
       }),
       Layer.mock(ProviderRegistry.ProviderRegistry)({
         getProviders: Effect.succeed([provider]),
+        getPublishedProviders: Effect.succeed([provider]), // fork: see FORK.md.
         streamChanges: Stream.fromQueue(providerChanges).pipe(
           Stream.tap(() => Queue.offer(pulled, undefined)),
+        ),
+        // fork: the published stream starts with the current list, see FORK.md.
+        streamPublishedChanges: Stream.concat(
+          Stream.make([provider]),
+          Stream.fromQueue(providerChanges).pipe(Stream.tap(() => Queue.offer(pulled, undefined))),
         ),
         refreshWorkspaceSnapshot: () => Effect.succeed([provider]),
       }),

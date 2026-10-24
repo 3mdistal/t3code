@@ -17,7 +17,7 @@ import {
 
 import * as DateTime from "effect/DateTime";
 
-import { resolveProviderInstanceDisplayName } from "./providerInstanceDisplay.ts";
+import { resolveProviderInstanceDisplayName } from "./providerInstanceDisplay.ts"; // fork: see FORK.md.
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
@@ -237,9 +237,9 @@ function accountKeyResolver(reports: Iterable<AccountReport>) {
 export interface LimitAccount {
   readonly key: string;
   readonly driver: ServerProvider["driver"];
-  /** The app-wide instance name; null only for an external usage source without an email or id. */
+  /** fork: the app-wide instance name; null only for an external source without email or id. */
   readonly displayName: string | null;
-  /** Instances signed in as this account, in provider order. Empty for external usage sources. */
+  /** fork: instances signed in as this account, in provider order; none for external sources. */
   readonly instances: ReadonlyArray<{
     readonly instanceId: ProviderInstanceId;
     readonly displayName: string;
@@ -305,13 +305,13 @@ export function collectLimitAccounts(presentations: LimitPresentations): readonl
               seen.instanceId === candidate.instanceId,
           ),
       ),
-    ];
+    ]; // fork: see FORK.md.
     const winner = fresher ? next : previous;
     const creditSource = creditSources.get(key);
     accounts.set(key, {
       ...previous,
       displayName: previous.displayName ?? next.displayName,
-      instances,
+      instances, // fork: see FORK.md.
       plan: previous.plan ?? next.plan,
       accentColor: previous.accentColor ?? next.accentColor,
       environments,
@@ -339,11 +339,11 @@ export function collectLimitAccounts(presentations: LimitPresentations): readonl
     const label = presentation.entry.target.label;
     for (const provider of providersWithLimits(presentation.serverConfig?.providers ?? [])) {
       if (!provider.usageLimits || limitsNotice(provider.usageLimits) !== null) continue;
-      const instanceName = resolveProviderInstanceDisplayName(provider);
+      const instanceName = resolveProviderInstanceDisplayName(provider); // fork: see FORK.md.
       merge(resolveKey(nativeReport(provider)) ?? `${environmentId}:${provider.instanceId}`, {
         key: `${environmentId}:${provider.instanceId}`,
         driver: provider.driver,
-        displayName: instanceName,
+        displayName: instanceName, // fork: see FORK.md.
         instances: [{ instanceId: provider.instanceId, displayName: instanceName, environmentId }],
         email: provider.auth.email,
         plan: provider.auth.label,
@@ -368,7 +368,7 @@ export function collectLimitAccounts(presentations: LimitPresentations): readonl
           key,
           driver: account.driver,
           displayName: account.email ? null : account.id.replace(/\.json$/i, ""),
-          instances: [],
+          instances: [], // fork: see FORK.md.
           email: account.email,
           plan: account.plan,
           accentColor: undefined,

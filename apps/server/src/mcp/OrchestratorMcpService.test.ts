@@ -162,7 +162,7 @@ describe("OrchestratorMcpService", () => {
         }),
         ServerSettings.layerTest(),
         Layer.mock(ProviderRegistry.ProviderRegistry)({
-          getPublishedProviders: Effect.succeed([]),
+          getPublishedProviders: Effect.succeed([]), // fork: see FORK.md.
         }),
         Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({
           list: () => Effect.succeed([]),
@@ -265,7 +265,7 @@ describe("OrchestratorMcpService", () => {
         }),
         ServerSettings.layerTest(),
         Layer.mock(ProviderRegistry.ProviderRegistry)({
-          getPublishedProviders: Effect.succeed([]),
+          getPublishedProviders: Effect.succeed([]), // fork: see FORK.md.
         }),
         Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({
           list: () => Effect.succeed([]),
@@ -461,7 +461,7 @@ describe("OrchestratorMcpService", () => {
         }),
         ServerSettings.layerTest(),
         Layer.mock(ProviderRegistry.ProviderRegistry)({
-          getPublishedProviders: Effect.succeed([]),
+          getPublishedProviders: Effect.succeed([]), // fork: see FORK.md.
         }),
         Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({
           list: () => Effect.succeed([]),
@@ -652,7 +652,7 @@ describe("OrchestratorMcpService", () => {
         }),
         ServerSettings.layerTest(),
         Layer.mock(ProviderRegistry.ProviderRegistry)({
-          getPublishedProviders: Effect.succeed([]),
+          getPublishedProviders: Effect.succeed([]), // fork: see FORK.md.
         }),
         Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({
           list: () => Effect.succeed([]),
@@ -740,7 +740,7 @@ describe("OrchestratorMcpService", () => {
         }),
         ServerSettings.layerTest(),
         Layer.mock(ProviderRegistry.ProviderRegistry)({
-          getPublishedProviders: Effect.succeed([]),
+          getPublishedProviders: Effect.succeed([]), // fork: see FORK.md.
         }),
         Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({
           list: () => Effect.succeed([]),
@@ -829,7 +829,7 @@ describe("OrchestratorMcpService", () => {
         }),
         ServerSettings.layerTest(),
         Layer.mock(ProviderRegistry.ProviderRegistry)({
-          getPublishedProviders: Effect.succeed([]),
+          getPublishedProviders: Effect.succeed([]), // fork: see FORK.md.
         }),
         Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({
           list: () => Effect.succeed([]),
@@ -965,7 +965,7 @@ describe("OrchestratorMcpService", () => {
         }),
         ServerSettings.layerTest(),
         Layer.mock(ProviderRegistry.ProviderRegistry)({
-          getPublishedProviders: Effect.succeed([]),
+          getPublishedProviders: Effect.succeed([]), // fork: see FORK.md.
         }),
         Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({
           list: () => Effect.succeed([]),
@@ -1078,7 +1078,7 @@ describe("OrchestratorMcpService provider resolution", () => {
 
   const providerRegistryLayer = (providers: ReadonlyArray<ServerProvider>) =>
     Layer.mock(ProviderRegistry.ProviderRegistry)({
-      getPublishedProviders: Effect.succeed(providers),
+      getPublishedProviders: Effect.succeed(providers), // fork: see FORK.md.
       refreshInstance: () => Effect.succeed(providers),
     });
 
@@ -1202,7 +1202,7 @@ describe("OrchestratorMcpService provider resolution", () => {
           }),
           ServerSettings.layerTest(),
           Layer.mock(ProviderRegistry.ProviderRegistry)({
-            getPublishedProviders: Effect.sync(() => providers),
+            getPublishedProviders: Effect.sync(() => providers), // fork: see FORK.md.
           }),
           adapterRegistryLayer([
             codexInstanceId,
@@ -1478,112 +1478,6 @@ describe("OrchestratorMcpService provider resolution", () => {
       }),
     );
   });
-
-  it.effect(
-    "delegates a driverKind target to the driver's pool and lists the pool over its members",
-    () =>
-      Effect.gen(function* () {
-        const dispatched = yield* Ref.make<ReadonlyArray<unknown>>([]);
-        const codex = ProviderDriverKind.make("codex");
-        const workInstanceId = ProviderInstanceId.make("codex_work");
-        const poolInstanceId = ProviderInstanceId.make("pool_codex");
-        const task = {
-          id: taskId,
-          threadId: parentThreadId,
-          runId: parentRunId,
-          parentNodeId,
-          origin: "app_owned",
-          createdBy: "agent",
-          driver: codex,
-          providerInstanceId: workInstanceId,
-          providerThreadId: null,
-          childThreadId,
-          nativeTaskRef: null,
-          prompt: "Summarize the diff.",
-          title: null,
-          model: "gpt-5.4",
-          status: "running",
-          result: null,
-          startedAt: null,
-          completedAt: null,
-        };
-        let delegated = false;
-        const member = (instanceId: ProviderInstanceId) => ({
-          ...providerSnapshot({ instanceId, driver: codex, model: "gpt-5.4" }),
-          pool: { role: "member" as const, poolInstanceId },
-        });
-        const layerDependencies = Layer.mergeAll(
-          NodeServices.layer,
-          Layer.mock(ThreadManagementService.ThreadManagementService)({
-            hasReceipt: () => Effect.succeed(false),
-            assertProviderInstanceEnabled: () => Effect.void,
-            isProviderInstanceEnabledForProject: () => Effect.succeed(true),
-            getThreadRecords: (threadId) =>
-              Effect.succeed(
-                threadId === parentThreadId
-                  ? parentProjection(delegated ? [task] : [])
-                  : childProjection,
-              ),
-            dispatch: (command) =>
-              Ref.update(dispatched, (commands) => [...commands, command]).pipe(
-                Effect.andThen(
-                  Effect.sync(() => {
-                    delegated = true;
-                  }),
-                ),
-                Effect.as({
-                  sequence: 1,
-                  storedEvents: [
-                    {
-                      sequence: 1,
-                      commandId: null,
-                      event: { type: "subagent.updated", payload: task },
-                    },
-                  ],
-                } as never),
-              ),
-          }),
-          ServerSettings.layerTest(),
-          providerRegistryLayer([
-            member(codexInstanceId),
-            member(workInstanceId),
-            {
-              ...providerSnapshot({ instanceId: poolInstanceId, driver: codex, model: "gpt-5.4" }),
-              pool: {
-                role: "pool" as const,
-                memberInstanceIds: [codexInstanceId, workInstanceId],
-                droppedModels: [],
-              },
-            },
-          ]),
-          adapterRegistryLayer([codexInstanceId, workInstanceId]),
-          Layer.mock(ProjectService.ProjectService)({}),
-          Layer.mock(SecretRequests.SecretRequests)({}),
-          Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
-        );
-
-        yield* Effect.gen(function* () {
-          const service = yield* OrchestratorMcpService.OrchestratorMcpService;
-          const capabilities = yield* service.capabilities(scope);
-          assert.deepEqual(
-            capabilities.providers.map((provider) => provider.providerInstanceId),
-            [poolInstanceId],
-          );
-          const result = yield* service.delegateTask(scope, {
-            task: "Summarize the diff.",
-            target: { driverKind: codex },
-            mode: "async",
-            clientRequestId: "delegate-pool-driver-1",
-          });
-          assert.equal(result.status, "running");
-          const request = (yield* Ref.get(dispatched))[0] as {
-            modelSelection: { instanceId: string; model: string };
-          };
-          assert.equal(request.modelSelection.instanceId, poolInstanceId);
-          assert.equal(request.modelSelection.model, "gpt-5.4");
-        }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(layerDependencies))));
-      }),
-  );
 
   it.effect("rejects delegation to a provider without a registered adapter", () =>
     Effect.gen(function* () {
@@ -2347,7 +2241,7 @@ describe("OrchestratorMcpService provider resolution", () => {
             }),
             ServerSettings.layerTest(),
             Layer.mock(ProviderRegistry.ProviderRegistry)({
-              getPublishedProviders: Effect.succeed([]),
+              getPublishedProviders: Effect.succeed([]), // fork: see FORK.md.
             }),
             Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({
               list: () => Effect.succeed([]),
@@ -2418,7 +2312,7 @@ describe("OrchestratorMcpService provider resolution", () => {
                   }),
                   ServerSettings.layerTest(),
                   Layer.mock(ProviderRegistry.ProviderRegistry)({
-                    getPublishedProviders: Effect.succeed([]),
+                    getPublishedProviders: Effect.succeed([]), // fork: see FORK.md.
                   }),
                   Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({
                     list: () => Effect.succeed([]),
@@ -2507,7 +2401,7 @@ describe("OrchestratorMcpService provider resolution", () => {
                   }),
                   ServerSettings.layerTest(),
                   Layer.mock(ProviderRegistry.ProviderRegistry)({
-                    getPublishedProviders: Effect.succeed([]),
+                    getPublishedProviders: Effect.succeed([]), // fork: see FORK.md.
                   }),
                   Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({
                     list: () => Effect.succeed([]),

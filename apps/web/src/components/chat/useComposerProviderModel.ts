@@ -1,4 +1,4 @@
-import { composerModelSelectionFor } from "@t3tools/client-runtime/provider-pools";
+import { composerModelSelectionFor } from "@t3tools/client-runtime/provider-pools"; // fork: see FORK.md.
 import {
   type DraftId,
   deriveEffectiveComposerModelState,
@@ -12,7 +12,7 @@ import {
   type ServerProvider,
 } from "@t3tools/contracts";
 import {
-  deriveComposerProviderInstanceEntries,
+  deriveComposerProviderInstanceEntries, // fork: see FORK.md.
   NO_PROVIDER_MODEL_SELECTION,
   type ProviderInstanceEntry,
 } from "../../providerInstances";
@@ -28,6 +28,7 @@ const NO_PROVIDER_MODELS: ServerProvider["models"] = [];
  * hook here; in the composer body they would straddle its later hooks and lose their cache.
  */
 export function useComposerProviderModel(
+  // fork: the hook supplies `providers` itself, see FORK.md.
   input: Omit<Parameters<typeof resolveComposerProviderSelection>[0], "entries" | "providers"> & {
     readonly providerStatuses: ReadonlyArray<ServerProvider>;
     readonly settings: UnifiedSettings;
@@ -51,11 +52,11 @@ export function useComposerProviderModel(
     lockedInstanceId,
   } = input;
   const draftModelState = useComposerDraftModelState(threadRef);
-  const providerInstanceEntries: ReadonlyArray<ProviderInstanceEntry> =
+  const providerInstanceEntries: ReadonlyArray<ProviderInstanceEntry> = // fork: see FORK.md.
     deriveComposerProviderInstanceEntries(providerStatuses, settings, activeProjectId);
   const selection = resolveComposerProviderSelection({
     entries: providerInstanceEntries,
-    providers: providerStatuses,
+    providers: providerStatuses, // fork: see FORK.md.
     candidateInstanceIds,
     lockedProvider,
     lockedInstanceId,
@@ -69,7 +70,7 @@ export function useComposerProviderModel(
     providers: providerStatuses,
     selectedProvider,
     selectedInstanceId,
-    threadModelSelection:
+    threadModelSelection: // fork: a pooled account shows as its pool, see FORK.md.
       threadModelSelection && composerModelSelectionFor(providerStatuses, threadModelSelection),
     projectModelSelection:
       projectModelSelection && composerModelSelectionFor(providerStatuses, projectModelSelection),

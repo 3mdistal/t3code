@@ -2,8 +2,8 @@ import {
   defaultInstanceIdForDriver,
   isProviderWorkspaceSnapshotCurrent,
   ProviderDriverKind,
-  providerPoolDriver,
-  type IsoDateTime,
+  providerPoolDriver, // fork: see FORK.md.
+  type IsoDateTime, // fork: see FORK.md.
   type ProviderInstanceId,
   type ServerProvider,
   type ServerProviderUpdateState,
@@ -28,9 +28,9 @@ import * as ProviderLatestVersions from "@t3tools/provider-core/server/ProviderL
 import * as ModelManifest from "./ModelManifest.ts";
 import { applyProviderCompatibility } from "./providerCompatibility.ts";
 import * as ServerConfig from "../config.ts";
-import * as ServerSettings from "../serverSettings.ts";
+import * as ServerSettings from "../serverSettings.ts"; // fork: see FORK.md.
 import * as ProviderInstanceRegistry from "./ProviderInstanceRegistry.ts";
-import { withProviderPools } from "./providerPoolSnapshot.ts";
+import { withProviderPools } from "./providerPoolSnapshot.ts"; // fork: see FORK.md.
 import {
   hydrateCachedProvider,
   isCachedProviderCorrelated,
@@ -54,9 +54,10 @@ export type ProviderMaintenanceActionKind = "update";
 export class ProviderRegistry extends Context.Service<
   ProviderRegistry,
   {
-    /** Real instances only. Refresh, maintenance, and usage reports never meet a pool. */
+    /** fork: real instances only; refresh, maintenance, and usage reports never meet a pool. */
     readonly getProviders: Effect.Effect<ReadonlyArray<ServerProvider>>;
 
+    // fork: account pools, see FORK.md.
     /**
      * `getProviders` plus one virtual entry per active account pool, with the
      * members stamped. The only list transports and MCP may read.
@@ -350,7 +351,7 @@ export const layer = Layer.effect(
   Effect.gen(function* () {
     const instanceRegistry = yield* ProviderInstanceRegistry.ProviderInstanceRegistry;
     const manifestService = yield* ModelManifest.ModelManifest;
-    const serverSettings = yield* ServerSettings.ServerSettingsService;
+    const serverSettings = yield* ServerSettings.ServerSettingsService; // fork: see FORK.md.
     const latestVersions = yield* ProviderLatestVersions.ProviderLatestVersions;
     const serviceScope = yield* Effect.scope;
     const config = yield* ServerConfig.ServerConfig;
@@ -375,7 +376,7 @@ export const layer = Layer.effect(
       fallbackByInstance.set(source.instanceId, provider);
     }
 
-    const bootNowMs = DateTime.toEpochMillis(yield* DateTime.now);
+    const bootNowMs = DateTime.toEpochMillis(yield* DateTime.now); // fork: see FORK.md.
     const cachedProviders = yield* Effect.forEach(
       bootSources,
       (source) =>
@@ -407,7 +408,7 @@ export const layer = Layer.effect(
                   cachedDriver: cachedProvider.driver ?? null,
                 }).pipe(Effect.as(undefined as ServerProvider | undefined));
               }
-              return Effect.succeed(hydrateCachedProvider({ ...correlation, nowMs: bootNowMs }));
+              return Effect.succeed(hydrateCachedProvider({ ...correlation, nowMs: bootNowMs })); // fork: see FORK.md.
             }),
           );
         }),
@@ -419,7 +420,7 @@ export const layer = Layer.effect(
         ),
       ),
     );
-    // The instance owns its cooldown; the next probe would otherwise publish
+    // fork: the instance owns its cooldown; the next probe would otherwise publish
     // without the one the cache carried across the restart.
     for (const cached of cachedProviders) {
       const instance = bootInstances.find(
@@ -679,6 +680,7 @@ export const layer = Layer.effect(
       return yield* refreshOneSource(providerSource);
     });
 
+    // fork: refreshing a pool refreshes its accounts, see FORK.md.
     const providerPools = serverSettings.getSettings.pipe(
       Effect.map((settings) => settings.providerPools),
       Effect.orDie,
@@ -689,7 +691,7 @@ export const layer = Layer.effect(
     ) => Effect.Effect<ReadonlyArray<ServerProvider>> = Effect.fn("refreshInstance")(function* (
       instanceId: ProviderInstanceId,
     ) {
-      const poolDriver = providerPoolDriver(instanceId);
+      const poolDriver = providerPoolDriver(instanceId); // fork: see FORK.md.
       if (poolDriver !== null) {
         const members = (yield* providerPools)[poolDriver]?.memberInstanceIds ?? [];
         yield* Effect.forEach(members, refreshInstance, {
@@ -1049,6 +1051,7 @@ export const layer = Layer.effect(
       return yield* Fiber.join(claim.scan);
     });
 
+    // fork: account pools, see FORK.md.
     const getPublishedProviders = Effect.all([Ref.get(providersRef), providerPools]).pipe(
       Effect.map(([providers, providerPools]) => withProviderPools({ providers, providerPools })),
     );
@@ -1073,9 +1076,9 @@ export const layer = Layer.effect(
 
     return {
       getProviders: Ref.get(providersRef),
-      getPublishedProviders,
-      streamPublishedChanges,
-      markLimited,
+      getPublishedProviders, // fork: see FORK.md.
+      streamPublishedChanges, // fork: see FORK.md.
+      markLimited, // fork: see FORK.md.
       refresh: (provider?: ProviderDriverKind) =>
         refresh(provider).pipe(Effect.catchCause(recoverRefreshFailure)),
       refreshInstance: (instanceId: ProviderInstanceId) =>

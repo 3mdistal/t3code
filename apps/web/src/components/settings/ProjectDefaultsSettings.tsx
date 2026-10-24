@@ -62,22 +62,22 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
     (representative?.serverConfig
       ? providersByEnvironment.get(representative.environmentId)
       : undefined) ?? EMPTY_SERVER_PROVIDERS;
+  // fork: new threads start here as from the composer, so a pool stands in for its accounts, and
+  // a default that resolves to a pooled account, saved or automatic, shows as the pool. See FORK.md.
   const resolvedSelection = resolveDefaultProviderModelSelection(
     providers,
     settings.defaultModelSelection,
   );
-  // fork: new threads start here as from the composer, so a pool stands in for its accounts, and
-  // a default that resolves to a pooled account, saved or automatic, shows as the pool. See FORK.md.
-  const storedSelection =
+  const storedSelection = // fork: see FORK.md.
     resolvedSelection && composerModelSelectionFor(providers, resolvedSelection);
   const selection = storedSelection
     ? resolveEffectiveDefaultModelSelection(settings, providers, storedSelection)
     : null;
   const entries = deriveComposerProviderInstanceEntries(
-    providers,
+    providers, // fork: see FORK.md.
     settings,
     target?.projectId ?? null,
-  ); // fork: see FORK.md.
+  );
   const modelOptions = getCustomModelOptionsByInstance(
     settings,
     providers,

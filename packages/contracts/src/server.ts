@@ -9,7 +9,7 @@ import {
 import { AuthClientPresentationMetadata, ServerAuthDescriptor } from "./auth.ts";
 import {
   ForwardCompatibleArray,
-  ForwardCompatibleOptional,
+  ForwardCompatibleOptional, // fork: see FORK.md.
   IsoDateTime,
   NonNegativeInt,
   PositiveInt,
@@ -27,7 +27,7 @@ import { EditorId, FileManagerRevealKind, RemoteOpenTarget } from "./editor.ts";
 import { ModelCapabilities, ProviderOptionDescriptor } from "./model.ts";
 import { RuntimeMode } from "./providerPolicy.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
-import { ServerProviderPool } from "./providerPool.ts";
+import { ServerProviderPool } from "./providerPool.ts"; // fork: see FORK.md.
 import { ServerProviderUsageLimits, UsageLimitSourceSnapshots } from "./providerUsageLimits.ts";
 import { ServerSettings } from "./settings.ts";
 
@@ -262,7 +262,7 @@ export const ServerProvider = Schema.Struct({
   skills: Schema.Array(ServerProviderSkill).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
   workspaceSnapshots: Schema.optionalKey(Schema.Array(ServerProviderWorkspaceSnapshot)),
   usageLimits: Schema.optional(ServerProviderUsageLimits),
-  // A role this build does not know decodes as no pool, so the account stays listed.
+  // fork: an unknown role decodes as no pool, so the account stays listed. See FORK.md.
   pool: ForwardCompatibleOptional(ServerProviderPool),
   // Top level, not in `usageLimits`, so a usage probe never overwrites it.
   limitedUntil: Schema.optional(IsoDateTime),

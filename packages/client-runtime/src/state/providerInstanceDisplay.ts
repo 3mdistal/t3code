@@ -1,6 +1,6 @@
-import type { ProviderDriverKind } from "@t3tools/contracts";
+import type { ProviderDriverKind } from "@t3tools/contracts"; // fork: see FORK.md.
 
-export { resolveProviderInstanceDisplayName } from "@t3tools/shared/providerInstanceDisplay";
+export { resolveProviderInstanceDisplayName } from "@t3tools/shared/providerInstanceDisplay"; // fork: moved to shared, see FORK.md.
 
 export function providerInstanceInitials(label: string): string {
   // Punctuation separates words so "Codex (hub)" reads CH, not C(. An apostrophe

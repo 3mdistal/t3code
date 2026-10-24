@@ -102,7 +102,7 @@ describe("searchSettings", () => {
       canManageLocalBackend: false,
       isWslSettingsRowVisible: false,
       hasThreadAutoSettlement: false,
-      hasProviderPools: false,
+      hasProviderPools: false, // fork: see FORK.md.
     });
 
     const gatedIds = new Set<string>([
@@ -230,7 +230,7 @@ describe("auto-settlement search availability", () => {
       canManageLocalBackend: false,
       isWslSettingsRowVisible: false,
       hasThreadAutoSettlement: availability.eligibleEnvironmentIds.length > 0,
-      hasProviderPools: false,
+      hasProviderPools: false, // fork: see FORK.md.
     });
     expect(searchSettings("auto-settle", items).map((item) => item.id)).toEqual([
       "auto-settle-inactive-threads",

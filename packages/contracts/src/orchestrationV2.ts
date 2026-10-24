@@ -3486,7 +3486,7 @@ const OrchestrationV2InternalCommand = Schema.Union([
     ),
   }),
   Schema.Struct({
-    type: Schema.Literal("run.pool-failover"),
+    type: Schema.Literal("run.pool-failover"), // fork: see FORK.md.
     commandId: CommandId,
     threadId: ThreadId,
     runId: RunId,
@@ -3496,7 +3496,7 @@ const OrchestrationV2InternalCommand = Schema.Union([
 ]);
 export type OrchestrationV2InternalCommand = typeof OrchestrationV2InternalCommand.Type;
 
-// Keyed by attempt so the hook and the recovery sweep collapse onto one receipt.
+// fork: keyed by attempt so the hook and the recovery sweep collapse onto one receipt. See FORK.md.
 export const runPoolFailoverCommandId = (attemptId: RunAttemptId): CommandId =>
   CommandId.make(`command:system:pool-failover:${attemptId}`);
 

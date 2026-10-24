@@ -60,7 +60,7 @@ import {
 } from "./ProviderSettingsForm";
 import { ProviderModelsSection } from "./ProviderModelsSection";
 import { ProviderInstanceIcon } from "../chat/ProviderInstanceIcon";
-import { ProviderLimitedUntil } from "./ProviderLimitedUntil";
+import { ProviderLimitedUntil } from "./ProviderLimitedUntil"; // fork: see FORK.md.
 import { ProviderAccentColorPicker } from "./ProviderAccentColorPicker";
 import { RedactedSensitiveText } from "./RedactedSensitiveText";
 import { SettingResetButton, SettingsRow, SettingsSection } from "./settingsLayout";
@@ -560,7 +560,7 @@ interface ProviderInstanceCardProps {
   readonly instance: ProviderInstanceConfig;
   readonly driverOption: ProviderClientDefinition | undefined;
   readonly liveProvider: ServerProvider | undefined;
-  readonly poolName?: string | undefined;
+  readonly poolName?: string | undefined; // fork: see FORK.md.
   readonly mode: "list" | "editor";
   readonly selected?: boolean | undefined;
   readonly onSelect?: (() => void) | undefined;
@@ -606,7 +606,7 @@ export function ProviderInstanceCard({
   instance,
   driverOption,
   liveProvider,
-  poolName,
+  poolName, // fork: see FORK.md.
   mode,
   selected = false,
   onSelect,
@@ -963,7 +963,7 @@ export function ProviderInstanceCard({
     </Popover>
   ) : null;
 
-  const poolBadge = poolName ? (
+  const poolBadge = poolName ? ( // fork: see FORK.md.
     <Badge variant="outline" size="sm">
       In {poolName} pool
     </Badge>
@@ -1023,7 +1023,7 @@ export function ProviderInstanceCard({
                 </span>
               </ProviderStatusDiagnostic>
             </span>
-            {/* A badge on the title row leaves the list's narrow column no room for the name. */}
+            {/* fork: a title-row badge crowds out the name in the narrow list. See FORK.md. */}
             {poolName ? (
               <span className="mt-0.5 block truncate text-xs text-muted-foreground">
                 In {poolName} pool
@@ -1063,6 +1063,7 @@ export function ProviderInstanceCard({
 
   const editorHeaderAction = (
     <div className="flex shrink-0 items-center gap-1.5">
+      {/* fork: see FORK.md. */}
       <ProviderLimitedUntil provider={liveProvider} className="text-xs text-warning-foreground" />
       {poolBadge}
       {driverOption?.badgeLabel ? (

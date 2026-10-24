@@ -1,6 +1,6 @@
 import type { ChatComposerProps } from "./ChatComposer";
 import type { PromptUltrathink } from "./TraitsPicker";
-import type { ProviderInstanceEntry, resolvePoolMemberLabel } from "../../providerInstances";
+import type { ProviderInstanceEntry, resolvePoolMemberLabel } from "../../providerInstances"; // fork: see FORK.md.
 import { type AppModelOption } from "../../modelSelection";
 import { CircleAlertIcon } from "lucide-react";
 import { CompactComposerControlsMenu } from "./CompactComposerControlsMenu";
@@ -80,7 +80,7 @@ export function ComposerControlsBar(props: {
   selectedModelForPickerWithCustomFallback: string;
   lockedProvider: ChatComposerProps["lockedProvider"];
   lockedContinuationGroupKey: string | null;
-  activeAccount: ReturnType<typeof resolvePoolMemberLabel>;
+  activeAccount: ReturnType<typeof resolvePoolMemberLabel>; // fork: see FORK.md.
   providerInstanceEntries: ReadonlyArray<ProviderInstanceEntry>;
   keybindings: ChatComposerProps["keybindings"];
   modelOptionsByInstance: ReadonlyMap<ProviderInstanceId, ReadonlyArray<AppModelOption>>;
@@ -129,7 +129,7 @@ export function ComposerControlsBar(props: {
     selectedModelForPickerWithCustomFallback,
     lockedProvider,
     lockedContinuationGroupKey,
-    activeAccount,
+    activeAccount, // fork: see FORK.md.
     providerInstanceEntries,
     keybindings,
     modelOptionsByInstance,
@@ -268,7 +268,7 @@ export function ComposerControlsBar(props: {
       }
       lockedProvider={lockedProvider}
       lockedContinuationGroupKey={lockedContinuationGroupKey}
-      activeAccount={activeAccount}
+      activeAccount={activeAccount} // fork: see FORK.md.
       instanceEntries={providerInstanceEntries}
       keybindings={keybindings}
       modelOptionsByInstance={modelOptionsByInstance}

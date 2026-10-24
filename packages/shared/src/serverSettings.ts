@@ -357,7 +357,7 @@ export function applyServerSettingsPatch(
     worktreeCleanup: worktreeCleanupPatch,
     // Merged per entry below; its `null` removals must not reach deepMerge.
     usageLimitSources: usageLimitSourcesPatch,
-    providerPools: providerPoolsPatch,
+    providerPools: providerPoolsPatch, // fork: see FORK.md.
     sourceControlHosts: sourceControlHostsPatch,
     usagePriceOverrides: usagePriceOverridesPatch,
     usageModelAliases: usageModelAliasesPatch,
@@ -555,7 +555,7 @@ export function applyServerSettingsPatch(
           ),
         }
       : {}),
-    ...(providerPoolsPatch !== undefined
+    ...(providerPoolsPatch !== undefined // fork: see FORK.md.
       ? { providerPools: mergeSettingsEntries(current.providerPools, providerPoolsPatch) }
       : {}),
     ...(usagePriceOverridesPatch !== undefined

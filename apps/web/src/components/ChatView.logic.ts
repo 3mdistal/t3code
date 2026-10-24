@@ -45,7 +45,7 @@ import {
   type RunId,
   type WorktreeSetupSnapshot,
 } from "@t3tools/contracts";
-import { composerInstanceIdFor } from "@t3tools/client-runtime/provider-pools";
+import { composerInstanceIdFor } from "@t3tools/client-runtime/provider-pools"; // fork: see FORK.md.
 import { worktreeSetupAgentStarted } from "@t3tools/client-runtime/worktree-setup";
 import * as DateTime from "effect/DateTime";
 import { resolveAssetUrl } from "@t3tools/client-runtime/state/assets";
@@ -486,20 +486,20 @@ export function buildLocalDraftThread(
 }
 
 /**
- * `entries` is the composer catalog, in which an active pool replaces its member accounts, while
- * `providers` is the unfolded list. Threads and drafts name the account that ran, so every
- * instance id is mapped to the pool that hides it before it is matched against `entries`.
+ * fork: `entries` is the composer catalog, where an active pool replaces its member accounts, while
+ * `providers` is the unfolded list. Threads and drafts name the account that ran, so every instance
+ * id is mapped to the pool that hides it before it is matched against `entries`. See FORK.md.
  */
 export function resolveComposerProviderSelection(input: {
   entries: ReadonlyArray<ProviderInstanceEntry>;
-  providers: ReadonlyArray<ServerProvider>;
+  providers: ReadonlyArray<ServerProvider>; // fork: see FORK.md.
   candidateInstanceIds: ReadonlyArray<ProviderInstanceId | null | undefined>;
   lockedProvider: ProviderDriverKind | null;
   lockedInstanceId: ProviderInstanceId | null | undefined;
 }) {
   const toComposerId = <Id extends ProviderInstanceId | null | undefined>(instanceId: Id) =>
     instanceId == null ? instanceId : composerInstanceIdFor(input.providers, instanceId);
-  const candidateInstanceIds = input.candidateInstanceIds.map(toComposerId);
+  const candidateInstanceIds = input.candidateInstanceIds.map(toComposerId); // fork: see FORK.md.
   const lockedInstanceId = toComposerId(input.lockedInstanceId);
   const requestedInstanceId = candidateInstanceIds.find(
     (candidate) => candidate != null && candidate !== NO_PROVIDER_MODEL_SELECTION.instanceId,
@@ -510,22 +510,22 @@ export function resolveComposerProviderSelection(input: {
     input.entries[0]?.driverKind ??
     ProviderDriverKind.make("unconfigured");
   const lockedContinuationGroupKey = input.lockedProvider
-    ? (input.entries.find((entry) => entry.instanceId === lockedInstanceId)?.continuationGroupKey ??
+    ? (input.entries.find((entry) => entry.instanceId === lockedInstanceId)?.continuationGroupKey ?? // fork: see FORK.md.
       null)
     : null;
   // Missing metadata must not move Antigravity history into another Google profile.
   const requiresExactInstance =
     input.lockedProvider === "antigravity" &&
-    lockedInstanceId != null &&
+    lockedInstanceId != null && // fork: see FORK.md.
     lockedContinuationGroupKey === null;
   const compatibleEntries = input.entries.filter(
     (entry) =>
       (!input.lockedProvider || entry.driverKind === input.lockedProvider) &&
       (!lockedContinuationGroupKey || entry.continuationGroupKey === lockedContinuationGroupKey) &&
-      (!requiresExactInstance || entry.instanceId === lockedInstanceId),
+      (!requiresExactInstance || entry.instanceId === lockedInstanceId), // fork: see FORK.md.
   );
   const selectedProviderEntry =
-    candidateInstanceIds
+    candidateInstanceIds // fork: see FORK.md.
       .map((candidate) =>
         compatibleEntries.find(
           (entry) => entry.instanceId === candidate && entry.enabled && entry.isAvailable,
@@ -540,7 +540,7 @@ export function resolveComposerProviderSelection(input: {
   const unavailableProviderInstanceId = selectedProviderEntry
     ? undefined
     : input.lockedProvider
-      ? (lockedInstanceId ?? requestedInstanceId)
+      ? (lockedInstanceId ?? requestedInstanceId) // fork: see FORK.md.
       : requestedInstanceId;
   return {
     selectedProviderEntry,
