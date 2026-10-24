@@ -112,6 +112,9 @@ const modelFlag = Flag.String("model").pipe(
   Flag.optional,
 );
 
+// fork: off, see the handler and FORK.md.
+const TRIAGE_ENABLED = false;
+
 export const triageCommand = Command.make("triage", {
   baseDir: baseDirFlag,
   agent: agentFlag,
@@ -122,6 +125,13 @@ export const triageCommand = Command.make("triage", {
   ),
   Command.withHandler((flags) =>
     Effect.gen(function* () {
+      if (!TRIAGE_ENABLED) {
+        yield* Console.error(
+          "t3 triage is off in this fork: it searches and files public issues on pingdotgg/t3code, and this fork's bugs are reported privately.",
+        );
+        process.exitCode = 1;
+        return;
+      }
       // Triage is a user-facing feature: always the userdata state, never dev.
       const explicitBaseDir = Option.getOrUndefined(flags.baseDir);
       const envHome = yield* Config.String("T3CODE_HOME").pipe(Config.option);
