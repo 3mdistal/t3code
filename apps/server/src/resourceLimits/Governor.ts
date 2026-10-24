@@ -18,6 +18,7 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
 
 import * as ServerConfig from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
@@ -565,7 +566,17 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
     }));
   });
 
-  return { pass, restore };
+  /** A saved change shows in Settings at once; the next pass decides what it means for held work. */
+  const followSettings = settings.streamChanges.pipe(
+    Stream.runForEach((current) => {
+      const effective = effectiveLimits(current.resourceLimits, platform);
+      return effective === null
+        ? Effect.void
+        : limits.update((snapshot) => ({ ...snapshot, limits: effective })).pipe(Effect.asVoid);
+    }),
+  );
+
+  return { pass, restore, followSettings };
 });
 
 export const layer = Layer.effectDiscard(
@@ -575,6 +586,7 @@ export const layer = Layer.effectDiscard(
     const readings = yield* HostReadings;
     const governor = yield* make();
     yield* governor.restore;
+    yield* governor.followSettings.pipe(Effect.forkScoped);
     yield* readings.next.pipe(
       // A sampler that goes quiet counts as no reading, which lets everything through.
       Effect.timeoutOption(Duration.millis(TIMING.staleReadingMs)),
