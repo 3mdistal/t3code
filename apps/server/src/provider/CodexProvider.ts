@@ -40,6 +40,7 @@ import {
 } from "@t3tools/shared/model";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import { codexAppServerArgs, resolveCodexLaunchArgs } from "./codexLaunchArgs.ts";
+import { markCodexSkillsUserInvocable } from "./codexSkillInvocability.ts"; // fork: see FORK.md
 import {
   buildServerProvider,
   COMPACT_SLASH_COMMAND,
@@ -822,7 +823,10 @@ const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(fun
     cyberAccessProgramsUnavailable:
       accountResponse.account?.type === "apiKey" &&
       (config === undefined || cyberAccess?.features?.api_key_cyber_access_programs === false),
-    skills: skillsResponse ? parseCodexSkillsListResponse(skillsResponse, input.cwd) : [],
+    skills: skillsResponse
+      ? // fork: hide `user-invocable: false` skills from the `$` menu. See FORK.md.
+        yield* markCodexSkillsUserInvocable(parseCodexSkillsListResponse(skillsResponse, input.cwd))
+      : [],
   } satisfies CodexAppServerProviderSnapshot;
 });
 
@@ -876,7 +880,10 @@ export const probeCodexSkillsForCwd = Effect.fn("probeCodexSkillsForCwd")(functi
     environment: providerProbeEnvironment(input.environment ?? process.env),
   });
   const skillsResponse = yield* client.request("skills/list", { cwds: [input.cwd] });
-  return parseCodexSkillsListResponse(skillsResponse, input.cwd);
+  // fork: hide `user-invocable: false` skills from the `$` menu. See FORK.md.
+  return yield* markCodexSkillsUserInvocable(
+    parseCodexSkillsListResponse(skillsResponse, input.cwd),
+  );
 });
 
 // Long enough for a burst of workspace switches; short because the helper holds the user's
