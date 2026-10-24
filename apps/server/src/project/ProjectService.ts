@@ -1,5 +1,6 @@
 import {
   CommandId,
+  DEFAULT_SERVER_SETTINGS, // fork: see FORK.md.
   type OrchestrationProjectShell,
   PROJECT_TRACKED_FOLDERS_MAX,
   ProjectId,
@@ -37,6 +38,7 @@ import {
   type ProjectCommand,
 } from "../orchestration-v2/ProjectCommands.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
+import { storableSettingsModelSelection } from "../orchestration-v2/ProviderPoolRouting.ts"; // fork: see FORK.md.
 import * as ThreadCommandExecutor from "../orchestration-v2/ThreadCommandExecutor.ts";
 import { planThreadDeletion } from "../orchestration-v2/ThreadDeletion.ts";
 import * as ServerSettings from "../serverSettings.ts";
@@ -635,15 +637,22 @@ export const make = Effect.gen(function* () {
       if (workspaceRoot !== previousRoot) {
         yield* rejectWorktreeContainer(input.projectId, workspaceRoot);
       }
+      // fork: agent-started threads on stock T3 can't run a pool id, see FORK.md.
+      const defaultModelSelection =
+        input.defaultModelSelection &&
+        storableSettingsModelSelection(
+          yield* serverSettings.getSettings.pipe(
+            Effect.orElseSucceed(() => DEFAULT_SERVER_SETTINGS),
+          ),
+          input.defaultModelSelection,
+        );
       const command = {
         type: "project.meta.update",
         commandId: input.commandId,
         projectId: input.projectId,
         ...(input.title === undefined ? {} : { title: input.title }),
         ...(workspaceRoot === previousRoot ? {} : { workspaceRoot }),
-        ...(input.defaultModelSelection === undefined
-          ? {}
-          : { defaultModelSelection: input.defaultModelSelection }),
+        ...(defaultModelSelection === undefined ? {} : { defaultModelSelection }), // fork: see FORK.md.
         ...(input.autoPull === undefined ? {} : { autoPull: input.autoPull }),
         ...(input.projectIcon === undefined ? {} : { projectIcon: input.projectIcon }),
         ...(input.faviconPath === undefined ? {} : { faviconPath: input.faviconPath }),
