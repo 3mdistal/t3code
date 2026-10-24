@@ -497,6 +497,22 @@ const decodeThreadId = (value: string) =>
     Effect.mapError(() => new ThreadUsageError({ detail: `'${value}' is not a thread id.` })),
   );
 
+// fork: lets scripts start a thread at a chosen effort, such as the sync
+// script's conflict thread (see FORK.md).
+export const decodeModelOptions = (values: ReadonlyArray<string>) =>
+  Effect.forEach(values, (entry) => {
+    const separator = entry.indexOf("=");
+    const id = entry.slice(0, separator).trim();
+    const value = entry.slice(separator + 1).trim();
+    if (separator < 0 || id.length === 0 || value.length === 0) {
+      return Effect.fail(new ThreadUsageError({ detail: `--option '${entry}' is not id=value.` }));
+    }
+    return Effect.succeed({
+      id,
+      value: value === "true" ? true : value === "false" ? false : value,
+    });
+  });
+
 const threadListCommand = Command.make("list", {
   ...projectLocationFlags,
   project: Flag.String("project").pipe(
@@ -551,6 +567,12 @@ const threadStartCommand = Command.make("start", {
     Flag.withDescription("Model slug. Defaults to the project's default model."),
     Flag.optional,
   ),
+  option: Flag.String("option").pipe(
+    Flag.withDescription(
+      "Model option as id=value, such as effort=high. Repeat for more. Pass with --provider and --model.",
+    ),
+    Flag.atLeast(0),
+  ),
   worktree: Flag.String("worktree").pipe(
     Flag.withDescription(
       "Run in a new git worktree based on this branch, tag, or commit, instead of the project folder.",
@@ -572,6 +594,10 @@ const threadStartCommand = Command.make("start", {
       if (Option.isSome(flags.provider) !== Option.isSome(flags.model)) {
         return yield* new ThreadUsageError({ detail: "--provider and --model go together." });
       }
+      const options = yield* decodeModelOptions(flags.option);
+      if (options.length > 0 && Option.isNone(flags.model)) {
+        return yield* new ThreadUsageError({ detail: "--option needs --provider and --model." });
+      }
       const title = yield* decodeTitle(
         Option.getOrElse(flags.title, () => titleFromMessage(message)),
       ).pipe(Effect.mapError(() => new ThreadUsageError({ detail: "The title is empty." })));
@@ -591,6 +617,7 @@ const threadStartCommand = Command.make("start", {
                     modelSelection: {
                       instanceId: flags.provider.value,
                       model: flags.model.value,
+                      ...(options.length > 0 ? { options } : {}),
                     },
                   }
                 : {}),
