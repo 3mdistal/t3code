@@ -270,14 +270,29 @@ function latestTag(): string {
   return sh("gh", ["api", `repos/${repository}/releases/latest`, "--jq", ".tag_name"]);
 }
 
-/** The updater follows github.com's releases/latest redirect, which can lag the API. */
-function waitForLatestRedirect(tag: string): Promise<true> {
-  return waitFor(`releases/latest to name ${tag}`, 300_000, () =>
-    fetch(`https://github.com/${repository}/releases/latest`, { redirect: "manual" }).then(
-      (response) => (response.headers.get("location")?.endsWith(`/tag/${tag}`) ? true : undefined),
-      () => undefined,
-    ),
-  );
+/**
+ * The updater asks github.com's releases/latest for JSON, then fetches that
+ * tag's latest.yml. Both lag the API by a while after releases change, so this
+ * waits until the same two requests answer for `tag`, three times running.
+ */
+async function waitForLatestRedirect(tag: string): Promise<void> {
+  const answers = async () => {
+    const latest = await fetch(`https://github.com/${repository}/releases/latest`, {
+      headers: { accept: "application/json" },
+    });
+    if (!latest.ok || ((await latest.json()) as { tag_name?: string }).tag_name !== tag) {
+      return false;
+    }
+    const manifest = await fetch(
+      `https://github.com/${repository}/releases/download/${tag}/latest.yml`,
+    );
+    return manifest.ok;
+  };
+  let streak = 0;
+  await waitFor(`releases/latest to name ${tag}`, 600_000, async () => {
+    streak = (await answers().catch(() => false)) ? streak + 1 : 0;
+    return streak >= 3 ? true : undefined;
+  });
 }
 
 async function rehearseGitHub(builds: ReadonlyArray<Build>): Promise<void> {

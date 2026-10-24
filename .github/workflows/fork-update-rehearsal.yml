@@ -237,6 +237,6 @@ jobs:
         with:
           name: rehearsal-logs-${{ matrix.feed }}
           path: |
-            ${{ runner.temp }}/t3-rehearsal-home/**/*.log
+            ${{ runner.temp }}/t3-rehearsal-home/**/logs/**
             ~/AppData/Roaming/t3code-v2/logs/**
           if-no-files-found: ignore
