@@ -1,8 +1,10 @@
 name: Mobile EAS Preview
 
 on:
-  pull_request:
-    types: [opened, reopened, synchronize, labeled]
+  # fork: upstream's triggers, commented out so this never runs on the fork (see FORK.md):
+  # pull_request:
+  #   types: [opened, reopened, synchronize, labeled]
+  workflow_call:
 
 jobs:
   preview:

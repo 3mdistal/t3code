@@ -2517,7 +2517,9 @@ function pdfScroll(screen: Screen) {
   return { region, canvas, offset, scrollTo };
 }
 
-it("keeps workspace PDF scroll and zoom after reloads", async () => {
+// fork: GitHub's runners need more than the 15 s default here, see FORK.md.
+// oxlint-disable-next-line t3code/no-test-timeout-or-unreasoned-skip -- PDF rendering on GitHub's 4-vCPU runners, not a hidden wait.
+it("keeps workspace PDF scroll and zoom after reloads", { timeout: 30_000 }, async () => {
   using fixture = await workspacePdfPreview();
   const { preview, urls } = fixture;
   await using screen = await render(preview(urls.original, "one"));
