@@ -97,7 +97,7 @@ function compareVersions(left: string, right: string): number {
 
 interface UninstallEntry {
   readonly DisplayVersion: string;
-  readonly InstallLocation: string;
+  readonly UninstallString: string;
 }
 
 /** The installer's uninstall entry, which it writes last. */
@@ -105,7 +105,7 @@ function uninstallEntry(): UninstallEntry | undefined {
   const out = sh("powershell.exe", [
     "-NoProfile",
     "-Command",
-    "Get-ItemProperty 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*' | Where-Object { $_.DisplayName -like 'T3 Code*' } | Select-Object -First 1 DisplayVersion, InstallLocation | ConvertTo-Json -Compress",
+    "Get-ItemProperty 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*' | Where-Object { $_.DisplayName -like 'T3 Code*' } | Select-Object -First 1 DisplayVersion, UninstallString | ConvertTo-Json -Compress",
   ]);
   return out.length === 0 ? undefined : (JSON.parse(out) as UninstallEntry);
 }
@@ -115,8 +115,11 @@ function registeredVersion(): string | undefined {
 }
 
 function installedApp(): string {
-  const installDir = uninstallEntry()?.InstallLocation;
-  if (installDir === undefined) throw new Error("T3 Code isn't installed");
+  const entry = uninstallEntry();
+  // electron-builder leaves InstallLocation empty; the uninstaller sits beside the app.
+  const uninstaller = /^"([^"]+)"/.exec(entry?.UninstallString ?? "")?.[1];
+  if (uninstaller === undefined) throw new Error(`T3 Code isn't installed: ${JSON.stringify(entry)}`);
+  const installDir = NodePath.dirname(uninstaller);
   const exe = NodeFS.readdirSync(installDir).find(
     (file) => /^T3 Code.*\.exe$/.test(file) && !file.startsWith("Uninstall"),
   );
