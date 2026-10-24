@@ -4,6 +4,7 @@ import {
   type ModelSelection,
   type WorktreeSubmodules,
 } from "@t3tools/contracts";
+import { composerModelSelectionFor } from "@t3tools/client-runtime/provider-pools"; // fork: see FORK.md.
 import { createModelSelection, pickModelSelection } from "@t3tools/shared/model";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import { useNavigate } from "@tanstack/react-router";
@@ -14,7 +15,10 @@ import {
   defaultModelSelectionsAreMixed,
   getCustomModelOptionsByInstance,
 } from "../../modelSelection";
-import { providerInstanceEntriesFor } from "../../providerInstances";
+import {
+  deriveComposerProviderInstanceEntries, // fork: see FORK.md.
+  providerInstanceEntriesFor,
+} from "../../providerInstances";
 import { useEnvironmentProviders, useEnvironments } from "../../state/environments";
 import { firstManagedDenial } from "../../state/managedPolicy";
 import { EMPTY_SERVER_PROVIDERS } from "../../state/server";
@@ -67,17 +71,25 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
     (representative?.serverConfig
       ? providersByEnvironment.get(representative.environmentId)
       : undefined) ?? EMPTY_SERVER_PROVIDERS;
-  const entries = providerInstanceEntriesFor(providers, settings, target?.projectId ?? null);
+  // fork: new threads start here as from the composer, so a pool stands in for its accounts, and
+  // a default that resolves to a pooled account, saved or automatic, shows as the pool. The saved
+  // default is still checked against the accounts, before they fold into the pool. See FORK.md.
+  const entries = deriveComposerProviderInstanceEntries(
+    providers,
+    settings,
+    target?.projectId ?? null,
+  );
   const presentation = resolveDefaultModelSettingsPresentation(
     {
-      entries,
+      entries: providerInstanceEntriesFor(providers, settings, target?.projectId ?? null),
       providers,
       settings,
       projectId: target?.projectId ?? null,
     },
     m,
   );
-  const selection = presentation.selection;
+  const selection =
+    presentation.selection && composerModelSelectionFor(providers, presentation.selection);
   const modelOptions = getCustomModelOptionsByInstance(
     settings,
     providers,
@@ -97,7 +109,11 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
     targets.length > 0 &&
     targets.every((candidate) => candidate.settings.defaultModelSelection === null);
   const mixedFallback = useScopedSettingsMixed(["fallbackModelSelection"]);
-  const fallbackSelection = settings.fallbackModelSelection ?? selection;
+  // fork: a fallback saved on a pooled account shows as the pool, like the default. See FORK.md.
+  const fallbackSelection =
+    (settings.fallbackModelSelection &&
+      composerModelSelectionFor(providers, settings.fallbackModelSelection)) ??
+    selection;
   const fallbackEntry = entries.find((entry) => entry.instanceId === fallbackSelection?.instanceId);
   const fallbackModelOptions = getCustomModelOptionsByInstance(
     settings,
