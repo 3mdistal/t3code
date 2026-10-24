@@ -1,6 +1,6 @@
 import type { ChatComposerProps } from "./ChatComposer";
 import type { PromptUltrathink } from "./TraitsPicker";
-import type { ProviderInstanceEntry } from "../../providerInstances";
+import type { ProviderInstanceEntry, resolvePoolMemberLabel } from "../../providerInstances";
 import { type AppModelOption } from "../../modelSelection";
 import { CircleAlertIcon } from "lucide-react";
 import { CompactComposerControlsMenu } from "./CompactComposerControlsMenu";
@@ -70,6 +70,7 @@ export function ComposerControlsBar(props: {
   selectedModelForPickerWithCustomFallback: string;
   lockedProvider: ChatComposerProps["lockedProvider"];
   lockedContinuationGroupKey: string | null;
+  activeAccount: ReturnType<typeof resolvePoolMemberLabel>;
   providerInstanceEntries: ReadonlyArray<ProviderInstanceEntry>;
   keybindings: ChatComposerProps["keybindings"];
   modelOptionsByInstance: ReadonlyMap<ProviderInstanceId, ReadonlyArray<AppModelOption>>;
@@ -119,6 +120,7 @@ export function ComposerControlsBar(props: {
     selectedModelForPickerWithCustomFallback,
     lockedProvider,
     lockedContinuationGroupKey,
+    activeAccount,
     providerInstanceEntries,
     keybindings,
     modelOptionsByInstance,
@@ -213,6 +215,7 @@ export function ComposerControlsBar(props: {
       }
       lockedProvider={lockedProvider}
       lockedContinuationGroupKey={lockedContinuationGroupKey}
+      activeAccount={activeAccount}
       instanceEntries={providerInstanceEntries}
       keybindings={keybindings}
       modelOptionsByInstance={modelOptionsByInstance}

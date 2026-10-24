@@ -29,10 +29,9 @@ custom setting changes `CLAUDE_CONFIG_DIR`, leaving `HOME` and the system keycha
 location intact. Use the same variable for the login command. Setting `HOME`
 instead can put credentials where this provider will not find them.
 
-Check the account reported in provider settings after signing in. Existing
-threads can switch only between Claude instances with the same config directory.
-Separate account directories stay isolated, including their local conversation
-state. Claude does not have Codex's shared-home and shadow-home arrangement.
+Check the account reported in provider settings after signing in. Separate
+account directories stay isolated, including their local conversation state.
+Moving a thread to another account continues from a summary of the conversation. Claude does not have Codex's shared-home and shadow-home arrangement.
 
 For presets that differ only in API keys or endpoints, use the instance's
 **Environment variables**. Variable assignments do not belong in **Launch arguments**.
@@ -40,6 +39,27 @@ For presets that differ only in API keys or endpoints, use the instance's
 Claude Code's verbose mode can stay enabled when you use Claude for text generation, including
 thread titles, branch names, commit messages, and pull request descriptions. On a remote connection,
 T3 Code uses the Claude configuration on the connected server.
+
+## Account pools
+
+With two or more Claude accounts, you can offer them as one. In **Settings >
+Account pools**, tick the Claude accounts to share and turn on **Pool these
+accounts**. The model picker then shows a single Claude entry in place of the
+ticked accounts. A new thread starts on the account with the most usage left, and
+stays on it until that account reaches a usage limit. The turn then continues on
+the account with the most usage left, and the thread's model picker shows the
+account that ran it. When every account is limited, the thread stops with the
+earliest reset time, so **Resume at reset** continues it on the first account
+to reset.
+
+Moving a thread to another Claude account continues from a summary of the
+conversation, because each account keeps its own history. The summary tells the
+new account how to read the earlier turns with `t3_thread_read`.
+
+Pooled accounts stay in **Settings**, where you can still select them and where
+**Settings > Providers** shows which pool each belongs to and when a limited account
+is available again. To bring an account back into the model picker, untick it or
+turn the pool off. Threads stay on the account that last ran them.
 
 ## Compact long conversations
 
