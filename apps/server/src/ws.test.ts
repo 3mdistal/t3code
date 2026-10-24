@@ -506,7 +506,9 @@ it.effect(
         }),
         Layer.mock(ProviderRegistry.ProviderRegistry)({
           getProviders: Effect.succeed([]),
+          getPublishedProviders: Effect.succeed([]),
           streamChanges: Stream.never,
+          streamPublishedChanges: Stream.never,
         }),
         Layer.mock(UsageLimitSources.UsageLimitSources)({ streamChanges: Stream.make([]) }),
         Layer.mock(RemoteOpenTargets.RemoteOpenTargets)({
