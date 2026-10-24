@@ -18,6 +18,7 @@ import {
   GitBranchIcon,
   GlobeIcon,
   InfoIcon,
+  LayersIcon,
   MessageSquareTextIcon,
   MessagesSquareIcon,
   PanelsTopLeftIcon,
@@ -51,6 +52,7 @@ import {
 } from "../ui/sidebar";
 import { scrollToSettingsTarget } from "./settingsLayout";
 import {
+  hasProviderPoolsEnvironment,
   searchSettings,
   revealSettingsSearchTarget,
   SETTINGS_NAV_GROUPS,
@@ -62,6 +64,7 @@ import {
 import { useAvailableSettingsSearchItems } from "./useAvailableSettingsSearchItems";
 import { handleSettingsSectionKeyDown } from "./settingsSectionNavigation";
 import { workspaceAreaProps } from "../../lib/workspaceFocus";
+import { useEnvironments } from "~/state/environments";
 
 const SnapShotIcon = createLucideIcon("snap-shot", [
   [
@@ -99,6 +102,7 @@ const SETTINGS_SECTION_ICONS: Readonly<
   "/settings/keybindings": KeyboardIcon,
   "/settings/snap-shot": SnapShotIcon,
   "/settings/providers": BotIcon,
+  "/settings/account-pools": LayersIcon,
   "/settings/threads": MessagesSquareIcon,
   "/settings/browser": GlobeIcon,
   "/settings/devices": SmartphoneIcon,
@@ -137,6 +141,8 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
   const navigate = useNavigate();
   const currentHash = useLocation({ select: (location) => location.hash });
   const activePath = SETTINGS_DETAIL_PAGE_PARENTS[pathname] ?? pathname;
+  const { environments } = useEnvironments();
+  const providerPoolsAvailable = hasProviderPoolsEnvironment(environments);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [query, setQuery] = useState("");
   // Below md the nav is an icon rail; searching expands it over the page.
@@ -397,6 +403,9 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
                       <div role="group" aria-labelledby={`settings-nav-group-${index}`}>
                         <SidebarMenu>
                           {group.paths.map((to) => {
+                            // fork: only where a server supports account pools. See FORK.md.
+                            if (to === "/settings/account-pools" && !providerPoolsAvailable)
+                              return null;
                             const Icon = SETTINGS_SECTION_ICONS[to];
                             const isActive = activePath === to || activePath.startsWith(`${to}/`);
                             return (

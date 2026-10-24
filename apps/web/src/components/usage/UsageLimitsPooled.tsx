@@ -11,6 +11,7 @@ import {
   remainingPercent,
   type ResetCreditChoice,
 } from "@t3tools/shared/usageLimits";
+import { defaultInstanceIdForDriver } from "@t3tools/contracts";
 import { T, useGT, useMessages } from "gt-react";
 import type { Popover as PopoverPrimitive } from "@base-ui/react/popover";
 import { normalizeProviderAccentColor } from "@t3tools/client-runtime/state/provider-instance-display";
@@ -91,7 +92,9 @@ function AccountAvatar({
           String(account.driver)
         }
         accentColor={account.accentColor}
-        showBadge={Boolean(account.displayName)}
+        showBadge={account.instances.some(
+          (instance) => instance.instanceId !== defaultInstanceIdForDriver(account.driver),
+        )}
         indicatorBackground="var(--popover)"
         className={cn("size-5", className)}
         iconClassName="size-4 text-foreground/80"
@@ -125,7 +128,7 @@ function AccountName({
 
 function Row({ label, children }: { readonly label: string; readonly children: ReactNode }) {
   return (
-    <div className="grid grid-cols-[4.5rem_minmax(0,1fr)] gap-x-3">
+    <div className="grid grid-cols-[5.5rem_minmax(0,1fr)] gap-x-3">
       <span className="text-muted-foreground">{label}</span>
       <span className="min-w-0 text-foreground tabular-nums">{children}</span>
     </div>
@@ -194,6 +197,16 @@ function SegmentPopover({
           >
             {where}
           </Row>
+        ) : null}
+        {account.instances.length > 1 ? (
+          <>
+            <Row label={gt("Signed in on")}>
+              {[...new Set(account.instances.map((instance) => instance.displayName))].join(", ")}
+            </Row>
+            <p className="text-muted-foreground">
+              <T>One login, one quota: these instances share this limit.</T>
+            </p>
+          </>
         ) : null}
       </div>
       <div className="flex flex-col gap-1 border-t border-border/60 pt-2.5">
@@ -639,6 +652,8 @@ function PoolSection({ pool, now }: { readonly pool: LimitPool; readonly now: nu
   const label = providerClients.get(pool.driver)?.label ?? String(pool.driver);
   const windows = displayLimitWindows(pool);
   const m = useMessages();
+  const accountCount = pool.accounts.length;
+  const instanceCount = pool.accounts.reduce((sum, account) => sum + account.instances.length, 0);
   return (
     <section className="flex flex-col gap-3">
       <h2 className="flex items-center gap-2 text-sm font-medium text-foreground">
@@ -650,6 +665,11 @@ function PoolSection({ pool, now }: { readonly pool: LimitPool; readonly now: nu
           iconClassName="size-4 text-foreground/80"
         />
         {label}
+        {accountCount > 1 || instanceCount > 1 ? (
+          <span className="font-normal text-muted-foreground">
+            {` · ${accountCount} ${accountCount === 1 ? "account" : "accounts"}`}
+          </span>
+        ) : null}
       </h2>
       {windows.map((window) => {
         const details =

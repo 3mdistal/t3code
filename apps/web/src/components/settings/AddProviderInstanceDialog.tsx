@@ -52,6 +52,7 @@ import {
   ACP_REGISTRY_WIZARD_STEPS,
   LOCAL_ACP_WIZARD_STEPS,
   resolveAcpRegistryWizardNavigation,
+  reservedInstanceIdError,
   resolveWizardNavigation,
   updateProviderIdentityDraft,
   type ProviderIdentityDraft,
@@ -89,7 +90,7 @@ function validateInstanceId(
     );
   }
   if (existing.has(id)) return resolve(msg("An instance named ''{id}'' already exists.", { id }));
-  return null;
+  return reservedInstanceIdError(id, resolve); // fork: see FORK.md.
 }
 
 function ProviderOptionGrid({
