@@ -70,6 +70,8 @@ import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as FeedbackStore from "../feedback/FeedbackStore.ts";
 import * as WorkspaceFolders from "../workspace/WorkspaceFolders.ts";
 import * as TaskFolderStore from "../workspace/TaskFolderStore.ts";
+// fork: limits, see FORK.md.
+import * as ResourceLimits from "../resourceLimits/ResourceLimits.ts";
 
 export const layerEventInfrastructure = Layer.mergeAll(
   OrchestrationEventStore.layer,
@@ -475,5 +477,7 @@ export const layerProduction = Layer.mergeAll(
   Layer.provideMerge(layerProjectService),
   Layer.provide(Scheduler.layer),
   Layer.provide(ProviderPoolCatalog.layer), // fork: account pools, see FORK.md.
+  // fork: limits, see FORK.md.
+  Layer.provideMerge(ResourceLimits.layer.pipe(Layer.provide(ProjectionStore.layer))),
   Layer.provideMerge(layerEventInfrastructure),
 );
