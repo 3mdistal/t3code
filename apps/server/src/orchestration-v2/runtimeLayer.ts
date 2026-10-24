@@ -56,6 +56,8 @@ import * as ThreadForkService from "./ThreadForkService.ts";
 import * as TurnItemPositionStore from "./TurnItemPositionStore.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
+// fork: limits, see FORK.md.
+import * as ResourceLimits from "../resourceLimits/ResourceLimits.ts";
 
 export const layerEventInfrastructure = Layer.mergeAll(
   OrchestrationEventStore.layer,
@@ -392,5 +394,7 @@ export const layerProduction = Layer.mergeAll(
   Layer.provide(ResourceCleanupService.layer.pipe(Layer.provide(layerScheduledTaskProvided))),
   Layer.provide(Scheduler.layer),
   Layer.provide(ProviderPoolCatalog.layer), // fork: account pools, see FORK.md.
+  // fork: limits, see FORK.md.
+  Layer.provideMerge(ResourceLimits.layer.pipe(Layer.provide(ProjectionStore.layer))),
   Layer.provideMerge(layerEventInfrastructure),
 );
