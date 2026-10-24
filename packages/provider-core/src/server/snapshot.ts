@@ -1,4 +1,5 @@
 import type {
+  IsoDateTime,
   ProviderUsageLimitsUpdate,
   ServerProvider,
   ServerSettingsError,
@@ -28,4 +29,9 @@ export interface ManagedServerProvider {
   readonly streamChanges: Stream.Stream<ServerProvider>;
   /** Merge windows by ID and set any authLabel; an update with no window leaves the snapshot untouched. */
   readonly applyUsageLimits: (update: ProviderUsageLimitsReport) => Effect.Effect<void>;
+  /**
+   * Cools the account until `until`. Max-merge: an earlier end never shortens
+   * a cooldown already in force, so concurrent reports commute.
+   */
+  readonly markLimited?: (input: { readonly until: IsoDateTime }) => Effect.Effect<void>;
 }
