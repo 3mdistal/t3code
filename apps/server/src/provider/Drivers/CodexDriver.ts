@@ -267,6 +267,9 @@ export const CodexDriver: ProviderDriver<
               Effect.scoped,
               Effect.timeout("20 seconds"),
               Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+              // fork: reading SKILL.md for the `$` menu needs these. See FORK.md.
+              Effect.provideService(FileSystem.FileSystem, fileSystem),
+              Effect.provideService(Path.Path, pathService),
             ),
           ]).pipe(
             Effect.map(([machineSnapshot, skills]) => ({ ...machineSnapshot, skills })),

@@ -60,6 +60,21 @@ the command prints why it's off and exits 1. File: `apps/server/src/cli/triage.t
 A repeatable `--option id=value` flag sets model options, such as `effort=xhigh`, so the sync's conflict thread
 starts at the right effort. File: `apps/server/src/cli/thread.ts`. Test: `apps/server/src/cli/thread.fork.test.ts`.
 
+### Codex's `$` menu hides `user-invocable: false` skills (`fork:`)
+
+Skills Alice doesn't type carry `user-invocable: false` in their SKILL.md frontmatter. T3 already hides those
+from Claude's `$` menu, but Codex's `skills/list` has no such flag, so every Codex skill showed. The fork reads each
+listed skill's SKILL.md with Claude's frontmatter parser and marks it. Only the menu changes; the model still sees
+every skill. A missing or unreadable file, or reads slower than 2 s, leaves skills visible.
+
+- `apps/server/src/provider/codexSkillInvocability.ts`: `markCodexSkillsUserInvocable`.
+- `apps/server/src/provider/CodexProvider.ts`: the machine probe and `probeCodexSkillsForCwd` pass their parsed
+  skills through it.
+- `apps/server/src/provider/Drivers/CodexDriver.ts` and `CodexManagedProvider.ts`: provide the file system to
+  their `probeCodexSkillsForCwd` calls.
+- `apps/server/src/provider/Drivers/ClaudeSkills.ts`: exports `parseSkillFrontmatter`.
+- Test: `apps/server/src/provider/codexSkillInvocability.fork.test.ts`.
+
 ### macOS signing without upstream's App ID (`fork:`)
 
 Upstream's passkey entitlements need a provisioning profile for upstream's App ID, which the fork can't get.
