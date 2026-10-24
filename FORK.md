@@ -90,6 +90,33 @@ Upstream's passkey entitlements need a provisioning profile for upstream's App I
 - `.github/workflows/fork-release.yml`, `scripts/fork/versions.ts` and `scripts/fork/sync.ts`, described below.
 - Tests: `scripts/fork/*.test.ts` and `apps/desktop/src/updates/updateChannels.fork.test.ts`.
 
+### Account pools (`pools:`)
+
+Two or more accounts of one provider act as one pool, so a thread that reaches a usage limit continues on the
+account with the most usage left instead of stopping. Ported from ScriptedAlchemy's fork. Users read about it in
+the Account pools section of `docs/user/providers-claude.md`.
+
+- Pool-only files: `packages/contracts/src/providerPool.ts`, `packages/client-runtime/src/providerPools.ts`,
+  `apps/server/src/provider/providerPoolSnapshot.ts`, and `ProviderPoolCatalog.ts`, `ProviderPoolRouting.ts` and
+  `ProviderPoolFailover.ts` in `apps/server/src/orchestration-v2/`. On the web, `ProviderPoolsSettings.tsx` and
+  its `.logic.ts`, `ProviderLimitedUntil.tsx`, and `routes/settings.account-pools.tsx`.
+- Upstream files it changes most:
+  - `apps/server/src/orchestration-v2/Orchestrator.ts`: every command that starts or moves a turn calls
+    `resolveRouting`, and failover is the internal `run.pool-failover` command.
+  - `apps/server/src/provider/ProviderRegistry.ts`: publishes each pool as a provider and remembers limited
+    accounts.
+  - `apps/server/src/serverSettings.ts`: the `providerPools` key, and the reserved `pool_` instance ids.
+  - The web model picker and the Providers settings.
+- Stock compatibility:
+  - Pools live under the new `providerPools` settings key.
+  - Failover emits only `turn-item.updated` and `system_notice`.
+  - Scheduled tasks save the pool's first account rather than the pool's id.
+  - Stock T3 drops `providerPools` the next time it saves settings, so after a rollback the accounts stay but
+    the pool is gone.
+- Tests: `ProviderPoolRouting.test.ts`, `ProviderPoolFailover.test.ts`, `ProviderPoolFailover.integration.test.ts`,
+  `providerPoolSnapshot.test.ts`, `providerPool.test.ts`, `providerPools.test.ts` and
+  `ProviderPoolsSettings.logic.test.ts`, plus pool cases inside upstream test files.
+
 ## Versions
 
 A release is `vX.Y.Z-alice.N`. `X.Y.Z` is the upstream stable tag the stack sits on, and `N` counts the fork's
@@ -198,3 +225,7 @@ could run; `node scripts/fork/ci-workflows.ts` fixes that. If `fork/main` gained
   them.
 - A `t3` older than the `--option` flag starts the conflict thread at the model's default effort. The sync log says
   when that happens.
+- An account pool remembers a limited account only until the server restarts. Until fresh usage arrives, a
+  restarted server may try that account again.
+- A pooled Claude account reads earlier turns with `t3_thread_read`, which Claude's read-only mode doesn't
+  pre-approve.
