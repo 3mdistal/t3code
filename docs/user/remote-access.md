@@ -129,8 +129,9 @@ different permissions.
 
 Auto balance is off by default. On web and desktop, enable it in
 **Settings → Environments → Load balancing** to automatically choose a machine for
-new threads in projects grouped across connected environments. The section
-appears once two or more machines are switched on.
+new threads in projects grouped across connected environments. The switch
+appears once two or more machines are switched on. Auto balance skips a machine
+that is over its memory and CPU limits.
 Each machine starts at **Normal**. Choose **Prefer** to favor it when it has CPU and
 memory available, **Less often** to reduce its share, or **Manual only** to exclude
 it from automatic selection. These are preferences, not fixed traffic percentages.
@@ -157,6 +158,12 @@ It counts while it's your latest message there.
 When memory is critically low, T3 also stops the newest running turn every 30 seconds
 until memory recovers. It skips turns waiting for your answer. A stopped thread
 continues later from where it was interrupted.
+
+**Settings → Environments → Load balancing** shows each machine's limits and readings,
+even with one machine. Choose **Edit limits** to change them on that machine, and leave
+a field empty to use its default. Windows pauses when commit headroom is under 25 GiB
+or available memory is under 8 GiB, resumes once they are over 35 GiB and 12 GiB, and
+is critically low under 10 GiB of headroom. macOS follows its own memory pressure.
 
 ### Tailscale HTTPS
 
