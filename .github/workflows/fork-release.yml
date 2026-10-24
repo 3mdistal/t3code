@@ -1,0 +1,291 @@
+name: Fork release
+
+# fork: publishes vX.Y.Z-alice.N from every push to fork/main (see FORK.md).
+# Started from ScriptedAlchemy/t3code's fork-release.yml. release.yml needs
+# upstream's Blacksmith runners and deploy secrets, so this reuses only its
+# per-platform packaging (release-desktop.yml) on GitHub-hosted runners, and
+# publishes the update manifests that installs follow on the latest channel.
+
+on:
+  push:
+    branches: [fork/main]
+  workflow_dispatch:
+
+# Queued, never cancelled: a cancelled publish can leave a half-uploaded release.
+concurrency:
+  group: fork-release
+  cancel-in-progress: false
+
+permissions:
+  # release-desktop.yml's Windows job lists this run's artifacts to wait for the
+  # Linux CLI archive it embeds.
+  actions: read
+  contents: read
+
+jobs:
+  version:
+    name: Resolve version
+    if: github.ref == 'refs/heads/fork/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      base: ${{ steps.version.outputs.base }}
+      released: ${{ steps.version.outputs.released }}
+      notes: ${{ steps.version.outputs.notes }}
+      clerk_publishable_key: ${{ steps.public_config.outputs.clerk_publishable_key }}
+      clerk_jwt_template: ${{ steps.public_config.outputs.clerk_jwt_template }}
+      clerk_cli_oauth_client_id: ${{ steps.public_config.outputs.clerk_cli_oauth_client_id }}
+      relay_url: ${{ steps.public_config.outputs.relay_url }}
+    steps:
+      # The version counts tags, and the notes list the commits since the base
+      # tag, so this needs the history but none of the file contents.
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          filter: blob:none
+          sparse-checkout: |
+            /package.json
+            /.env.example
+            /scripts/fork/
+          sparse-checkout-cone-mode: false
+
+      # The fork never carries upstream's newer stable tags (pushing one would
+      # fire upstream's tag-triggered release.yml), so read them from upstream.
+      - name: Fetch upstream's stable tags
+        run: git fetch --no-tags --filter=blob:none https://github.com/pingdotgg/t3code.git '+refs/tags/v*:refs/tags/v*'
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          run-install: false
+
+      - id: version
+        name: Resolve version
+        shell: bash
+        run: |
+          set -euo pipefail
+          resolved="$(node scripts/fork/versions.ts release-version "$GITHUB_SHA")"
+          echo "$resolved" | tee -a "$GITHUB_OUTPUT"
+          base="$(echo "$resolved" | sed -n 's/^base=//p')"
+          {
+            echo 'notes<<NOTES_EOF'
+            echo "Built from upstream [${base}](https://github.com/pingdotgg/t3code/releases/tag/${base}) and the fork patches below. [FORK.md](https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_SHA}/FORK.md) explains them."
+            echo
+            git log --reverse --no-merges --format='- %s' "${base}..${GITHUB_SHA}"
+            echo NOTES_EOF
+          } >> "$GITHUB_OUTPUT"
+
+      # .env.example holds the public T3 Connect identifiers that official
+      # builds bake in.
+      - id: public_config
+        name: Resolve T3 Connect public config
+        shell: bash
+        run: |
+          set -euo pipefail
+          for key in clerk_publishable_key:T3CODE_CLERK_PUBLISHABLE_KEY clerk_jwt_template:T3CODE_CLERK_JWT_TEMPLATE clerk_cli_oauth_client_id:T3CODE_CLERK_CLI_OAUTH_CLIENT_ID relay_url:T3CODE_RELAY_URL; do
+            value="$(sed -n "s/^${key##*:}=//p" .env.example | head -n 1)"
+            if [[ -z "$value" ]]; then
+              echo "${key##*:} is missing from .env.example." >&2
+              exit 1
+            fi
+            echo "${key%%:*}=${value}" >> "$GITHUB_OUTPUT"
+          done
+
+  # A rebase-merged pull request lands as new commits, so the release runs CI
+  # on exactly what it publishes.
+  ci:
+    name: CI
+    needs: version
+    if: needs.version.outputs.released == 'false'
+    uses: ./.github/workflows/fork-ci.yml
+
+  bundle:
+    name: Build JS bundle
+    needs: version
+    if: needs.version.outputs.released == 'false'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      T3CODE_CLERK_PUBLISHABLE_KEY: ${{ needs.version.outputs.clerk_publishable_key }}
+      T3CODE_CLERK_JWT_TEMPLATE: ${{ needs.version.outputs.clerk_jwt_template }}
+      T3CODE_CLERK_CLI_OAUTH_CLIENT_ID: ${{ needs.version.outputs.clerk_cli_oauth_client_id }}
+      T3CODE_RELAY_URL: ${{ needs.version.outputs.relay_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: false
+
+      - name: Install bundle dependencies
+        run: vp install --filter=t3... --filter=@t3tools/web... --filter=@t3tools/desktop... --filter=@t3tools/scripts...
+
+      - name: Align package versions to release version
+        run: node scripts/update-release-package-versions.ts "${{ needs.version.outputs.version }}"
+
+      - uses: ./.github/actions/setup-apt-mirrors
+
+      - name: Install browser secret helper build libraries
+        run: sudo apt-get update && sudo apt-get install -y libsecret-1-dev pkg-config
+
+      - name: Build JS bundle
+        env:
+          T3CODE_TELEMETRY_CHANNEL: dev
+        run: vp run build:desktop
+
+      # Same layout as release.yml's js-bundle so release-desktop.yml can
+      # package it unchanged.
+      - name: Upload JS bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: js-bundle
+          path: |
+            apps/server/dist
+            apps/desktop/dist-electron
+          if-no-files-found: error
+          retention-days: 1
+
+  desktop:
+    name: Desktop
+    needs: [version, bundle]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: macOS arm64
+            runner: macos-26
+            verify_runner: ""
+            platform: mac
+            target: dmg
+            arch: arm64
+            rust_target: aarch64-apple-darwin
+            resource_key: darwin-arm64
+          # Windows embeds this job's CLI archive as its WSL runtime and waits
+          # for it by this label.
+          - label: Linux x64
+            runner: ubuntu-24.04
+            verify_runner: ""
+            platform: linux
+            target: AppImage
+            arch: x64
+            rust_target: x86_64-unknown-linux-gnu
+            resource_key: linux-x64
+          # Built on Linux like upstream's: the CLI build's tar cannot extract
+          # on a Windows runner. Its packaged binaries run on windows-2025.
+          - label: Windows x64
+            runner: ubuntu-24.04
+            verify_runner: windows-2025
+            platform: win
+            target: nsis
+            arch: x64
+            rust_target: x86_64-pc-windows-msvc
+            resource_key: win32-x64
+    uses: ./.github/workflows/release-desktop.yml
+    secrets: inherit
+    with:
+      version: ${{ needs.version.outputs.version }}
+      ref: ${{ github.sha }}
+      release_channel: stable
+      relay_client_tracing: false
+      clerk_publishable_key: ${{ needs.version.outputs.clerk_publishable_key }}
+      clerk_jwt_template: ${{ needs.version.outputs.clerk_jwt_template }}
+      clerk_cli_oauth_client_id: ${{ needs.version.outputs.clerk_cli_oauth_client_id }}
+      relay_url: ${{ needs.version.outputs.relay_url }}
+      label: ${{ matrix.label }}
+      runner: ${{ matrix.runner }}
+      verify_runner: ${{ matrix.verify_runner }}
+      platform: ${{ matrix.platform }}
+      target: ${{ matrix.target }}
+      arch: ${{ matrix.arch }}
+      rust_target: ${{ matrix.rust_target }}
+      resource_key: ${{ matrix.resource_key }}
+      cli_archive: true
+
+  publish:
+    name: Publish GitHub Release
+    needs: [version, ci, desktop]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Download desktop artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: desktop-*
+          merge-multiple: true
+          path: release-assets
+
+      - name: Download CLI archives
+        uses: actions/download-artifact@v8
+        with:
+          pattern: cli-*
+          merge-multiple: true
+          path: release-assets
+
+      # Installers verify archives against this file.
+      - name: Write CLI archive checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release-assets
+          shopt -s nullglob
+          archives=(t3-*.tar.gz t3-*.zip)
+          if [[ ${#archives[@]} -eq 0 ]]; then
+            echo "No CLI archives were produced." >&2
+            exit 1
+          fi
+          sha256sum "${archives[@]}" > SHA256SUMS
+          cat SHA256SUMS
+
+      # One Windows arch, so its manifest only loses the arch suffix that
+      # release-desktop.yml adds for merging.
+      - name: Name the update manifests
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          for manifest in release-assets/*-win-x64.yml; do
+            mv "$manifest" "${manifest%-win-x64.yml}.yml"
+          done
+          rm -f release-assets/builder-debug.yml
+          for manifest in latest.yml latest-mac.yml latest-linux.yml; do
+            if [[ ! -f "release-assets/$manifest" ]]; then
+              echo "release-assets/$manifest is missing, so installs would not see this release." >&2
+              exit 1
+            fi
+          done
+
+      - name: Publish release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
+          NOTES: ${{ needs.version.outputs.notes }}
+        run: |
+          set -euo pipefail
+          cat > notes.md <<EOF
+          ${NOTES}
+
+          - **Windows:** run the \`.exe\`. SmartScreen warns once: choose **More info**, then **Run anyway**.
+          - **macOS (Apple silicon):** open the \`.dmg\` and drag the app to Applications. If macOS says the app is damaged, run \`xattr -dr com.apple.quarantine "/Applications/T3 Code (Beta).app"\`.
+          - **CLI / headless server:** extract the \`t3\` archive for your platform.
+          EOF
+          gh release create "v${VERSION}" release-assets/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "T3 Code ${VERSION}" \
+            --notes-file notes.md \
+            --latest

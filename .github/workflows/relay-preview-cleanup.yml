@@ -9,11 +9,13 @@ name: Clean up relay preview
 # come from the default branch. No PR code runs here, which is why it needs no
 # reviewer approval and why a PR cannot edit its own teardown to reach secrets.
 on:
-  pull_request_target:
-    types: [unlabeled, closed]
-  schedule:
-    - cron: "17 7 * * *"
-  workflow_dispatch:
+  # fork: upstream's triggers, commented out so this never runs on the fork (see FORK.md):
+  # pull_request_target:
+  #   types: [unlabeled, closed]
+  # schedule:
+  #   - cron: "17 7 * * *"
+  # workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
