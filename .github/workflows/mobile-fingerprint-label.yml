@@ -9,9 +9,11 @@ name: Mobile Fingerprint Label
 # untrusted data: it is validated, and at worst a PR mislabels itself.
 
 on:
-  workflow_run:
-    workflows: [Mobile Fingerprint Check]
-    types: [completed]
+  # fork: upstream's triggers, commented out so this never runs on the fork (see FORK.md):
+  # workflow_run:
+  #   workflows: [Mobile Fingerprint Check]
+  #   types: [completed]
+  workflow_call:
 
 permissions:
   contents: read

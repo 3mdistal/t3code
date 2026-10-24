@@ -16,54 +16,56 @@ name: Mobile EAS Production
 # workflow_dispatch remains as a manual override for both modes (e.g. to
 # retry an errored build or force an OTA).
 on:
-  workflow_dispatch:
-    inputs:
-      mode:
-        description: "build (+ auto-submit to TestFlight / Google Play) or update (OTA)"
-        required: true
-        type: choice
-        default: build
-        options:
-          - build
-          - update
-      profile:
-        description: "production: store release; testflight: iOS 3.0.0 beta"
-        required: true
-        type: choice
-        default: production
-        options:
-          - production
-          - testflight
-      platform:
-        description: "Target platform"
-        required: true
-        type: choice
-        default: all
-        options:
-          - ios
-          - android
-          - all
-      version:
-        description: "Optional build version override (blank uses profile default; store overrides are committed)"
-        required: false
-        type: string
-      message:
-        description: "OTA update message (mode=update only)"
-        required: false
-        type: string
-  push:
-    branches: [main]
-    paths:
-      - apps/mobile/**
-      - packages/client-runtime/**
-      - packages/contracts/**
-      - packages/shared/**
-      - assets/**
-      - scripts/**
-      - patches/**
-      - pnpm-lock.yaml
-      - pnpm-workspace.yaml
-      - .github/workflows/mobile-eas-production.yml
+  # fork: upstream's triggers, commented out so this never runs on the fork (see FORK.md):
+  # workflow_dispatch:
+  #   inputs:
+  #     mode:
+  #       description: "build (+ auto-submit to TestFlight / Google Play) or update (OTA)"
+  #       required: true
+  #       type: choice
+  #       default: build
+  #       options:
+  #         - build
+  #         - update
+  #     profile:
+  #       description: "production: store release; testflight: iOS 3.0.0 beta"
+  #       required: true
+  #       type: choice
+  #       default: production
+  #       options:
+  #         - production
+  #         - testflight
+  #     platform:
+  #       description: "Target platform"
+  #       required: true
+  #       type: choice
+  #       default: all
+  #       options:
+  #         - ios
+  #         - android
+  #         - all
+  #     version:
+  #       description: "Optional build version override (blank uses profile default; store overrides are committed)"
+  #       required: false
+  #       type: string
+  #     message:
+  #       description: "OTA update message (mode=update only)"
+  #       required: false
+  #       type: string
+  # push:
+  #   branches: [main]
+  #   paths:
+  #     - apps/mobile/**
+  #     - packages/client-runtime/**
+  #     - packages/contracts/**
+  #     - packages/shared/**
+  #     - assets/**
+  #     - scripts/**
+  #     - patches/**
+  #     - pnpm-lock.yaml
+  #     - pnpm-workspace.yaml
+  #     - .github/workflows/mobile-eas-production.yml
+  workflow_call:
 
 # Serialize runs so OTAs publish in merge order. GitHub keeps at most one
 # queued run per group, so a burst of merges collapses into one run of the
