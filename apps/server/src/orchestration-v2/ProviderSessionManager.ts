@@ -66,6 +66,7 @@ import {
 } from "@t3tools/provider-core/server/subagentProjection";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
+import { idleSessionsToClose } from "../resourceLimits/policy.ts"; // fork: limits, see FORK.md.
 
 const DEFAULT_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 const DEFAULT_MAX_IDLE_PIN_MS = 4 * 60 * 60 * 1000;
@@ -295,6 +296,14 @@ export interface ProviderSessionManagerV2Shape {
   readonly subscribePromptSuggestion: (
     threadId: ThreadId,
   ) => Stream.Stream<OrchestrationV2PromptSuggestion>;
+  /**
+   * fork: limits, see FORK.md. Closes idle sessions now, oldest first, to free memory. A session
+   * is idle with no turn running and no background work pending; one attached to a `keepThreadIds`
+   * thread (waiting on Alice) stays. Resolves to the ids it released.
+   */
+  readonly releaseIdleSessions?: (input: {
+    readonly keepThreadIds: ReadonlySet<ThreadId>;
+  }) => Effect.Effect<ReadonlyArray<ProviderSessionId>>;
 }
 
 export class ProviderSessionManagerV2 extends Context.Service<
@@ -320,6 +329,8 @@ interface LiveSessionEntry {
   readonly scope: Scope.Closeable;
   readonly idleGeneration: number;
   readonly busyTurns: ReadonlySet<string>;
+  // fork: limits, see FORK.md. When the session last went idle or saw activity.
+  readonly lastActivityAtMs: number;
   readonly idleFiber: Fiber.Fiber<void, never> | null;
   readonly pinnedSinceMs: number | null;
   readonly idleThreadUnloads: ReadonlyMap<ThreadId, IdleThreadUnload>;
@@ -1602,6 +1613,7 @@ export const layerWithOptions = (
           Effect.andThen(releaseIfStillIdle({ providerSessionId, generation })),
           Effect.forkIn(layerScope),
         );
+        const lastActivityAtMs = yield* Clock.currentTimeMillis; // fork: limits, see FORK.md.
         yield* Ref.update(sessions, (latest) => {
           const latestEntry = latest.get(key);
           if (latestEntry === undefined || latestEntry.busyTurns.size > 0) {
@@ -1612,6 +1624,7 @@ export const layerWithOptions = (
             ...latestEntry,
             idleGeneration: generation,
             idleFiber,
+            lastActivityAtMs, // fork: limits, see FORK.md.
             ...(options?.providerActivity === true ? { pinnedSinceMs: null } : {}),
           });
           return updated;
@@ -3119,6 +3132,7 @@ export const layerWithOptions = (
                 ReadonlyMap<number, Queue.Queue<ProviderSessionEventSignal, Cause.Done>>
               >(new Map());
               const exposedRuntime = decorateRuntime(runtime, eventSubscribers);
+              const openedAtMs = yield* Clock.currentTimeMillis; // fork: limits, see FORK.md.
               const entry: LiveSessionEntry = {
                 attachedThreadIds: new Set([input.threadId]),
                 loadedProviderThreadKeyByThread: new Map(),
@@ -3138,6 +3152,7 @@ export const layerWithOptions = (
                 scope: sessionScope,
                 idleGeneration: 0,
                 busyTurns: new Set(),
+                lastActivityAtMs: openedAtMs, // fork: limits, see FORK.md.
                 idleFiber: null,
                 pinnedSinceMs: null,
                 idleThreadUnloads: new Map(),
@@ -3183,6 +3198,38 @@ export const layerWithOptions = (
           Ref.get(sessions).pipe(
             Effect.map((current) => current.has(sessionKey(providerSessionId))),
           ),
+        // fork: limits, see FORK.md.
+        releaseIdleSessions: Effect.fn("ProviderSessionManager.releaseIdleSessions")(
+          function* (input) {
+            const released: Array<ProviderSessionId> = [];
+            const sessionsNow = (yield* Ref.get(sessions)).values();
+            for (const entry of idleSessionsToClose(sessionsNow, input.keepThreadIds)) {
+              const pendingWork =
+                entry.runtime.hasPendingBackgroundWork === undefined
+                  ? false
+                  : yield* entry.runtime.hasPendingBackgroundWork.pipe(
+                      Effect.catchCause(() => Effect.succeed(true)),
+                    );
+              if (pendingWork) continue;
+              // The generation guard keeps a session that started a turn since the list was read.
+              const exit = yield* Effect.exit(
+                releaseEntry({
+                  providerSessionId: entry.runtime.providerSessionId,
+                  reason: "idle_timeout",
+                  detail: "Closed early to free memory.",
+                  onlyIfIdleGeneration: entry.idleGeneration,
+                }),
+              );
+              if (
+                Exit.isSuccess(exit) &&
+                !(yield* Ref.get(sessions)).has(sessionKey(entry.runtime.providerSessionId))
+              ) {
+                released.push(entry.runtime.providerSessionId);
+              }
+            }
+            return released;
+          },
+        ),
         get: Effect.fn("ProviderSessionManager.get")(
           function* (providerSessionId) {
             const entry = (yield* Ref.get(sessions)).get(sessionKey(providerSessionId));
