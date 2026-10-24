@@ -257,7 +257,8 @@ export function waitingReason(input: {
   readonly at: number;
 }): string {
   const { state, reading, limits, cpuAverage, machine, at } = input;
-  const then = "Held work starts on its own, one thread at a time, oldest first.";
+  const then =
+    "Held work starts on its own, one thread at a time, oldest first. Choose Resume to start it now.";
   if (state === "ok" || reading === null) {
     return `Held at ${clock(at)} behind other work waiting for ${machine}'s limits. ${then}`;
   }
