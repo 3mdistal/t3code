@@ -15,7 +15,7 @@ import {
   CalendarClockIcon,
   GitBranchIcon,
   HardDriveIcon,
-  LayersIcon,
+  LayersIcon, // fork: see FORK.md.
   PanelsTopLeftIcon,
   KeyboardIcon,
   Link2Icon,
@@ -41,7 +41,7 @@ import {
 import { SidebarUtilityMenu } from "../sidebar/SidebarChrome";
 import { scrollToSettingsTarget } from "./settingsLayout";
 import {
-  hasProviderPoolsEnvironment,
+  hasProviderPoolsEnvironment, // fork: see FORK.md.
   searchSettings,
   isSettingsOverviewVisible,
   SETTINGS_SECTION_LABELS,
@@ -50,7 +50,7 @@ import {
 } from "./settingsSearch";
 import { useAvailableSettingsSearchItems } from "./useAvailableSettingsSearchItems";
 import { validateSettingsScopeSearch } from "./settingsScope";
-import { useEnvironments } from "~/state/environments";
+import { useEnvironments } from "~/state/environments"; // fork: see FORK.md.
 
 const SnapShotIcon = createLucideIcon("snap-shot", [
   [
@@ -85,7 +85,7 @@ const SETTINGS_SECTION_ICONS: Readonly<
   "/settings/keybindings": KeyboardIcon,
   "/settings/snap-shot": SnapShotIcon,
   "/settings/providers": BotIcon,
-  "/settings/account-pools": LayersIcon,
+  "/settings/account-pools": LayersIcon, // fork: see FORK.md.
   "/settings/integrations": BlocksIcon,
   "/settings/scheduled-tasks": CalendarClockIcon,
   "/settings/source-control": GitBranchIcon,
@@ -116,12 +116,12 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
   const currentHash = useLocation({ select: (location) => location.hash });
   const currentSearch = useLocation({ select: (location) => location.search });
   const scopeSearch = validateSettingsScopeSearch(currentSearch);
-  const { environments } = useEnvironments();
+  const { environments } = useEnvironments(); // fork: see FORK.md.
   const providerPoolsAvailable = hasProviderPoolsEnvironment(environments);
   const navItems = SETTINGS_NAV_ITEMS.filter(
     (item) =>
       (item.to !== "/settings/projects" || isSettingsOverviewVisible(scopeSearch)) &&
-      (item.to !== "/settings/account-pools" || providerPoolsAvailable),
+      (item.to !== "/settings/account-pools" || providerPoolsAvailable), // fork: see FORK.md.
   );
   const { isMobile, setOpenMobile, open, setOpen } = useSidebar();
   const searchInputRef = useRef<HTMLInputElement>(null);

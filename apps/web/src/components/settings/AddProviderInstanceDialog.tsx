@@ -40,7 +40,7 @@ import {
   ACP_REGISTRY_WIZARD_STEPS,
   LOCAL_ACP_WIZARD_STEPS,
   deriveAvailableInstanceId,
-  validateInstanceId,
+  validateInstanceId, // fork: see FORK.md.
   resolveAcpRegistryWizardNavigation,
   resolveWizardNavigation,
   updateProviderIdentityDraft,
@@ -76,6 +76,8 @@ const DEFAULT_DRIVER_KIND = ProviderDriverKind.make("codex");
 const ACP_REGISTRY_DRIVER_KIND = ProviderDriverKind.make("acpRegistry");
 const DEFAULT_DRIVER_OPTION = providerClients.definitions[0]!;
 const EMPTY_CONFIG_DRAFT: Record<string, unknown> = {};
+// fork: INSTANCE_ID_PATTERN and validateInstanceId moved to the .logic file, see FORK.md.
+
 interface AddProviderInstanceDialogProps {
   readonly open: boolean;
   readonly environmentId: EnvironmentId;

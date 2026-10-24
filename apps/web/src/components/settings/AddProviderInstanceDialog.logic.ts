@@ -1,4 +1,4 @@
-import { isReservedProviderInstanceId } from "@t3tools/contracts";
+import { isReservedProviderInstanceId } from "@t3tools/contracts"; // fork: see FORK.md.
 
 export type WizardNavigation =
   | { readonly kind: "navigate"; readonly step: number }
@@ -41,7 +41,7 @@ export function updateProviderIdentityDraft(
   };
 }
 
-const INSTANCE_ID_PATTERN = /^[a-zA-Z][a-zA-Z0-9_-]*$/;
+const INSTANCE_ID_PATTERN = /^[a-zA-Z][a-zA-Z0-9_-]*$/; // fork: moved from the dialog, see FORK.md.
 
 /**
  * Validate an instance id against the same slug rules the server applies in

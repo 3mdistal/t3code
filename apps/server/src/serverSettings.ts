@@ -8,7 +8,7 @@ import {
   type ProviderInstanceMutation,
   defaultInstanceIdForDriver,
   isProviderDriverKind,
-  isReservedProviderInstanceId,
+  isReservedProviderInstanceId, // fork: see FORK.md.
   ProviderDriverKind,
   ProviderInstanceId,
   resolveProviderInstanceEnabled,
@@ -51,7 +51,11 @@ import {
   isModelSelectionProviderEnabled,
 } from "@t3tools/shared/serverSettings";
 import * as ServerSecretStore from "./auth/ServerSecretStore.ts";
-import { withStorablePoolSelections } from "./orchestration-v2/ProviderPoolRouting.ts"; // fork: see FORK.md.
+import {
+  validatedProviderPools,
+  withoutPoolMember,
+  withStorablePoolSelections,
+} from "./orchestration-v2/ProviderPoolRouting.ts"; // fork: see FORK.md.
 import {
   readSecretFieldValues,
   sourceControlHostSecretName,
@@ -149,21 +153,11 @@ export function applyProviderInstanceMutation(
   const providerInstances = { ...settings.providerInstances };
   if (mutation.operation === "upsert" || mutation.operation === "create") {
     providerInstances[mutation.instanceId] = mutation.instance;
-    return { ...settings, providerInstances };
+  } else {
+    delete providerInstances[mutation.instanceId];
+    return withoutPoolMember({ ...settings, providerInstances }, mutation.instanceId); // fork: see FORK.md.
   }
-  delete providerInstances[mutation.instanceId];
-  const providerPools = Object.fromEntries(
-    Object.entries(settings.providerPools).map(([driver, pool]) => [
-      driver,
-      {
-        ...pool,
-        memberInstanceIds: pool.memberInstanceIds.filter(
-          (memberId) => memberId !== mutation.instanceId,
-        ),
-      },
-    ]),
-  );
-  return { ...settings, providerInstances, providerPools };
+  return { ...settings, providerInstances };
 }
 
 function ensureProviderInstanceMutationAllowed(
@@ -172,6 +166,7 @@ function ensureProviderInstanceMutationAllowed(
   settingsPath: string,
 ): Effect.Effect<void, ServerSettingsError> {
   if (
+    // fork: pool ids are reserved, see FORK.md.
     mutation.operation !== "remove" &&
     (isReservedProviderInstanceId(mutation.instanceId) ||
       (mutation.operation === "create" &&
@@ -184,39 +179,6 @@ function ensureProviderInstanceMutationAllowed(
         providerInstanceId: mutation.instanceId,
       }),
     );
-  }
-  return Effect.void;
-}
-
-/**
- * A built-in driver's default instance exists without a settings entry, and
- * its id is the driver kind, so an unconfigured member resolves that way.
- */
-const configuredInstanceDriver = (
-  settings: ServerSettings,
-  instanceId: ProviderInstanceId,
-): ProviderDriverKind | undefined =>
-  settings.providerInstances[instanceId]?.driver ??
-  (isProviderDriverKind(instanceId) ? instanceId : undefined);
-
-function ensureProviderPoolsValid(
-  settings: ServerSettings,
-  settingsPath: string,
-): Effect.Effect<void, ServerSettingsError> {
-  for (const [driver, pool] of Object.entries(settings.providerPools)) {
-    const seen = new Set<ProviderInstanceId>();
-    for (const memberId of pool.memberInstanceIds) {
-      if (seen.has(memberId) || configuredInstanceDriver(settings, memberId) !== driver) {
-        return Effect.fail(
-          new ServerSettingsError({
-            settingsPath,
-            operation: "validate-provider-pool",
-            providerInstanceId: memberId,
-          }),
-        );
-      }
-      seen.add(memberId);
-    }
   }
   return Effect.void;
 }
@@ -1209,27 +1171,17 @@ const make = Effect.gen(function* () {
       Effect.map(resolveTextGenerationProvider),
     ),
     updateSettings: (patch) =>
-      updateAndPersistSettings((current) =>
-        Effect.gen(function* () {
-          const next = applyServerSettingsPatch(current, patch);
-          if (patch.providerPools !== undefined) {
-            yield* ensureProviderPoolsValid(next, settingsPath);
-          }
-          return next;
-        }),
+      updateAndPersistSettings(
+        (current) =>
+          validatedProviderPools(applyServerSettingsPatch(current, patch), patch, settingsPath), // fork: see FORK.md.
       ),
     updateProviderInstance: (mutation, patch = {}) =>
       updateAndPersistSettings((current) =>
         Effect.gen(function* () {
           yield* ensureProviderInstanceMutationAllowed(current, mutation, settingsPath);
-          const next = applyProviderInstanceMutation(
-            applyServerSettingsPatch(current, patch),
-            mutation,
-          );
-          if (patch.providerPools !== undefined) {
-            yield* ensureProviderPoolsValid(next, settingsPath);
-          }
-          return next;
+          const patched = applyServerSettingsPatch(current, patch);
+          const next = applyProviderInstanceMutation(patched, mutation); // fork: see FORK.md.
+          return yield* validatedProviderPools(next, patch, settingsPath); // fork: see FORK.md.
         }),
       ),
     withSettingsSnapshot,

@@ -4,9 +4,14 @@ import {
   ProviderInstanceId,
   providerPoolInstanceId,
 } from "@t3tools/contracts";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 
+import * as ServerSecretStore from "./auth/ServerSecretStore.ts";
+import * as ServerConfig from "./config.ts";
+import * as SqlitePersistence from "./persistence/Sqlite.ts";
 import * as ServerSettingsModule from "./serverSettings.ts";
 
 const claude = ProviderDriverKind.make("claudeAgent");
@@ -14,6 +19,19 @@ const work = ProviderInstanceId.make("claudeAgent_work");
 const home = ProviderInstanceId.make("claudeAgent_home");
 const pool = providerPoolInstanceId(claude);
 const projectId = ProjectId.make("project:pooled");
+
+const layerServerSettings = () =>
+  ServerSettingsModule.layer.pipe(
+    Layer.provide(ServerSecretStore.layer),
+    Layer.provideMerge(Layer.fresh(SqlitePersistence.layerMemory)),
+    Layer.provideMerge(
+      Layer.fresh(
+        ServerConfig.layerTest(process.cwd(), {
+          prefix: "t3code-server-settings-test-",
+        }),
+      ),
+    ),
+  );
 
 // Stock T3 has no pools: a saved pool id would make it fall back to another provider, so saving
 // stores the pool's first enabled account, which the fork still routes through the pool.
@@ -58,3 +76,88 @@ it.effect("saves every model choice that names a pool on the pool's first enable
     );
   }).pipe(Effect.provide(ServerSettingsModule.layerTest())),
 );
+
+it.layer(NodeServices.layer)("server settings", (it) => {
+  it.effect("refuses a pool whose members are unknown, repeated, or on another driver", () =>
+    Effect.gen(function* () {
+      const service = yield* ServerSettingsModule.ServerSettingsService;
+      const claude = ProviderDriverKind.make("claudeAgent");
+      yield* service.updateProviderInstance({
+        operation: "create",
+        instanceId: ProviderInstanceId.make("claudeAgent_work"),
+        instance: { driver: claude, config: {} },
+      });
+      for (const members of [
+        ["claudeAgent", "claudeAgent_missing"],
+        ["claudeAgent", "claudeAgent"],
+        ["claudeAgent", "codex"],
+      ]) {
+        const result = yield* service
+          .updateSettings({
+            providerPools: {
+              [claude]: {
+                enabled: true,
+                memberInstanceIds: members.map((member) => ProviderInstanceId.make(member)),
+              },
+            },
+          })
+          .pipe(Effect.result);
+        assert.equal(result._tag, "Failure", members.join(","));
+        if (result._tag === "Failure") {
+          assert.equal(result.failure.operation, "validate-provider-pool");
+          assert.equal(result.failure.providerInstanceId, members[1]);
+        }
+      }
+      assert.deepEqual((yield* service.getSettings).providerPools, {});
+    }).pipe(Effect.provide(layerServerSettings())),
+  );
+
+  it.effect("pools a built-in default with a configured account and prunes a removed one", () =>
+    Effect.gen(function* () {
+      const service = yield* ServerSettingsModule.ServerSettingsService;
+      const claude = ProviderDriverKind.make("claudeAgent");
+      const work = ProviderInstanceId.make("claudeAgent_work");
+      yield* service.updateProviderInstance({
+        operation: "create",
+        instanceId: work,
+        instance: { driver: claude, config: {} },
+      });
+      const pooled = yield* service.updateSettings({
+        providerPools: {
+          [claude]: {
+            enabled: true,
+            memberInstanceIds: [ProviderInstanceId.make("claudeAgent"), work],
+          },
+        },
+      });
+      assert.deepEqual(pooled.providerPools[claude]?.memberInstanceIds, [
+        ProviderInstanceId.make("claudeAgent"),
+        work,
+      ]);
+
+      const removed = yield* service.updateProviderInstance({
+        operation: "remove",
+        instanceId: work,
+      });
+      assert.deepEqual(removed.providerPools[claude]?.memberInstanceIds, [
+        ProviderInstanceId.make("claudeAgent"),
+      ]);
+    }).pipe(Effect.provide(layerServerSettings())),
+  );
+
+  it.effect("reserves the pool id prefix for pools", () =>
+    Effect.gen(function* () {
+      const service = yield* ServerSettingsModule.ServerSettingsService;
+      for (const operation of ["create", "upsert"] as const) {
+        const result = yield* service
+          .updateProviderInstance({
+            operation,
+            instanceId: ProviderInstanceId.make("pool_claudeAgent"),
+            instance: { driver: ProviderDriverKind.make("claudeAgent"), config: {} },
+          })
+          .pipe(Effect.result);
+        assert.equal(result._tag, "Failure", operation);
+      }
+    }).pipe(Effect.provide(layerServerSettings())),
+  );
+});

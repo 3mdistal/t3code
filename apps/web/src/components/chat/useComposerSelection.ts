@@ -1,4 +1,4 @@
-import { composerInstanceIdFor } from "@t3tools/client-runtime/provider-pools";
+import { composerInstanceIdFor } from "@t3tools/client-runtime/provider-pools"; // fork: see FORK.md.
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
 import type { UnifiedSettings } from "@t3tools/contracts";
 import type { Dispatch } from "react";
@@ -127,7 +127,7 @@ export function useComposerSelection(input: ComposerSelectionInput) {
   // Keyed on the fields it reads: the thread and runtime objects change with
   // every streamed event, and a new function re-renders the whole model picker.
   const hasStartedSession = activeRuntime !== null;
-  const runtimeProviderInstanceId =
+  const runtimeProviderInstanceId = // fork: a pooled account counts as its pool, see FORK.md.
     activeRuntime === null
       ? null
       : composerInstanceIdFor(providerStatuses, activeRuntime.providerInstanceId);
@@ -199,7 +199,7 @@ export function useComposerSelection(input: ComposerSelectionInput) {
       hasStartedSession: activeRuntime !== null,
       supportsProviderSwitchingViaHandoff,
       currentModelSelection: activeThread.modelSelection,
-      currentProviderInstanceId: runtimeProviderInstanceId,
+      currentProviderInstanceId: runtimeProviderInstanceId, // fork: see FORK.md.
       nextModelSelection,
     });
     if (modelChangeBlockReason) {

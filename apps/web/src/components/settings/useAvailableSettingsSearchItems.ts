@@ -14,7 +14,7 @@ import type { SettingsScopeSearch } from "./settingsScope";
 import {
   filterAvailableSettingsSearchItems,
   getThreadAutoSettlementSearchAvailability,
-  hasProviderPoolsEnvironment,
+  hasProviderPoolsEnvironment, // fork: see FORK.md.
 } from "./settingsSearch";
 
 export function useAvailableSettingsSearchItems(scopeSearch: SettingsScopeSearch = {}) {
@@ -44,7 +44,7 @@ export function useAvailableSettingsSearchItems(scopeSearch: SettingsScopeSearch
     ) === true;
   const hasThreadAutoSettlement =
     getThreadAutoSettlementSearchAvailability(environments).eligibleEnvironmentIds.length > 0;
-  const hasProviderPools = hasProviderPoolsEnvironment(environments);
+  const hasProviderPools = hasProviderPoolsEnvironment(environments); // fork: see FORK.md.
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const canMaintain = useEnvironmentScope(primaryEnvironmentId, AuthEnvironmentMaintainScope);
   const cloudLinkState = usePrimaryCloudLinkState().data;
@@ -70,7 +70,7 @@ export function useAvailableSettingsSearchItems(scopeSearch: SettingsScopeSearch
     canManageLocalBackend,
     isWslSettingsRowVisible: wslSettingsRowVisible,
     hasThreadAutoSettlement,
-    hasProviderPools,
+    hasProviderPools, // fork: see FORK.md.
     managedTunnelActive,
   });
 }

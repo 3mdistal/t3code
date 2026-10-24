@@ -1672,7 +1672,7 @@ export const layerWsRpc = (
         readonly usageLimitsCommand: boolean;
       }) {
         const keybindingsConfig = yield* keybindings.loadConfigState;
-        const currentProviders = yield* providerRegistry.getPublishedProviders;
+        const currentProviders = yield* providerRegistry.getPublishedProviders; // fork: pools, see FORK.md.
         const providers = options.usageLimitsCommand
           ? withUsageLimitsCommands(currentProviders, yield* usageLimitSources.current)
           : currentProviders;
@@ -2247,7 +2247,7 @@ export const layerWsRpc = (
                 providers = yield* providerRegistry.refreshInstance(instance.instanceId);
               }
             }
-            return { providers: yield* providerRegistry.getPublishedProviders };
+            return { providers: yield* providerRegistry.getPublishedProviders }; // fork: see FORK.md.
           }),
         [WS_METHODS.mcpAppsCallTool]: (input) => mcpAppRequests.callTool(input),
         [WS_METHODS.mcpAppsToolInfo]: (input) => mcpAppRequests.toolInfo(input),
@@ -2978,7 +2978,7 @@ export const layerWsRpc = (
                 })),
               );
               const providerStatuses = Stream.zipLatestWith(
-                providerRegistry.streamPublishedChanges,
+                providerRegistry.streamPublishedChanges, // fork: seeded with the current list, see FORK.md.
                 usageLimitSources.streamChanges.pipe(
                   Stream.changesWith(
                     usageLimitsCommand ? sameUsageLimitCommandCoverage : () => true,
