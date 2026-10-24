@@ -44,7 +44,7 @@ import {
   ACP_REGISTRY_WIZARD_STEPS,
   LOCAL_ACP_WIZARD_STEPS,
   deriveAvailableInstanceId,
-  validateInstanceId,
+  validateInstanceId, // fork: see FORK.md.
   resolveAcpRegistryWizardNavigation,
   resolveWizardNavigation,
   updateProviderIdentityDraft,
@@ -84,6 +84,8 @@ const DRIVER_OPTIONS = providerClients.definitions.filter(
 const FEATURED_DRIVER_OPTIONS = DRIVER_OPTIONS.filter((option) => option.featured !== false);
 const MORE_DRIVER_OPTIONS = DRIVER_OPTIONS.filter((option) => option.featured === false);
 const EMPTY_CONFIG_DRAFT: Record<string, unknown> = {};
+// fork: INSTANCE_ID_PATTERN and validateInstanceId moved to the .logic file, see FORK.md.
+
 function ProviderOptionGrid({
   options,
   value,

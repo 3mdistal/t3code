@@ -46,8 +46,8 @@ import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/sql/SqlClient";
 
-import { ProviderPoolCatalog } from "../orchestration-v2/ProviderPoolCatalog.ts";
-import { storableModelSelection } from "../orchestration-v2/ProviderPoolRouting.ts";
+import { ProviderPoolCatalog } from "../orchestration-v2/ProviderPoolCatalog.ts"; // fork: see FORK.md.
+import { storableModelSelection } from "../orchestration-v2/ProviderPoolRouting.ts"; // fork: see FORK.md.
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
 import * as Metrics from "../observability/Metrics.ts";
@@ -455,7 +455,7 @@ export const layer = Layer.effect(
       webhookPolicyBlock !== undefined && task.schedule.type === "webhook"
         ? { ...task, blockedByPolicy: webhookPolicyBlock }
         : task;
-    const poolCatalog = yield* ProviderPoolCatalog;
+    const poolCatalog = yield* ProviderPoolCatalog; // fork: see FORK.md.
     const webhookPermits = yield* Ref.make<ReadonlyMap<ScheduledTaskId, Semaphore.Semaphore>>(
       new Map(),
     );
@@ -1328,6 +1328,7 @@ export const layer = Layer.effect(
         projectId: input.projectId,
         threadId: input.threadId ?? null,
         workspaceStrategy,
+        // fork: a pooled task is saved on the pool's first account, see FORK.md.
         modelSelection: storableModelSelection(
           yield* poolCatalog.getPublishedProviders,
           input.modelSelection,

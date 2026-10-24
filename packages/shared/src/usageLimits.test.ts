@@ -856,7 +856,7 @@ describe("pools", () => {
           key: "go",
           driver: claude,
           displayName: "Go",
-          instances: [],
+          instances: [], // fork: see FORK.md.
           email: undefined,
           plan: undefined,
           accentColor: undefined,
@@ -902,7 +902,7 @@ describe("pooled account columns", () => {
     key,
     driver: ProviderDriverKind.make("claudeAgent"),
     displayName: key,
-    instances: [],
+    instances: [], // fork: see FORK.md.
     email: undefined,
     plan: undefined,
     accentColor: undefined,
