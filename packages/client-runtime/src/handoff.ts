@@ -33,8 +33,12 @@ export function resolvePendingHandoff(
   if (from === undefined || selection == null) return null;
   const source = providers.find((provider) => provider.instanceId === from.instanceId);
   const target = providers.find((provider) => provider.instanceId === selection.instanceId);
+  // A pool keeps a thread on the account that last ran it, so it counts as that account.
+  const staysOnSource =
+    from.instanceId === selection.instanceId ||
+    (target?.pool?.role === "pool" && target.pool.memberInstanceIds.includes(from.instanceId));
   const needsHandoff =
-    from.instanceId !== selection.instanceId &&
+    !staysOnSource &&
     (source?.continuation?.groupKey === undefined ||
       source.driver !== target?.driver ||
       source.continuation.groupKey !== target.continuation?.groupKey);
