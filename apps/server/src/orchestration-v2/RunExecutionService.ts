@@ -51,6 +51,7 @@ import {
   makeProviderFailureTurnItem,
 } from "@t3tools/provider-core/server/failure";
 import * as RunFinalizationService from "./RunFinalizationService.ts";
+import { ProviderUsageLimitHook } from "./ProviderPoolFailover.ts";
 import * as TurnItemPositionStore from "./TurnItemPositionStore.ts";
 
 export interface ProviderEventRoutingState {
@@ -611,6 +612,7 @@ export const layer: Layer.Layer<
     const mcpAppModelContext = yield* McpAppModelContext.McpAppModelContext;
     const turnItemPositions = yield* TurnItemPositionStore.TurnItemPositionStoreV2;
     const finalizationObserver = yield* RunFinalizationService.RunFinalizationObserver;
+    const usageLimitHook = yield* ProviderUsageLimitHook;
 
     const writeFinalRunEvents = Effect.fn("RunExecutionService.writeFinalRunEvents")(
       function* (input: {
@@ -1031,11 +1033,38 @@ export const layer: Layer.Layer<
         >(new Set(inheritedBackgroundTurnItemsById.keys()));
         const openRunOwnedSubagents = yield* Ref.make(emptyOpenRunOwnedSubagentProjection());
         const finalizeRootRun = Effect.fn("RunExecutionService.finalizeRootRun")(function* (
-          terminal: ProviderTerminalEvent,
+          reported: ProviderTerminalEvent,
         ) {
           if (yield* Ref.get(rootRunFinalized)) {
             return;
           }
+          const resolution =
+            reported.status === "failed" && reported.failure.class === "usage_limit"
+              ? yield* usageLimitHook.onUsageLimit({
+                  threadId: input.run.threadId,
+                  runId: input.run.id,
+                  attemptId: input.attempt.id,
+                  providerInstanceId: input.run.providerInstanceId,
+                  failure: reported.failure,
+                })
+              : null;
+          if (resolution?.type === "failed_over") {
+            // The orchestrator closed this attempt and opened the next on
+            // another account; as after a steering restart, this attempt's
+            // ingestion stops writing.
+            yield* Ref.set(rootRunFinalized, true);
+            return;
+          }
+          // A pooled run fails with the pool's earliest reset so the banner
+          // and auto-resume wait for the first account back. The error item
+          // is keyed by provider turn, so re-emitting it upserts.
+          const terminal =
+            reported.status === "failed" &&
+            resolution !== null &&
+            resolution.resetAt !== null &&
+            resolution.resetAt !== reported.failure.resetAt
+              ? { ...reported, failure: { ...reported.failure, resetAt: resolution.resetAt } }
+              : reported;
           const providerThread = yield* Ref.get(latestProviderThread);
           const openSubagents = yield* Ref.get(openRunOwnedSubagents);
           yield* writeFinalRunEvents({
@@ -1046,10 +1075,13 @@ export const layer: Layer.Layer<
             attempt: input.attempt,
             ...(input.shouldFinalizeRun === undefined
               ? {}
+              : { shouldFinalizeRun: input.shouldFinalizeRun }),
+            // Stop, or a pool failover that won, may commit between the
+            // ownership read and this terminal write. Gate the events and
+            // checkpoint together.
+            ...(input.shouldFinalizeRun === undefined && resolution === null
+              ? {}
               : {
-                  shouldFinalizeRun: input.shouldFinalizeRun,
-                  // Stop may commit between the ownership read and this
-                  // terminal write. Gate the events and checkpoint together.
                   writeIfRunCurrent: {
                     activeAttemptId: input.attempt.id,
                     expectedStatus: "running" as const,
@@ -1062,7 +1094,7 @@ export const layer: Layer.Layer<
                 }),
             openRunOwnedSubagents: openSubagents,
             terminal,
-            failureItemPersisted: terminal.status === "failed",
+            failureItemPersisted: terminal === reported && terminal.status === "failed",
             refreshAfterTurn,
           }).pipe(
             Effect.mapError((cause) => new RunExecutionIngestError({ runId: input.run.id, cause })),

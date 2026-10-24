@@ -2,6 +2,8 @@ import {
   defaultInstanceIdForDriver,
   isProviderWorkspaceSnapshotCurrent,
   ProviderDriverKind,
+  providerPoolDriver,
+  type IsoDateTime,
   type ProviderInstanceId,
   type ServerProvider,
   type ServerProviderUpdateState,
@@ -25,7 +27,9 @@ import * as ProviderLatestVersions from "@t3tools/provider-core/server/ProviderL
 import * as ModelManifest from "./ModelManifest.ts";
 import { applyProviderCompatibility } from "./providerCompatibility.ts";
 import * as ServerConfig from "../config.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import * as ProviderInstanceRegistry from "./ProviderInstanceRegistry.ts";
+import { withProviderPools } from "./providerPoolSnapshot.ts";
 import {
   hydrateCachedProvider,
   isCachedProviderCorrelated,
@@ -49,7 +53,22 @@ export type ProviderMaintenanceActionKind = "update";
 export class ProviderRegistry extends Context.Service<
   ProviderRegistry,
   {
+    /** Real instances only. Refresh, maintenance, and usage reports never meet a pool. */
     readonly getProviders: Effect.Effect<ReadonlyArray<ServerProvider>>;
+
+    /**
+     * `getProviders` plus one virtual entry per active account pool, with the
+     * members stamped. The only list transports and MCP may read.
+     */
+    readonly getPublishedProviders: Effect.Effect<ReadonlyArray<ServerProvider>>;
+
+    /** Starts with the current published list, then every provider or pool change. */
+    readonly streamPublishedChanges: Stream.Stream<ReadonlyArray<ServerProvider>>;
+
+    readonly markLimited: (input: {
+      readonly instanceId: ProviderInstanceId;
+      readonly until: IsoDateTime;
+    }) => Effect.Effect<void>;
 
     readonly refresh: (
       provider?: ProviderDriverKind,
@@ -342,6 +361,7 @@ export const layer = Layer.effect(
   Effect.gen(function* () {
     const instanceRegistry = yield* ProviderInstanceRegistry.ProviderInstanceRegistry;
     const manifestService = yield* ModelManifest.ModelManifest;
+    const serverSettings = yield* ServerSettings.ServerSettingsService;
     const latestVersions = yield* ProviderLatestVersions.ProviderLatestVersions;
     const serviceScope = yield* Effect.scope;
     const config = yield* ServerConfig.ServerConfig;
@@ -366,6 +386,7 @@ export const layer = Layer.effect(
       fallbackByInstance.set(source.instanceId, provider);
     }
 
+    const bootNowMs = DateTime.toEpochMillis(yield* DateTime.now);
     const cachedProviders = yield* Effect.forEach(
       bootSources,
       (source) =>
@@ -397,7 +418,7 @@ export const layer = Layer.effect(
                   cachedDriver: cachedProvider.driver ?? null,
                 }).pipe(Effect.as(undefined as ServerProvider | undefined));
               }
-              return Effect.succeed(hydrateCachedProvider(correlation));
+              return Effect.succeed(hydrateCachedProvider({ ...correlation, nowMs: bootNowMs }));
             }),
           );
         }),
@@ -409,6 +430,16 @@ export const layer = Layer.effect(
         ),
       ),
     );
+    // The instance owns its cooldown; the next probe would otherwise publish
+    // without the one the cache carried across the restart.
+    for (const cached of cachedProviders) {
+      const instance = bootInstances.find(
+        (candidate) => candidate.instanceId === cached.instanceId,
+      );
+      if (cached.limitedUntil !== undefined && instance !== undefined) {
+        yield* instance.snapshot.markLimited({ until: cached.limitedUntil });
+      }
+    }
     const initialManifest = yield* manifestService.current;
     const classifyCompatibility = (
       provider: ServerProvider,
@@ -661,9 +692,25 @@ export const layer = Layer.effect(
       return yield* refreshOneSource(providerSource);
     });
 
-    const refreshInstance = Effect.fn("refreshInstance")(function* (
+    const providerPools = serverSettings.getSettings.pipe(
+      Effect.map((settings) => settings.providerPools),
+      Effect.orDie,
+    );
+
+    const refreshInstance: (
+      instanceId: ProviderInstanceId,
+    ) => Effect.Effect<ReadonlyArray<ServerProvider>> = Effect.fn("refreshInstance")(function* (
       instanceId: ProviderInstanceId,
     ) {
+      const poolDriver = providerPoolDriver(instanceId);
+      if (poolDriver !== null) {
+        const members = (yield* providerPools)[poolDriver]?.memberInstanceIds ?? [];
+        yield* Effect.forEach(members, refreshInstance, {
+          concurrency: "unbounded",
+          discard: true,
+        });
+        return yield* Ref.get(providersRef);
+      }
       const sources = yield* getLiveSources;
       const providerSource = sources.find((candidate) => candidate.instanceId === instanceId);
       if (!providerSource) {
@@ -1008,8 +1055,33 @@ export const layer = Layer.effect(
       );
     });
 
+    const getPublishedProviders = Effect.all([Ref.get(providersRef), providerPools]).pipe(
+      Effect.map(([providers, providerPools]) => withProviderPools({ providers, providerPools })),
+    );
+    const streamPublishedChanges = Stream.zipLatestWith(
+      Stream.concat(Stream.fromEffect(Ref.get(providersRef)), Stream.fromPubSub(changesPubSub)),
+      Stream.concat(
+        Stream.fromEffect(providerPools),
+        serverSettings.streamChanges.pipe(Stream.map((settings) => settings.providerPools)),
+      ),
+      (providers, providerPools) => withProviderPools({ providers, providerPools }),
+    ).pipe(Stream.changesWith((previous, next) => Equal.equals(previous, next)));
+
+    const markLimited = Effect.fn("markLimited")(function* (input: {
+      readonly instanceId: ProviderInstanceId;
+      readonly until: IsoDateTime;
+    }) {
+      const instance = yield* instanceRegistry.getInstance(input.instanceId);
+      if (instance !== undefined) {
+        yield* instance.snapshot.markLimited({ until: input.until });
+      }
+    });
+
     return {
       getProviders: Ref.get(providersRef),
+      getPublishedProviders,
+      streamPublishedChanges,
+      markLimited,
       refresh: (provider?: ProviderDriverKind) =>
         refresh(provider).pipe(Effect.catchCause(recoverRefreshFailure)),
       refreshInstance: (instanceId: ProviderInstanceId) =>
