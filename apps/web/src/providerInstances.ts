@@ -11,6 +11,7 @@ import {
   type ServerSettings,
   type ServerProviderState,
 } from "@t3tools/contracts";
+import { foldProviderPoolsForComposer } from "@t3tools/client-runtime/provider-pools";
 import {
   normalizeProviderAccentColor,
   resolveProviderInstanceDisplayName,
@@ -18,6 +19,11 @@ import {
 } from "@t3tools/client-runtime/state/provider-instance-display";
 
 export { normalizeProviderAccentColor, shouldShowInstanceBadge };
+
+type ProviderInstanceSettings = Pick<
+  ServerSettings,
+  "providerInstances" | "projectSettingsOverrides" | "providerPools"
+>;
 
 /**
  * Local-only placeholder used while a draft has no provider it can safely
@@ -111,11 +117,7 @@ export function deriveProviderInstanceEntries(
  */
 export function deriveProviderEntriesByEnvironment(
   providersByEnvironment: Iterable<
-    readonly [
-      string,
-      ReadonlyArray<ServerProvider>,
-      Pick<ServerSettings, "providerInstances" | "projectSettingsOverrides">?,
-    ]
+    readonly [string, ReadonlyArray<ServerProvider>, ProviderInstanceSettings?]
   >,
 ): ReadonlyMap<string, ReadonlyMap<string, ProviderInstanceEntry>> {
   const byEnvironment = new Map<string, ReadonlyMap<string, ProviderInstanceEntry>>();
@@ -142,7 +144,7 @@ export function deriveProviderEntriesByEnvironment(
  */
 export function applyProviderInstanceSettings(
   entries: ReadonlyArray<ProviderInstanceEntry>,
-  settings: Pick<ServerSettings, "providerInstances" | "projectSettingsOverrides">,
+  settings: ProviderInstanceSettings,
   projectId: ProjectId | null,
 ): ReadonlyArray<ProviderInstanceEntry> {
   return entries.map((entry) => {
@@ -196,11 +198,30 @@ export function sortProviderInstanceEntries(
   }
   const sorted: ProviderInstanceEntry[] = [];
   for (const bucket of byKind.values()) {
+    const pools = bucket.filter((entry) => entry.snapshot.pool?.role === "pool");
     const defaults = bucket.filter((entry) => entry.isDefault);
-    const customs = bucket.filter((entry) => !entry.isDefault);
-    sorted.push(...defaults, ...customs);
+    const customs = bucket.filter((entry) => !entry.isDefault && !pools.includes(entry));
+    sorted.push(...pools, ...defaults, ...customs);
   }
   return sorted;
+}
+
+/**
+ * The catalog composer-style pickers offer: an active pool stands in for its member accounts.
+ * Settings pickers keep `deriveProviderInstanceEntries` so every account stays selectable there.
+ */
+export function deriveComposerProviderInstanceEntries(
+  providers: ReadonlyArray<ServerProvider>,
+  settings: ProviderInstanceSettings,
+  projectId: ProjectId | null,
+): ReadonlyArray<ProviderInstanceEntry> {
+  return sortProviderInstanceEntries(
+    applyProviderInstanceSettings(
+      deriveProviderInstanceEntries(foldProviderPoolsForComposer(providers)),
+      settings,
+      projectId,
+    ),
+  );
 }
 
 function getProviderInstanceEntry(
@@ -260,4 +281,29 @@ export function resolveDefaultProviderModelSelection(
   if (selection?.instanceId === instanceId) return selection;
   const model = getDefaultProviderInstanceModel(providers, instanceId);
   return model ? { instanceId, model } : null;
+}
+
+/**
+ * Names the account a pooled thread last ran on. Account names usually repeat the provider's
+ * ("Claude - iCloud"), so the pool's name is dropped from the front to leave the part that tells
+ * accounts apart.
+ */
+export function resolvePoolMemberLabel(
+  providers: ReadonlyArray<ServerProvider>,
+  selectedInstanceId: ProviderInstanceId,
+  runtimeInstanceId: ProviderInstanceId | null | undefined,
+): { readonly poolName: string; readonly memberName: string } | null {
+  if (runtimeInstanceId == null) return null;
+  const pool = providers.find((provider) => provider.instanceId === selectedInstanceId);
+  if (pool?.pool?.role !== "pool" || !pool.pool.memberInstanceIds.includes(runtimeInstanceId)) {
+    return null;
+  }
+  const member = providers.find((provider) => provider.instanceId === runtimeInstanceId);
+  if (member === undefined) return null;
+  const poolName = resolveProviderInstanceDisplayName(pool);
+  const memberFullName = resolveProviderInstanceDisplayName(member);
+  const shortName = memberFullName.startsWith(poolName)
+    ? memberFullName.slice(poolName.length).replace(/^[\s\-–—·:_]+/u, "")
+    : memberFullName;
+  return { poolName, memberName: shortName.length > 0 ? shortName : memberFullName };
 }

@@ -1297,10 +1297,21 @@ const make = Effect.gen(function* () {
     return { parent, target, shell } as const;
   });
 
-  const loadProviders = providerRegistry.getProviders;
+  const loadProviders = providerRegistry.getPublishedProviders;
 
+  // A pool has no adapter of its own; routing picks a member's at dispatch.
   const loadOrchestrationCapableInstanceIds = () =>
-    providerAdapters.list().pipe(Effect.map((instanceIds) => new Set(instanceIds)));
+    Effect.all([providerAdapters.list(), loadProviders]).pipe(
+      Effect.map(
+        ([instanceIds, providers]) =>
+          new Set([
+            ...instanceIds,
+            ...providers
+              .filter((provider) => provider.pool?.role === "pool")
+              .map((provider) => provider.instanceId),
+          ]),
+      ),
+    );
 
   /**
    * Provider snapshots only re-probe while a client is in the foreground, so an
@@ -1372,12 +1383,16 @@ const make = Effect.gen(function* () {
       const healthyCandidates = candidates.filter(
         (candidate) => providerConstraints(candidate, true).length === 0,
       );
+      const poolCandidate = healthyCandidates.find((candidate) => candidate.pool?.role === "pool");
       const inheritedCandidate = healthyCandidates.find(
         (candidate) => candidate.instanceId === input.parent.thread.modelSelection.instanceId,
       );
+      const preferred = [poolCandidate, inheritedCandidate].filter(
+        (candidate) => candidate !== undefined,
+      );
       const orderedCandidates = [
-        ...(inheritedCandidate === undefined ? [] : [inheritedCandidate]),
-        ...healthyCandidates.filter((candidate) => candidate !== inheritedCandidate),
+        ...preferred,
+        ...healthyCandidates.filter((candidate) => !preferred.includes(candidate)),
       ];
       for (const candidate of orderedCandidates) {
         const enabledForProject =
@@ -2089,47 +2104,49 @@ const make = Effect.gen(function* () {
         inheritedOptions: inherited?.options ?? [],
         runtimeMode: limits.runtimeMode,
         interactionMode: limits.interactionMode,
-        providers: providers.map((provider) => {
-          const constraints = providerConstraints(
-            provider,
-            orchestrationCapableInstanceIds.has(provider.instanceId),
-          );
-          const { listed, omitted } = listCapabilityModels({
-            provider,
-            preferences: settings.providerModelPreferences?.[provider.instanceId],
-            searchTerms,
-            isPinned: (model) =>
-              model.isCustom ||
-              (inherited?.instanceId === provider.instanceId && inherited.model === model.slug) ||
-              (settings.favorites ?? []).some(
-                (favorite) =>
-                  favorite.provider === provider.instanceId && favorite.model === model.slug,
-              ),
-          });
-          return {
-            providerInstanceId: provider.instanceId,
-            driverKind: provider.driver,
-            displayName: provider.displayName ?? null,
-            models: listed.map((model) => {
-              const options = model.capabilities?.optionDescriptors ?? [];
-              return {
-                id: model.slug,
-                ...(model.name.toLowerCase() === model.slug.toLowerCase()
-                  ? {}
-                  : { label: model.name }),
-                ...(options.length === 0 ? {} : { options: options.map(capabilityModelOption) }),
-              };
-            }),
-            ...(omitted === 0 ? {} : { omittedModels: omitted }),
-            ...(provider.supportedRuntimeModes === undefined ||
-            provider.supportedRuntimeModes.length === 0
-              ? {}
-              : { runtimeModes: [...provider.supportedRuntimeModes] }),
-            canRunChildTask: constraints.length === 0,
-            canRunCrossProviderChildTask: constraints.length === 0,
-            constraints: [...constraints],
-          };
-        }),
+        providers: providers
+          .filter((provider) => provider.pool?.role !== "member")
+          .map((provider) => {
+            const constraints = providerConstraints(
+              provider,
+              orchestrationCapableInstanceIds.has(provider.instanceId),
+            );
+            const { listed, omitted } = listCapabilityModels({
+              provider,
+              preferences: settings.providerModelPreferences?.[provider.instanceId],
+              searchTerms,
+              isPinned: (model) =>
+                model.isCustom ||
+                (inherited?.instanceId === provider.instanceId && inherited.model === model.slug) ||
+                (settings.favorites ?? []).some(
+                  (favorite) =>
+                    favorite.provider === provider.instanceId && favorite.model === model.slug,
+                ),
+            });
+            return {
+              providerInstanceId: provider.instanceId,
+              driverKind: provider.driver,
+              displayName: provider.displayName ?? null,
+              models: listed.map((model) => {
+                const options = model.capabilities?.optionDescriptors ?? [];
+                return {
+                  id: model.slug,
+                  ...(model.name.toLowerCase() === model.slug.toLowerCase()
+                    ? {}
+                    : { label: model.name }),
+                  ...(options.length === 0 ? {} : { options: options.map(capabilityModelOption) }),
+                };
+              }),
+              ...(omitted === 0 ? {} : { omittedModels: omitted }),
+              ...(provider.supportedRuntimeModes === undefined ||
+              provider.supportedRuntimeModes.length === 0
+                ? {}
+                : { runtimeModes: [...provider.supportedRuntimeModes] }),
+              canRunChildTask: constraints.length === 0,
+              canRunCrossProviderChildTask: constraints.length === 0,
+              constraints: [...constraints],
+            };
+          }),
         features: {
           appOwnedSubagents: true,
           asyncPolling: true,
