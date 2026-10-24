@@ -2,6 +2,7 @@
 // skill's SKILL.md frontmatter and carries `user-invocable: false` into the `$` menu, as Claude's
 // skills already do. The model still sees every skill. See FORK.md.
 import type { ServerProviderSkill } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -12,16 +13,22 @@ import { parseSkillFrontmatter } from "./Drivers/ClaudeSkills.ts";
 
 const SKILL_FILE_NAME = "SKILL.md";
 const SKILL_READ_CONCURRENCY = 16;
-// A slow disk must never cost the probe its account and models result.
-const SKILL_READ_TIMEOUT = Duration.seconds(2);
+const SKILL_READ_TIMEOUT_MS = 2_000;
 
 /**
  * Marks each skill whose SKILL.md says `user-invocable: false`. A missing,
- * unreadable or malformed file, or a slow read, leaves the skill visible.
+ * unreadable or malformed file leaves the skill visible. Reads get at most
+ * 2 s, and never run past `deadlineMs` (epoch ms), so a slow disk can't cost
+ * the provider probe its account and models result; when time runs out, every
+ * skill comes back unmarked, so visible.
  */
 export const markCodexSkillsUserInvocable = Effect.fn("markCodexSkillsUserInvocable")(function* (
   skills: ReadonlyArray<ServerProviderSkill>,
+  options?: { readonly deadlineMs?: number },
 ) {
+  const nowMs = DateTime.toEpochMillis(yield* DateTime.now);
+  const timeoutMs = Math.min(SKILL_READ_TIMEOUT_MS, (options?.deadlineMs ?? Infinity) - nowMs);
+  if (skills.length === 0 || timeoutMs <= 0) return skills;
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const readUserInvocable = (skill: ServerProviderSkill) => {
@@ -42,5 +49,8 @@ export const markCodexSkillsUserInvocable = Effect.fn("markCodexSkillsUserInvoca
   };
   return yield* Effect.forEach(skills, readUserInvocable, {
     concurrency: SKILL_READ_CONCURRENCY,
-  }).pipe(Effect.timeoutOption(SKILL_READ_TIMEOUT), Effect.map(Option.getOrElse(() => skills)));
+  }).pipe(
+    Effect.timeoutOption(Duration.millis(timeoutMs)),
+    Effect.map(Option.getOrElse(() => skills)),
+  );
 });
