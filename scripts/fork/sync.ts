@@ -318,6 +318,7 @@ async function startConflictThread(
     "When the stack is fixed:",
     `1. Push it with \`node scripts/fork/sync.ts push ${input.target}\` from the worktree. It refuses a stack where one of upstream's workflows could run, and Fork CI runs on \`${syncBranch(input.target)}\`.`,
     `2. From the worktree, run \`node scripts/fork/sync.ts promote ${input.target}\`. It waits for Fork CI and moves ${FORK_MAIN_BRANCH} only if CI passed, which publishes the release.`,
+    `3. End with a message that names each patch commit you changed, with its subject, its old and new SHA, and what you changed in it, so the changes can be checked against the old patches before Alice installs the release.`,
     "",
     "If you can't get it to pass, or a fix would drop or change one of Alice's features, stop and tell Alice here what you need.",
   ].join("\n");
