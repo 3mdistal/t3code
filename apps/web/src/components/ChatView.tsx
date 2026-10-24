@@ -40,6 +40,7 @@ import { useStableCallback } from "../hooks/useStableCallback";
 import { useProjectScriptEditing } from "./chat/useProjectScriptEditing";
 import { RightPanelSurfaceContent } from "./chat/RightPanelSurfaceContent";
 import { usePendingThreadRequests } from "./chat/usePendingThreadRequests";
+import { composerInstanceIdFor } from "@t3tools/client-runtime/provider-pools";
 import { isScratchProject } from "@t3tools/client-runtime/state/projects";
 import { visibleThreadPullRequests } from "@t3tools/shared/threadPullRequests";
 import {
@@ -191,8 +192,8 @@ import { projectScriptIdFromCommand } from "~/projectScripts";
 import { newMessageId } from "~/lib/utils";
 import { isInSideChatPane, type SideChatParentPanel } from "~/lib/sideChatPane";
 import {
+  deriveComposerProviderInstanceEntries,
   NO_PROVIDER_MODEL_SELECTION,
-  providerInstanceEntriesFor,
   resolveProjectDefaultProviderModelSelection,
   shouldShowInstanceBadge,
 } from "../providerInstances";
@@ -1297,7 +1298,7 @@ export default function ChatView(props: ChatViewProps) {
     automaticEnvironment,
     autoUpdateEnvironments,
   });
-  const providerInstanceEntries = providerInstanceEntriesFor(
+  const providerInstanceEntries = deriveComposerProviderInstanceEntries(
     providerStatuses,
     settings,
     activeProject?.id ?? null,
@@ -1305,6 +1306,7 @@ export default function ChatView(props: ChatViewProps) {
   const activeThreadModelInstanceId = activeThread?.modelSelection.instanceId;
   const { selectedProviderEntry, requestedDriverKind } = resolveComposerProviderSelection({
     entries: providerInstanceEntries,
+    providers: providerStatuses,
     candidateInstanceIds: [
       selectedProviderByThreadId,
       activeRuntime?.providerInstanceId,
@@ -1663,13 +1665,17 @@ export default function ChatView(props: ChatViewProps) {
     availableEditors,
     openInCwd: gitCwd,
   });
+  const lockedAccountInstanceId = lockedProvider
+    ? (activeRuntime?.providerInstanceId ?? activeThread?.modelSelection.instanceId ?? null)
+    : null;
   const manualCompactionProviderAvailable = hasAvailableCompactionProvider({
     providers: providerInstanceEntries,
     driverKind: selectedProvider,
     instanceId: activeProviderInstanceId,
-    lockedInstanceId: lockedProvider
-      ? (activeRuntime?.providerInstanceId ?? activeThread?.modelSelection.instanceId ?? null)
-      : null,
+    lockedInstanceId:
+      lockedAccountInstanceId === null
+        ? null
+        : composerInstanceIdFor(providerStatuses, lockedAccountInstanceId),
   });
   const [resumeCompactionPermanentlyDismissed, setResumeCompactionPermanentlyDismissed] =
     useLocalStorage(

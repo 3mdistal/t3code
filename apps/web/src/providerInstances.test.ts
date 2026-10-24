@@ -13,11 +13,11 @@ import {
   deriveProviderInstanceEntries,
   getDefaultProviderInstanceModel,
   isProviderInstancePickerReady,
+  providerInstanceEntriesFor,
   resolveDefaultProviderModelSelection,
   resolvePoolMemberLabel,
   resolveSelectableProviderInstance,
   shouldShowInstanceBadge,
-  sortProviderInstanceEntries,
 } from "./providerInstances";
 
 function provider(input: {
@@ -631,9 +631,7 @@ describe("account pools in the composer catalog", () => {
   });
 
   it("leaves the settings catalog showing every account", () => {
-    const settingsEntries = sortProviderInstanceEntries(
-      applyProviderInstanceSettings(deriveProviderInstanceEntries(pooledProviders), settings, null),
-    );
+    const settingsEntries = providerInstanceEntriesFor(pooledProviders, settings, null);
     expect(ids(settingsEntries)).toEqual(
       expect.arrayContaining(["claudeAgent", "claudeAgent_icloud", "codex"]),
     );

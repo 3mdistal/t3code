@@ -845,6 +845,7 @@ describe("composer fallback to another instance of the same driver", () => {
     };
     const selection = resolveComposerProviderSelection({
       entries: providerInstanceEntriesFor(input.providers, settings, null),
+      providers: input.providers, // fork: see FORK.md.
       candidateInstanceIds: [input.threadModelSelection.instanceId],
       lockedProvider: null,
       lockedInstanceId: undefined,
