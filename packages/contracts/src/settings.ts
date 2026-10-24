@@ -52,6 +52,7 @@ import {
   ProviderPoolSettingsPatch,
   providerPoolDriver,
 } from "./providerPool.ts"; // fork: see FORK.md.
+import { ResourceLimitsSettings } from "./resourceLimits.ts"; // fork: limits, see FORK.md.
 import { PullRequestMergeMethod } from "./pullRequest.ts";
 
 export const TimestampFormat = Schema.Literals(["locale", "12-hour", "24-hour"]);
@@ -1304,6 +1305,7 @@ export const ServerSettings = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
   providerPools: ProviderPoolSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))), // fork: see FORK.md.
+  resourceLimits: ResourceLimitsSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))), // fork: limits, see FORK.md.
   observability: ObservabilitySettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   sourceControlHosts: Schema.Record(Schema.String, SourceControlHostSettings).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
@@ -1652,6 +1654,8 @@ export const ServerSettingsPatch = Schema.Struct({
   ),
   // fork: per-entry for the same reason as `usageLimitSources`. See FORK.md.
   providerPools: Schema.optionalKey(ProviderPoolSettingsPatch),
+  // fork: limits, see FORK.md. Replaces the whole object, so an omitted field returns to its default.
+  resourceLimits: Schema.optionalKey(ResourceLimitsSettings),
   cursorKeychainUsageEnabled: Schema.optionalKey(Schema.Boolean),
 
   usagePriceOverrides: Schema.optionalKey(
