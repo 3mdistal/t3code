@@ -129,6 +129,44 @@ the Account pools section of `docs/user/providers-claude.md`.
   `providerStatusCache`, `ChatView.logic`, `providerInstances` and `handoff`. Upstream test files keep only marked
   lines that the patch's required fields need, such as `providerPools: {}` or `markLimited` in a mock.
 
+### Memory and CPU limits (`limits:`)
+
+Each machine has its own memory and CPU limits, so agent sessions can't push it into running out of memory, as
+they did on the PC on 2026-10-21. These are teenylilconfig's memory gate rules, moved into T3's run scheduler.
+Users read about it in the Memory and CPU limits section of `docs/user/remote-access.md`.
+
+- Every 15 s the server reads commit headroom and available memory on Windows, or memory pressure and available
+  memory on macOS, plus CPU. Linux keeps upstream's cap and has no fork limits.
+- While a machine is over its limits, a run Alice didn't start herself from web or mobile waits in its thread's
+  queue, held, with a `system_notice`. Her own messages always start, and so does a queue holding one of them.
+  Work launched from a thread whose latest message is her "launch anyway" starts too. Idle sessions close on
+  every pass over the limits, before anything waits. Below the critical line, the newest running turn is
+  interrupted every 30 s, and its thread queues a resume note. Held threads start oldest first, 90 s apart.
+- Limit-only files: `apps/server/src/resourceLimits/`, and `packages/contracts/src/resourceLimits.ts`.
+- Upstream files it changes:
+  - `apps/server/src/orchestration-v2/Orchestrator.ts`: the three places a run can start call into
+    `resourceLimits/OrchestratorAdmission.ts`: `dispatchMessage`, `startNextQueuedRun`, and
+    `dispatchPreparedRunRelease`. Resume, Send now, and the governor's releases pass `admitted`. A run held with
+    nothing to queue behind takes upstream's queue branch, which the patch lets run without an active run.
+  - `ProviderSessionManager.ts`: `releaseIdleSessions`, which picks sessions with `idleSessionsToClose` and closes
+    them through upstream's `releaseEntry`.
+  - `runtimeLayer.ts` wires the governor. `ws.ts` adds the limits to `serverGetHostResources`.
+  - Contracts and `serverSettings.ts`: the `resourceLimits` settings key, the `resourceLimits` capability, and
+    `HostResourcesSnapshot.limits`.
+- The memory gate's hook reads the governor's files under `<stateDir>/resource-limits/`:
+  - `state.json`: state, readings, waiting threads, and each running session's thread and "launch anyway". It's
+    rewritten every pass, so a stale file means T3 isn't guarding.
+  - `off.json`: `memgate off` writes `{ at, until }` in epoch ms. It switches the limits off for at most a day.
+  - `inbox/`: one record per subagent launch the hook refused. Its thread resumes with a note listing them.
+- Stock compatibility: holds, notices and resume notes reuse `run.updated`, `turn-item.updated` and system
+  notifications. Stock T3 drops `resourceLimits` the next time it saves settings.
+- Known gaps:
+  - Forks and merge-backs aren't held.
+  - Upstream refuses to snooze a thread with a queued message of its own. So held agent messages stay in the
+    inbox, and only threads holding notifications alone (interrupted turns, refused launches) get snoozed.
+- Tests: `apps/server/src/resourceLimits/*.fork.test.ts` and `packages/shared/src/serverSettings.fork.test.ts`.
+  `Governor.fork.test.ts` runs the real orchestrator with fake readings and a test clock.
+
 ## Versions
 
 A release is `vX.Y.Z-alice.N`. `X.Y.Z` is the upstream stable tag the stack sits on, and `N` counts the fork's
