@@ -50,6 +50,11 @@ import {
   ProviderInstanceId,
   ProviderDriverKind,
 } from "./providerInstance.ts";
+import {
+  ProviderPoolSettings,
+  ProviderPoolSettingsPatch,
+  providerPoolDriver,
+} from "./providerPool.ts";
 import { PullRequestMergeMethod } from "./pullRequest.ts";
 
 export const TimestampFormat = Schema.Literals(["locale", "12-hour", "24-hour"]);
@@ -1356,6 +1361,7 @@ export const ServerSettings = Schema.Struct({
   providerInstances: Schema.Record(ProviderInstanceId, ProviderInstanceConfig).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
+  providerPools: ProviderPoolSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   observability: ObservabilitySettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   sourceControlHosts: Schema.Record(Schema.String, SourceControlHostSettings).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
@@ -1421,7 +1427,31 @@ export const resolveProviderInstanceEnabled = (
   return instance.enabled ?? configEnabled ?? defaultEnabledForDriver(instance.driver);
 };
 
+/**
+ * A pool id is enabled when any of its configured members is, so a pooled
+ * selection is never rejected while one account can still take the turn.
+ */
 export const resolveProjectProviderInstanceEnabled = (
+  settings: Pick<
+    ServerSettings,
+    "providerInstances" | "projectSettingsOverrides" | "providerPools"
+  >,
+  projectId: ProjectId | null,
+  instanceId: ProviderInstanceId,
+): boolean => {
+  const poolDriver = providerPoolDriver(instanceId);
+  if (poolDriver === null) {
+    return resolveConcreteInstanceEnabled(settings, projectId, instanceId);
+  }
+  const pool = settings.providerPools[poolDriver];
+  return (
+    pool?.memberInstanceIds.some((memberId) =>
+      resolveConcreteInstanceEnabled(settings, projectId, memberId),
+    ) ?? false
+  );
+};
+
+const resolveConcreteInstanceEnabled = (
   settings: Pick<ServerSettings, "providerInstances" | "projectSettingsOverrides">,
   projectId: ProjectId | null,
   instanceId: ProviderInstanceId,
@@ -1492,6 +1522,7 @@ export const ServerSettingsOperation = Schema.Literals([
   "normalize",
   "check-exists",
   "create-provider-instance",
+  "validate-provider-pool",
   "read-file",
   "read-provider-history",
   "read-project-settings",
@@ -1711,6 +1742,8 @@ export const ServerSettingsPatch = Schema.Struct({
   secretProviders: Schema.optionalKey(
     Schema.Record(SecretProviderId, Schema.NullOr(SecretProviderConfigWrite)),
   ),
+  // Per-entry for the same reason as `usageLimitSources`.
+  providerPools: Schema.optionalKey(ProviderPoolSettingsPatch),
   cursorKeychainUsageEnabled: Schema.optionalKey(Schema.Boolean),
 
   usagePriceOverrides: Schema.optionalKey(
@@ -1734,7 +1767,8 @@ export function requiredScopesForServerSettingsPatch(
       key === "providers" ||
       key === "providerInstances" ||
       key === "usageLimitSources" ||
-      key === "secretProviders"
+      key === "secretProviders" ||
+      key === "providerPools"
     ) {
       changesProviders = true;
     } else {

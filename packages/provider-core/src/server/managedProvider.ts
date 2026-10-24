@@ -35,6 +35,25 @@ function withUsageLimits(
   return usageLimits ? { ...rest, usageLimits } : rest;
 }
 
+function withLimitedUntil(
+  snapshot: ServerProvider,
+  limitedUntil: ServerProvider["limitedUntil"],
+): ServerProvider {
+  if (snapshot.limitedUntil === limitedUntil) {
+    return snapshot;
+  }
+  const { limitedUntil: _previous, ...rest } = snapshot;
+  return limitedUntil === undefined ? rest : { ...rest, limitedUntil };
+}
+
+const laterLimitedUntil = (
+  current: ServerProvider["limitedUntil"],
+  until: ServerProvider["limitedUntil"],
+): ServerProvider["limitedUntil"] =>
+  current !== undefined && until !== undefined && Date.parse(current) >= Date.parse(until)
+    ? current
+    : until;
+
 export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(function* <
   Settings,
 >(input: {
@@ -85,8 +104,11 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
       if (state.enrichmentGeneration !== generation) {
         return [null, state] as const;
       }
-      // Enrichment must not revert usage updates newer than its input snapshot.
-      const merged = withUsageLimits(nextSnapshot, state.snapshot.usageLimits);
+      // Enrichment must not revert usage updates or cooldowns newer than its input snapshot.
+      const merged = withLimitedUntil(
+        withUsageLimits(nextSnapshot, state.snapshot.usageLimits),
+        state.snapshot.limitedUntil,
+      );
       if (Equal.equals(state.snapshot, merged)) {
         return [null, state] as const;
       }
@@ -173,11 +195,14 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
             });
         const workspaceId =
           usageLimits === probedSnapshot.usageLimits ? undefined : state.snapshot.auth.workspaceId;
-        const snapshot = withUsageLimits(
-          workspaceId && !probedSnapshot.auth.workspaceId
-            ? { ...probedSnapshot, auth: { ...probedSnapshot.auth, workspaceId } }
-            : probedSnapshot,
-          usageLimits,
+        const snapshot = withLimitedUntil(
+          withUsageLimits(
+            workspaceId && !probedSnapshot.auth.workspaceId
+              ? { ...probedSnapshot, auth: { ...probedSnapshot.auth, workspaceId } }
+              : probedSnapshot,
+            usageLimits,
+          ),
+          switchedAccount ? undefined : state.snapshot.limitedUntil,
         );
         return [
           { snapshot, generation },
@@ -213,6 +238,23 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
       }
     },
   );
+
+  const markLimited: ManagedServerProvider["markLimited"] = Effect.fn(
+    "ManagedServerProvider.markLimited",
+  )(function* (input) {
+    const snapshotToPublish = yield* Ref.modify(snapshotStateRef, (state) => {
+      const snapshot = withLimitedUntil(
+        state.snapshot,
+        laterLimitedUntil(state.snapshot.limitedUntil, input.until),
+      );
+      return snapshot === state.snapshot
+        ? ([null, state] as const)
+        : ([snapshot, { ...state, snapshot }] as const);
+    });
+    if (snapshotToPublish !== null) {
+      yield* PubSub.publish(changesPubSub, snapshotToPublish);
+    }
+  });
 
   const refreshSnapshot = Effect.fn("refreshSnapshot")(function* () {
     const nextSettings = yield* input.getSettings;
@@ -375,6 +417,7 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
       .pipe(Effect.andThen(refreshSnapshot), Effect.tapError(Effect.logError), Effect.orDie),
     applyUsageLimits,
     refreshUsage: refreshUsage(),
+    markLimited,
     get streamChanges() {
       return Stream.fromPubSub(changesPubSub);
     },

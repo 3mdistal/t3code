@@ -40,6 +40,7 @@ import * as EventStore from "../EventStore.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as Orchestrator from "../Orchestrator.ts";
 import * as ProjectionStore from "../ProjectionStore.ts";
+import * as ProviderPoolFailover from "../ProviderPoolFailover.ts";
 import * as ProjectStore from "../ProjectStore.ts";
 import * as ProviderAdapterRegistry from "../ProviderAdapterRegistry.ts";
 import * as ProviderAuthService from "../../provider/ProviderAuthService.ts";
@@ -281,6 +282,12 @@ export function layerWithRegistry<Error>(
     readonly recoverOnStartup?: boolean;
     readonly continueThreadsAfterServerUpdate?: boolean;
     readonly managedPolicy?: ManagedPolicyDocument;
+    readonly settings?: Parameters<typeof ServerSettings.layerTest>[0];
+    readonly poolCatalog?: Layer.Layer<never>;
+    /** Wraps the dispatch the usage-limit hook sends `run.pool-failover` through. */
+    readonly poolFailoverDispatch?: (
+      dispatch: Orchestrator.OrchestratorV2Shape["dispatch"],
+    ) => Orchestrator.OrchestratorV2Shape["dispatch"];
   } = {},
 ): Layer.Layer<
   | Orchestrator.OrchestratorV2
@@ -315,11 +322,13 @@ export function layerWithRegistry<Error>(
           ...(options.continueThreadsAfterServerUpdate === undefined
             ? {}
             : { continueThreadsAfterServerUpdate: options.continueThreadsAfterServerUpdate }),
+          ...options.settings,
         },
         policy.summary,
       ),
     ),
   ).pipe(Layer.orDie);
+  const layerPoolCatalog = options.poolCatalog ?? Layer.empty;
   const layerStores = Layer.mergeAll(
     EventStore.layer,
     ProjectionStore.layer,
@@ -399,38 +408,6 @@ export function layerWithRegistry<Error>(
   const layerProviderSwitchServiceProvided = ProviderSwitchService.layer.pipe(
     Layer.provide(layerProvidedRegistry),
   );
-  const layerRunExecutionServiceProvided = RunExecutionService.layer.pipe(
-    Layer.provide(
-      Layer.mergeAll(
-        McpAppModelContext.layerEmpty,
-        PreviewAgentActivity.layer,
-        layerCheckpointServiceProvided,
-        layerEventSinkProvided,
-        IdAllocator.layer,
-        layerProviderEventIngestorProvided,
-        layerServerSettings,
-        layerStores,
-      ),
-    ),
-  );
-  const layerProviderTurnStartServiceProvided = ProviderTurnStartService.layer.pipe(
-    Layer.provide(
-      Layer.mergeAll(
-        layerContextHandoffServiceProvided,
-        layerEventSinkProvided,
-        IdAllocator.layer,
-        layerStores,
-        layerProviderSessionManagerProvided,
-        Layer.mock(ProviderAuthService.ProviderAuthService)({
-          tryHandlePromptCommand: () => Effect.succeed(false),
-        }),
-        layerRunExecutionServiceProvided,
-        layerRuntime,
-        layerServerConfig,
-        layerServerSettings,
-      ),
-    ),
-  );
   const layerProviderTurnControlServiceProvided = ProviderTurnControlService.layer.pipe(
     Layer.provide(Layer.merge(layerStores, layerProviderSessionManagerProvided)),
   );
@@ -485,9 +462,62 @@ export function layerWithRegistry<Error>(
         layerRuntime,
         layerProviderSessionManagerProvided,
         layerProviderSwitchServiceProvided,
-        layerRunExecutionServiceProvided,
         layerServerSettings,
+        layerPoolCatalog,
         ThreadForkService.layer,
+      ),
+    ),
+  );
+  const { poolFailoverDispatch } = options;
+  const layerFailoverOrchestrator =
+    poolFailoverDispatch === undefined
+      ? layerOrchestratorProvided
+      : Layer.effect(
+          Orchestrator.OrchestratorV2,
+          Effect.map(Orchestrator.OrchestratorV2, (orchestrator) => ({
+            ...orchestrator,
+            dispatch: poolFailoverDispatch(orchestrator.dispatch),
+          })),
+        ).pipe(Layer.provide(layerOrchestratorProvided));
+  const layerRunExecutionServiceProvided = RunExecutionService.layer.pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        McpAppModelContext.layerEmpty,
+        PreviewAgentActivity.layer,
+        layerCheckpointServiceProvided,
+        layerEventSinkProvided,
+        IdAllocator.layer,
+        layerProviderEventIngestorProvided,
+        layerServerSettings,
+        layerStores,
+        ProviderPoolFailover.layer.pipe(
+          Layer.provide(
+            Layer.mergeAll(
+              layerFailoverOrchestrator,
+              layerStores,
+              layerServerSettings,
+              layerPoolCatalog,
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
+  const layerProviderTurnStartServiceProvided = ProviderTurnStartService.layer.pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        layerContextHandoffServiceProvided,
+        layerEventSinkProvided,
+        IdAllocator.layer,
+        layerStores,
+        layerProviderSessionManagerProvided,
+        Layer.mock(ProviderAuthService.ProviderAuthService)({
+          tryHandlePromptCommand: () => Effect.succeed(false),
+        }),
+        layerRunExecutionServiceProvided,
+        layerRuntime,
+        layerServerConfig,
+        layerServerSettings,
       ),
     ),
   );

@@ -266,6 +266,7 @@ it.effect("refreshes the failing instance snapshot after a committed usage_limit
           refresh: Effect.die("unused"),
           resolveMaintenance: () => Effect.die("unused"),
           applyUsageLimits: () => Effect.die("unused"),
+          markLimited: () => Effect.void, // fork: see FORK.md.
           streamChanges: Stream.empty,
         },
       };
