@@ -1,0 +1,242 @@
+name: Fork update rehearsal
+
+# fork: a one-off proof that fork releases update one another (see FORK.md).
+# It lives only on rehearsal/* branches and is never merged into fork/main.
+# A push to rehearsal/build/<version> packages the Windows x64 app at that
+# version, the way fork-release.yml does. A push to rehearsal/run installs the
+# first build of each set on a fresh Windows runner and updates it with the
+# app's own updater, to each later build in turn: through mock-update-server,
+# and through real releases on this repository, which it deletes afterwards.
+# The GitHub set uses versions below every real release, so no real install
+# is ever offered one.
+
+on:
+  push:
+    branches: ["rehearsal/build/**", "rehearsal/run"]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  # release-desktop.yml's Windows job lists this run's artifacts to wait for the
+  # Linux CLI archive it embeds, and the rehearsal downloads the build runs'.
+  actions: read
+  contents: read
+
+env:
+  MOCK_VERSIONS: 0.1.3-alice.1 0.1.3-alice.2 0.1.4-alice.1
+  GITHUB_VERSIONS: 0.0.1-alice.1 0.0.1-alice.2 0.0.2-alice.1
+
+jobs:
+  version:
+    name: Resolve version
+    if: startsWith(github.ref_name, 'rehearsal/build/')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      clerk_publishable_key: ${{ steps.public_config.outputs.clerk_publishable_key }}
+      clerk_jwt_template: ${{ steps.public_config.outputs.clerk_jwt_template }}
+      clerk_cli_oauth_client_id: ${{ steps.public_config.outputs.clerk_cli_oauth_client_id }}
+      relay_url: ${{ steps.public_config.outputs.relay_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          sparse-checkout: |
+            /.env.example
+          sparse-checkout-cone-mode: false
+
+      - id: version
+        name: Resolve version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#rehearsal/build/}"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-alice\.[0-9]+$ ]]; then
+            echo "$version is not an X.Y.Z-alice.N version." >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - id: public_config
+        name: Resolve T3 Connect public config
+        shell: bash
+        run: |
+          set -euo pipefail
+          for key in clerk_publishable_key:T3CODE_CLERK_PUBLISHABLE_KEY clerk_jwt_template:T3CODE_CLERK_JWT_TEMPLATE clerk_cli_oauth_client_id:T3CODE_CLERK_CLI_OAUTH_CLIENT_ID relay_url:T3CODE_RELAY_URL; do
+            value="$(sed -n "s/^${key##*:}=//p" .env.example | head -n 1)"
+            if [[ -z "$value" ]]; then
+              echo "${key##*:} is missing from .env.example." >&2
+              exit 1
+            fi
+            echo "${key%%:*}=${value}" >> "$GITHUB_OUTPUT"
+          done
+
+  bundle:
+    name: Build JS bundle
+    needs: version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      T3CODE_CLERK_PUBLISHABLE_KEY: ${{ needs.version.outputs.clerk_publishable_key }}
+      T3CODE_CLERK_JWT_TEMPLATE: ${{ needs.version.outputs.clerk_jwt_template }}
+      T3CODE_CLERK_CLI_OAUTH_CLIENT_ID: ${{ needs.version.outputs.clerk_cli_oauth_client_id }}
+      T3CODE_RELAY_URL: ${{ needs.version.outputs.relay_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: false
+
+      - name: Install bundle dependencies
+        run: vp install --filter=t3... --filter=@t3tools/web... --filter=@t3tools/desktop... --filter=@t3tools/scripts...
+
+      - name: Align package versions to release version
+        run: node scripts/update-release-package-versions.ts "${{ needs.version.outputs.version }}"
+
+      - uses: ./.github/actions/setup-apt-mirrors
+
+      - name: Install browser secret helper build libraries
+        run: sudo apt-get update && sudo apt-get install -y libsecret-1-dev pkg-config
+
+      - name: Build JS bundle
+        env:
+          T3CODE_TELEMETRY_CHANNEL: dev
+        run: vp run build:desktop
+
+      - name: Upload JS bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: js-bundle
+          path: |
+            apps/server/dist
+            apps/desktop/dist-electron
+          if-no-files-found: error
+          retention-days: 1
+
+  desktop:
+    name: Desktop
+    needs: [version, bundle]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Windows embeds this job's CLI archive as its WSL runtime.
+          - label: Linux x64
+            runner: ubuntu-24.04
+            verify_runner: ""
+            platform: linux
+            target: AppImage
+            arch: x64
+            rust_target: x86_64-unknown-linux-gnu
+            resource_key: linux-x64
+          - label: Windows x64
+            runner: ubuntu-24.04
+            verify_runner: windows-2025
+            platform: win
+            target: nsis
+            arch: x64
+            rust_target: x86_64-pc-windows-msvc
+            resource_key: win32-x64
+    uses: ./.github/workflows/release-desktop.yml
+    secrets: inherit
+    with:
+      version: ${{ needs.version.outputs.version }}
+      ref: ${{ github.sha }}
+      release_channel: stable
+      relay_client_tracing: false
+      clerk_publishable_key: ${{ needs.version.outputs.clerk_publishable_key }}
+      clerk_jwt_template: ${{ needs.version.outputs.clerk_jwt_template }}
+      clerk_cli_oauth_client_id: ${{ needs.version.outputs.clerk_cli_oauth_client_id }}
+      relay_url: ${{ needs.version.outputs.relay_url }}
+      label: ${{ matrix.label }}
+      runner: ${{ matrix.runner }}
+      verify_runner: ${{ matrix.verify_runner }}
+      platform: ${{ matrix.platform }}
+      target: ${{ matrix.target }}
+      arch: ${{ matrix.arch }}
+      rust_target: ${{ matrix.rust_target }}
+      resource_key: ${{ matrix.resource_key }}
+      cli_archive: true
+
+  rehearse:
+    name: Rehearse (${{ matrix.feed }})
+    if: github.ref_name == 'rehearsal/run'
+    strategy:
+      fail-fast: false
+      matrix:
+        feed: [mock, github]
+    runs-on: windows-2025
+    timeout-minutes: 60
+    permissions:
+      actions: read
+      # The GitHub feed publishes and deletes its test releases.
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSIONS: ${{ matrix.feed == 'mock' && 'MOCK_VERSIONS' || 'GITHUB_VERSIONS' }}
+      # The rehearsal drives the installed app; it needs only playwright-core.
+      ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: false
+
+      - name: Install dependencies
+        run: vp install --filter=@t3tools/scripts... --filter=@t3tools/desktop...
+
+      - name: Download builds
+        shell: bash
+        run: |
+          set -euo pipefail
+          for version in ${!VERSIONS}; do
+            run_id="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow fork-update-rehearsal.yml \
+              --branch "rehearsal/build/$version" --status success --limit 1 --json databaseId --jq '.[0].databaseId')"
+            if [[ -z "$run_id" ]]; then
+              echo "No successful build of $version; push rehearsal/build/$version first." >&2
+              exit 1
+            fi
+            gh run download "$run_id" --repo "$GITHUB_REPOSITORY" --name desktop-win-x64 --dir "builds/$version"
+            ls -l "builds/$version"
+          done
+
+      - name: Rehearse updates
+        shell: bash
+        run: |
+          set -euo pipefail
+          builds=()
+          for version in ${!VERSIONS}; do builds+=("builds/$version"); done
+          node scripts/fork/update-rehearsal.ts "${{ matrix.feed }}" "${builds[@]}"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: rehearsal-logs-${{ matrix.feed }}
+          path: |
+            ${{ runner.temp }}/t3-rehearsal-home/**/*.log
+            ~/AppData/Roaming/t3code-v2/logs/**
+          if-no-files-found: ignore
