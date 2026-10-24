@@ -7,29 +7,31 @@ name: Mobile EAS Production Build
 # both jobs, so a queued run for the same fingerprint starts after the tag exists.
 
 on:
+  # fork: upstream's triggers, commented out so this never runs on the fork (see FORK.md):
+  # workflow_call:
+  #   inputs:
+  #     platform:
+  #       description: android or ios
+  #       required: true
+  #       type: string
+  #     profile:
+  #       description: eas.json build and submit profile
+  #       required: true
+  #       type: string
+  #     sha:
+  #       description: Commit to build and tag
+  #       required: true
+  #       type: string
+  #     tag:
+  #       description: Build record tag, without refs/tags/
+  #       required: true
+  #       type: string
+  #   secrets:
+  #     EXPO_PRODUCTION_TOKEN:
+  #       required: true
+  #     MOBILE_SOURCEMAPS_R2:
+  #       required: false
   workflow_call:
-    inputs:
-      platform:
-        description: android or ios
-        required: true
-        type: string
-      profile:
-        description: eas.json build and submit profile
-        required: true
-        type: string
-      sha:
-        description: Commit to build and tag
-        required: true
-        type: string
-      tag:
-        description: Build record tag, without refs/tags/
-        required: true
-        type: string
-    secrets:
-      EXPO_PRODUCTION_TOKEN:
-        required: true
-      MOBILE_SOURCEMAPS_R2:
-        required: false
 
 permissions:
   contents: read

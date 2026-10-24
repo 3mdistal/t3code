@@ -1,15 +1,17 @@
 name: Issue Vouch
 
 on:
-  issues:
-    types: [opened, reopened]
-  push:
-    branches:
-      - main
-    paths:
-      - .github/VOUCHED.td
-      - .github/workflows/issue-vouch.yml
-  workflow_dispatch:
+  # fork: upstream's triggers, commented out so this never runs on the fork (see FORK.md):
+  # issues:
+  #   types: [opened, reopened]
+  # push:
+  #   branches:
+  #     - main
+  #   paths:
+  #     - .github/VOUCHED.td
+  #     - .github/workflows/issue-vouch.yml
+  # workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read

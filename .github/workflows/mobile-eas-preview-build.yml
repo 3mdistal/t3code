@@ -7,22 +7,24 @@ name: Mobile EAS Preview Build
 # both jobs, so a build queued for the same fingerprint starts after the tag exists.
 
 on:
+  # fork: upstream's triggers, commented out so this never runs on the fork (see FORK.md):
+  # workflow_call:
+  #   inputs:
+  #     platform:
+  #       description: android or ios
+  #       required: true
+  #       type: string
+  #     fingerprint:
+  #       required: true
+  #       type: string
+  #   secrets:
+  #     EXPO_PREVIEW_TOKEN:
+  #       required: true
+  #   outputs:
+  #     client:
+  #       description: Install link for the client with this fingerprint
+  #       value: ${{ jobs.android.outputs.client || jobs.ios.outputs.client }}
   workflow_call:
-    inputs:
-      platform:
-        description: android or ios
-        required: true
-        type: string
-      fingerprint:
-        required: true
-        type: string
-    secrets:
-      EXPO_PREVIEW_TOKEN:
-        required: true
-    outputs:
-      client:
-        description: Install link for the client with this fingerprint
-        value: ${{ jobs.android.outputs.client || jobs.ios.outputs.client }}
 
 permissions:
   contents: read
