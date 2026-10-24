@@ -5,8 +5,10 @@ name: Deploy relay preview
 # approval in the `relay-preview` environment on every run. Teardown is in
 # relay-preview-cleanup.yml and never runs PR code.
 on:
-  pull_request:
-    types: [labeled, synchronize, reopened]
+  # fork: upstream's triggers, commented out so this never runs on the fork (see FORK.md):
+  # pull_request:
+  #   types: [labeled, synchronize, reopened]
+  workflow_call:
 
 permissions:
   contents: read

@@ -1,29 +1,31 @@
 name: Release
 
 on:
-  push:
-    tags:
-      - "v*.*.*"
-      - "!v*-nightly.*"
-      - "!v*-preview.*"
-  schedule:
-    # Avoid minute zero, when GitHub scheduled jobs are busiest.
-    - cron: "8,38 * * * *"
-  workflow_dispatch:
-    inputs:
-      channel:
-        description: "Release channel"
-        required: false
-        default: preview
-        type: choice
-        options:
-          - preview
-          - stable
-          - nightly
-      version:
-        description: "Stable version override (for example 1.2.3). Defaults to the version the latest nightly previewed."
-        required: false
-        type: string
+  # fork: upstream's triggers, commented out so this never runs on the fork (see FORK.md):
+  # push:
+  #   tags:
+  #     - "v*.*.*"
+  #     - "!v*-nightly.*"
+  #     - "!v*-preview.*"
+  # schedule:
+  #   # Avoid minute zero, when GitHub scheduled jobs are busiest.
+  #   - cron: "8,38 * * * *"
+  # workflow_dispatch:
+  #   inputs:
+  #     channel:
+  #       description: "Release channel"
+  #       required: false
+  #       default: preview
+  #       type: choice
+  #       options:
+  #         - preview
+  #         - stable
+  #         - nightly
+  #     version:
+  #       description: "Stable version override (for example 1.2.3). Defaults to the version the latest nightly previewed."
+  #       required: false
+  #       type: string
+  workflow_call:
 
 # Serialize nightlies (scheduled and manual) so overlapping runs cannot build
 # the same commit twice or publish out of order. Stable tag releases get their

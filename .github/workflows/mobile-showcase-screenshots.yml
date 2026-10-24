@@ -1,39 +1,41 @@
 name: Mobile Showcase Screenshots
 
 on:
-  workflow_dispatch:
-    inputs:
-      platform:
-        description: Device platforms to capture
-        required: true
-        default: all
-        type: choice
-        options:
-          - all
-          - ios
-          - android
-      appearance:
-        description: System appearances to capture
-        required: true
-        default: both
-        type: choice
-        options:
-          - both
-          - dark
-          - light
-      theme:
-        description: Palette to capture (all multiplies the run by six)
-        required: true
-        default: t3-code
-        type: choice
-        options:
-          - t3-code
-          - t3-chat
-          - grove
-          - ocean
-          - ember
-          - iris
-          - all
+  # fork: upstream's triggers, commented out so this never runs on the fork (see FORK.md):
+  # workflow_dispatch:
+  #   inputs:
+  #     platform:
+  #       description: Device platforms to capture
+  #       required: true
+  #       default: all
+  #       type: choice
+  #       options:
+  #         - all
+  #         - ios
+  #         - android
+  #     appearance:
+  #       description: System appearances to capture
+  #       required: true
+  #       default: both
+  #       type: choice
+  #       options:
+  #         - both
+  #         - dark
+  #         - light
+  #     theme:
+  #       description: Palette to capture (all multiplies the run by six)
+  #       required: true
+  #       default: t3-code
+  #       type: choice
+  #       options:
+  #         - t3-code
+  #         - t3-chat
+  #         - grove
+  #         - ocean
+  #         - ember
+  #         - iris
+  #         - all
+  workflow_call:
 
 permissions:
   contents: read

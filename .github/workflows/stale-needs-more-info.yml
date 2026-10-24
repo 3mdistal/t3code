@@ -1,9 +1,11 @@
 name: Close stale "needs more info" issues
 
 on:
-  schedule:
-    - cron: "17 6 * * *"
-  workflow_dispatch:
+  # fork: upstream's triggers, commented out so this never runs on the fork (see FORK.md):
+  # schedule:
+  #   - cron: "17 6 * * *"
+  # workflow_dispatch:
+  workflow_call:
 
 permissions:
   actions: write
