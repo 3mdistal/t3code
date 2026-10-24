@@ -24,7 +24,8 @@ export function chooseLoadBalancedEnvironment(
       resources.cpuUtilization === null ||
       resources.cpuUtilization >= 0.95 ||
       resources.totalMemoryBytes <= 0 ||
-      resources.cpuCount <= 0
+      resources.cpuCount <= 0 ||
+      (resources.limits !== undefined && resources.limits.state !== "ok") // fork: limits, see FORK.md.
     ) {
       continue;
     }

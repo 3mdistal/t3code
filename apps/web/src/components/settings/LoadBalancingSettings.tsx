@@ -12,6 +12,7 @@ import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../
 import { Switch } from "../ui/switch";
 import { EnvironmentRow, EnvironmentTransportLabel } from "./EnvironmentRow";
 import { FoldedSettingsSection } from "./FoldedSettingsSection";
+import { MachineLimits, MachineLimitsSection } from "./MachineLimits"; // fork: limits, see FORK.md.
 import { useSearchableSetting } from "./settingsSearch";
 
 const preferences = [
@@ -64,7 +65,7 @@ export function LoadBalancingSettings({
   const m = useMessages();
   const items = preferences.map((entry) => ({ ...entry, label: m(entry.label) }));
 
-  if (environments.length < 2) return null;
+  if (environments.length < 2) return <MachineLimitsSection environments={environments} />; // fork: limits, see FORK.md.
 
   const { id, title } = searchableSetting("load-balancing");
   return (
@@ -97,6 +98,7 @@ export function LoadBalancingSettings({
           kind={resolveEnvironmentMachineKind(environment.serverConfig)}
           label={environment.label}
           subtitle={<EnvironmentTransportLabel environment={environment} />}
+          detail={<MachineLimits environment={environment} />} // fork: limits, see FORK.md.
         >
           <Select
             items={items}
