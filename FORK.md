@@ -62,16 +62,19 @@ an agent on the same playbook, and the patch leaves it on.
 Skills Alice doesn't type carry `user-invocable: false` in their SKILL.md frontmatter. T3 already hides those
 from Claude's `$` menu, but Codex's `skills/list` has no such flag, so every Codex skill showed. The fork reads each
 listed skill's SKILL.md with Claude's frontmatter parser and marks it. Only the menu changes; the model still sees
-every skill. A missing or unreadable file, or reads slower than 2 s, leaves skills visible.
+every skill. A missing or unreadable file leaves its skill visible. Reads get 2 s at most, and in the machine probe
+they run alongside model discovery and stop at its deadline, so a slow disk can't cost the probe its account and
+models; skills come back unmarked, so visible, when time runs out.
 
 - `apps/server/src/provider/codexSkillInvocability.ts`: `markCodexSkillsUserInvocable`.
-- `apps/server/src/provider/CodexProvider.ts`: the machine probe and `probeCodexSkillsForCwd` pass their parsed
-  skills through it.
+- `apps/server/src/provider/CodexProvider.ts`: the machine probe marks its skills inside its discovery deadline,
+  and `probeCodexSkillsForCwd` passes its parsed skills through it.
 - `apps/server/src/provider/Drivers/CodexDriver.ts`: passes what upstream's `makeCodexSkillsProbe` returns through
   it, so the probe itself stays upstream's. `CodexManagedProvider.ts`: provides the file system to its
   `probeCodexSkillsForCwd` call.
 - `apps/server/src/provider/Drivers/ClaudeSkills.ts`: exports `parseSkillFrontmatter`.
-- Test: `apps/server/src/provider/codexSkillInvocability.fork.test.ts`.
+- Test: `apps/server/src/provider/codexSkillInvocability.fork.test.ts`, with the slow-disk cases on the test
+  clock.
 
 ### macOS signing without upstream's App ID (`fork:`)
 
