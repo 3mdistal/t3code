@@ -46,6 +46,7 @@ import { Route as ChatSettingsBrowserRouteImport } from './routes/_chat.settings
 import { Route as ChatSettingsBetaRouteImport } from './routes/_chat.settings.beta'
 import { Route as ChatSettingsArchivedRouteImport } from './routes/_chat.settings.archived'
 import { Route as ChatSettingsAppearanceRouteImport } from './routes/_chat.settings.appearance'
+import { Route as ChatSettingsAccountPoolsRouteImport } from './routes/_chat.settings.account-pools'
 import { Route as ChatSettingsAccessRouteImport } from './routes/_chat.settings.access'
 import { Route as ChatSettingsAboutRouteImport } from './routes/_chat.settings.about'
 import { Route as ChatDraftDraftIdRouteImport } from './routes/_chat.draft.$draftId'
@@ -240,6 +241,12 @@ const ChatSettingsAppearanceRoute = ChatSettingsAppearanceRouteImport.update({
   path: '/appearance',
   getParentRoute: () => ChatSettingsRoute,
 } as any)
+const ChatSettingsAccountPoolsRoute =
+  ChatSettingsAccountPoolsRouteImport.update({
+    id: '/account-pools',
+    path: '/account-pools',
+    getParentRoute: () => ChatSettingsRoute,
+  } as any)
 const ChatSettingsAccessRoute = ChatSettingsAccessRouteImport.update({
   id: '/access',
   path: '/access',
@@ -278,6 +285,7 @@ export interface FileRoutesByFullPath {
   '/draft/$draftId': typeof ChatDraftDraftIdRoute
   '/settings/about': typeof ChatSettingsAboutRoute
   '/settings/access': typeof ChatSettingsAccessRoute
+  '/settings/account-pools': typeof ChatSettingsAccountPoolsRoute
   '/settings/appearance': typeof ChatSettingsAppearanceRoute
   '/settings/archived': typeof ChatSettingsArchivedRoute
   '/settings/beta': typeof ChatSettingsBetaRoute
@@ -320,6 +328,7 @@ export interface FileRoutesByTo {
   '/draft/$draftId': typeof ChatDraftDraftIdRoute
   '/settings/about': typeof ChatSettingsAboutRoute
   '/settings/access': typeof ChatSettingsAccessRoute
+  '/settings/account-pools': typeof ChatSettingsAccountPoolsRoute
   '/settings/appearance': typeof ChatSettingsAppearanceRoute
   '/settings/archived': typeof ChatSettingsArchivedRoute
   '/settings/beta': typeof ChatSettingsBetaRoute
@@ -364,6 +373,7 @@ export interface FileRoutesById {
   '/_chat/draft/$draftId': typeof ChatDraftDraftIdRoute
   '/_chat/settings/about': typeof ChatSettingsAboutRoute
   '/_chat/settings/access': typeof ChatSettingsAccessRoute
+  '/_chat/settings/account-pools': typeof ChatSettingsAccountPoolsRoute
   '/_chat/settings/appearance': typeof ChatSettingsAppearanceRoute
   '/_chat/settings/archived': typeof ChatSettingsArchivedRoute
   '/_chat/settings/beta': typeof ChatSettingsBetaRoute
@@ -408,6 +418,7 @@ export interface FileRouteTypes {
     | '/draft/$draftId'
     | '/settings/about'
     | '/settings/access'
+    | '/settings/account-pools'
     | '/settings/appearance'
     | '/settings/archived'
     | '/settings/beta'
@@ -450,6 +461,7 @@ export interface FileRouteTypes {
     | '/draft/$draftId'
     | '/settings/about'
     | '/settings/access'
+    | '/settings/account-pools'
     | '/settings/appearance'
     | '/settings/archived'
     | '/settings/beta'
@@ -493,6 +505,7 @@ export interface FileRouteTypes {
     | '/_chat/draft/$draftId'
     | '/_chat/settings/about'
     | '/_chat/settings/access'
+    | '/_chat/settings/account-pools'
     | '/_chat/settings/appearance'
     | '/_chat/settings/archived'
     | '/_chat/settings/beta'
@@ -792,6 +805,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ChatSettingsAppearanceRouteImport
       parentRoute: typeof ChatSettingsRoute
     }
+    '/_chat/settings/account-pools': {
+      id: '/_chat/settings/account-pools'
+      path: '/account-pools'
+      fullPath: '/settings/account-pools'
+      preLoaderRoute: typeof ChatSettingsAccountPoolsRouteImport
+      parentRoute: typeof ChatSettingsRoute
+    }
     '/_chat/settings/access': {
       id: '/_chat/settings/access'
       path: '/access'
@@ -826,6 +846,7 @@ declare module '@tanstack/react-router' {
 interface ChatSettingsRouteChildren {
   ChatSettingsAboutRoute: typeof ChatSettingsAboutRoute
   ChatSettingsAccessRoute: typeof ChatSettingsAccessRoute
+  ChatSettingsAccountPoolsRoute: typeof ChatSettingsAccountPoolsRoute
   ChatSettingsAppearanceRoute: typeof ChatSettingsAppearanceRoute
   ChatSettingsArchivedRoute: typeof ChatSettingsArchivedRoute
   ChatSettingsBetaRoute: typeof ChatSettingsBetaRoute
@@ -855,6 +876,7 @@ interface ChatSettingsRouteChildren {
 const ChatSettingsRouteChildren: ChatSettingsRouteChildren = {
   ChatSettingsAboutRoute: ChatSettingsAboutRoute,
   ChatSettingsAccessRoute: ChatSettingsAccessRoute,
+  ChatSettingsAccountPoolsRoute: ChatSettingsAccountPoolsRoute,
   ChatSettingsAppearanceRoute: ChatSettingsAppearanceRoute,
   ChatSettingsArchivedRoute: ChatSettingsArchivedRoute,
   ChatSettingsBetaRoute: ChatSettingsBetaRoute,
