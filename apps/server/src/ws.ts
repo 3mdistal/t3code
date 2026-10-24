@@ -1728,7 +1728,7 @@ export const layerWsRpc = (
         readonly workspaceSnapshotsOnDemand: boolean;
       }) {
         const keybindingsConfig = yield* keybindings.loadConfigState;
-        const currentProviders = yield* providerRegistry.getPublishedProviders;
+        const currentProviders = yield* providerRegistry.getPublishedProviders; // fork: pools, see FORK.md.
         const commandProviders = options.usageLimitsCommand
           ? withUsageLimitsCommands(currentProviders, yield* usageLimitSources.current)
           : currentProviders;
@@ -2385,12 +2385,12 @@ export const layerWsRpc = (
                 providers = yield* providerRegistry.refreshInstance(instance.instanceId);
               }
             }
-            const publishedProviders = yield* providerRegistry.getPublishedProviders;
-            if (input.workspaceSnapshotsOnDemand !== true) return { providers: publishedProviders };
+            providers = yield* providerRegistry.getPublishedProviders; // fork: pools, see FORK.md.
+            if (input.workspaceSnapshotsOnDemand !== true) return { providers };
             const commandProviders =
               input.usageLimitsCommand === true
-                ? withUsageLimitsCommands(publishedProviders, yield* usageLimitSources.current)
-                : publishedProviders;
+                ? withUsageLimitsCommands(providers, yield* usageLimitSources.current)
+                : providers;
             const { instanceId, cwd } = input;
             if (instanceId === undefined || cwd === undefined) {
               return { providers: withoutWorkspaceSnapshots(commandProviders) };
@@ -3138,7 +3138,7 @@ export const layerWsRpc = (
                 })),
               );
               const providerStatuses = Stream.zipLatestWith(
-                providerRegistry.streamPublishedChanges,
+                providerRegistry.streamPublishedChanges, // fork: seeded with the current list, see FORK.md.
                 usageLimitSources.streamChanges.pipe(
                   Stream.changesWith(
                     usageLimitsCommand ? sameUsageLimitCommandCoverage : () => true,

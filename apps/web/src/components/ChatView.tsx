@@ -45,7 +45,7 @@ import { useStableCallback } from "../hooks/useStableCallback";
 import { useProjectScriptEditing } from "./chat/useProjectScriptEditing";
 import { RightPanelSurfaceContent } from "./chat/RightPanelSurfaceContent";
 import { usePendingThreadRequests } from "./chat/usePendingThreadRequests";
-import { composerInstanceIdFor } from "@t3tools/client-runtime/provider-pools";
+import { composerInstanceIdFor } from "@t3tools/client-runtime/provider-pools"; // fork: see FORK.md.
 import { isScratchProject } from "@t3tools/client-runtime/state/projects";
 import { visibleThreadPullRequests } from "@t3tools/shared/threadPullRequests";
 import {
@@ -191,7 +191,7 @@ import { stackedThreadToast, toastManager } from "./ui/toast";
 import { projectScriptIdFromCommand } from "~/projectScripts";
 import { newMessageId } from "~/lib/utils";
 import {
-  deriveComposerProviderInstanceEntries,
+  deriveComposerProviderInstanceEntries, // fork: replaces apply/derive/sort, see FORK.md.
   NO_PROVIDER_MODEL_SELECTION,
   shouldShowInstanceBadge,
 } from "../providerInstances";
@@ -1200,14 +1200,14 @@ export default function ChatView(props: ChatViewProps) {
     autoUpdateEnvironments,
   });
   const providerInstanceEntries = deriveComposerProviderInstanceEntries(
-    providerStatuses,
+    providerStatuses, // fork: see FORK.md.
     settings,
     activeProject?.id ?? null,
   );
   const activeThreadModelInstanceId = activeThread?.modelSelection.instanceId;
   const { selectedProviderEntry, requestedDriverKind } = resolveComposerProviderSelection({
     entries: providerInstanceEntries,
-    providers: providerStatuses,
+    providers: providerStatuses, // fork: see FORK.md.
     candidateInstanceIds: [
       selectedProviderByThreadId,
       activeRuntime?.providerInstanceId,
@@ -1574,14 +1574,14 @@ export default function ChatView(props: ChatViewProps) {
     availableEditors,
     openInCwd: gitCwd,
   });
-  const lockedAccountInstanceId = lockedProvider
+  const lockedAccountInstanceId = lockedProvider // fork: see FORK.md.
     ? (activeRuntime?.providerInstanceId ?? activeThread?.modelSelection.instanceId ?? null)
     : null;
   const manualCompactionProviderAvailable = hasAvailableCompactionProvider({
     providers: providerInstanceEntries,
     driverKind: selectedProvider,
     instanceId: activeProviderInstanceId,
-    lockedInstanceId:
+    lockedInstanceId: // fork: a pooled account counts as its pool, see FORK.md.
       lockedAccountInstanceId === null
         ? null
         : composerInstanceIdFor(providerStatuses, lockedAccountInstanceId),

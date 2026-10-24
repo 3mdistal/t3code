@@ -18,7 +18,7 @@ import {
   GitBranchIcon,
   GlobeIcon,
   InfoIcon,
-  LayersIcon,
+  LayersIcon, // fork: see FORK.md.
   MessageSquareTextIcon,
   MessagesSquareIcon,
   PanelsTopLeftIcon,
@@ -48,7 +48,7 @@ import {
 } from "../ui/sidebar";
 import { scrollToSettingsTarget } from "./settingsLayout";
 import {
-  hasProviderPoolsEnvironment,
+  hasProviderPoolsEnvironment, // fork: see FORK.md.
   searchSettings,
   revealSettingsSearchTarget,
   SETTINGS_NAV_GROUPS,
@@ -58,7 +58,7 @@ import {
 } from "./settingsSearch";
 import { useAvailableSettingsSearchItems } from "./useAvailableSettingsSearchItems";
 import { validateSettingsScopeSearch } from "./settingsScope";
-import { useEnvironments } from "~/state/environments";
+import { useEnvironments } from "~/state/environments"; // fork: see FORK.md.
 
 const SnapShotIcon = createLucideIcon("snap-shot", [
   [
@@ -95,7 +95,7 @@ const SETTINGS_SECTION_ICONS: Readonly<
   "/settings/keybindings": KeyboardIcon,
   "/settings/snap-shot": SnapShotIcon,
   "/settings/providers": BotIcon,
-  "/settings/account-pools": LayersIcon,
+  "/settings/account-pools": LayersIcon, // fork: see FORK.md.
   "/settings/threads": MessagesSquareIcon,
   "/settings/browser": GlobeIcon,
   "/settings/devices": SmartphoneIcon,
@@ -132,8 +132,8 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
   const currentSearch = useLocation({ select: (location) => location.search });
   const scopeSearch = validateSettingsScopeSearch(currentSearch);
   const activePath = SETTINGS_DETAIL_PAGE_PARENTS[pathname] ?? pathname;
-  const { environments } = useEnvironments();
-  const providerPoolsAvailable = hasProviderPoolsEnvironment(environments);
+  const { environments } = useEnvironments(); // fork: see FORK.md.
+  const providerPoolsAvailable = hasProviderPoolsEnvironment(environments); // fork: see FORK.md.
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [query, setQuery] = useState("");
   // Below md the nav is an icon rail; searching expands it over the page.
@@ -384,27 +384,28 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
                       </h3>
                     ) : null}
                     <SidebarMenu>
-                      {group.paths
-                        .filter((to) => to !== "/settings/account-pools" || providerPoolsAvailable)
-                        .map((to) => {
-                          const Icon = SETTINGS_SECTION_ICONS[to];
-                          const isActive = activePath === to || activePath.startsWith(`${to}/`);
-                          return (
-                            <SidebarMenuItem key={to}>
-                              <SidebarMenuButton
-                                isActive={isActive}
-                                onClick={() => handleSectionClick(to)}
+                      {group.paths.map((to) => {
+                        // fork: only where a server supports account pools, see FORK.md.
+                        if (to === "/settings/account-pools" && !providerPoolsAvailable)
+                          return null;
+                        const Icon = SETTINGS_SECTION_ICONS[to];
+                        const isActive = activePath === to || activePath.startsWith(`${to}/`);
+                        return (
+                          <SidebarMenuItem key={to}>
+                            <SidebarMenuButton
+                              isActive={isActive}
+                              onClick={() => handleSectionClick(to)}
+                            >
+                              <Icon />
+                              <span
+                                className={cn("truncate", !compactSearchOpen && "max-md:sr-only")}
                               >
-                                <Icon />
-                                <span
-                                  className={cn("truncate", !compactSearchOpen && "max-md:sr-only")}
-                                >
-                                  {SETTINGS_SECTION_LABELS[to]}
-                                </span>
-                              </SidebarMenuButton>
-                            </SidebarMenuItem>
-                          );
-                        })}
+                                {SETTINGS_SECTION_LABELS[to]}
+                              </span>
+                            </SidebarMenuButton>
+                          </SidebarMenuItem>
+                        );
+                      })}
                     </SidebarMenu>
                   </div>
                 ))}

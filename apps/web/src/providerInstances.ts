@@ -11,7 +11,7 @@ import {
   type ServerSettings,
   type ServerProviderState,
 } from "@t3tools/contracts";
-import { foldProviderPoolsForComposer } from "@t3tools/client-runtime/provider-pools";
+import { foldProviderPoolsForComposer } from "@t3tools/client-runtime/provider-pools"; // fork: see FORK.md.
 import {
   normalizeProviderAccentColor,
   resolveProviderInstanceDisplayName,
@@ -22,7 +22,7 @@ export { normalizeProviderAccentColor, shouldShowInstanceBadge };
 
 type ProviderInstanceSettings = Pick<
   ServerSettings,
-  "providerInstances" | "projectSettingsOverrides" | "providerPools"
+  "providerInstances" | "projectSettingsOverrides" | "providerPools" // fork: see FORK.md.
 >;
 
 /** Placeholder for untargetable drafts. Never persist or dispatch it; disable send until replaced. */
@@ -101,7 +101,7 @@ export function deriveProviderInstanceEntries(
 /** Instance ids repeat across environments; lookups must stay scoped. */
 export function deriveProviderEntriesByEnvironment(
   providersByEnvironment: Iterable<
-    readonly [string, ReadonlyArray<ServerProvider>, ProviderInstanceSettings?]
+    readonly [string, ReadonlyArray<ServerProvider>, ProviderInstanceSettings?] // fork: see FORK.md.
   >,
 ): ReadonlyMap<string, ReadonlyMap<string, ProviderInstanceEntry>> {
   const byEnvironment = new Map<string, ReadonlyMap<string, ProviderInstanceEntry>>();
@@ -122,7 +122,7 @@ export function deriveProviderEntriesByEnvironment(
 /** projectId applies project overrides; explicit null uses machine settings. */
 export function applyProviderInstanceSettings(
   entries: ReadonlyArray<ProviderInstanceEntry>,
-  settings: ProviderInstanceSettings,
+  settings: ProviderInstanceSettings, // fork: see FORK.md.
   projectId: ProjectId | null,
 ): ReadonlyArray<ProviderInstanceEntry> {
   return entries.map((entry) => {
@@ -176,17 +176,17 @@ export function sortProviderInstanceEntries(
   }
   const sorted: ProviderInstanceEntry[] = [];
   for (const bucket of byKind.values()) {
-    const pools = bucket.filter((entry) => entry.snapshot.pool?.role === "pool");
+    const pools = bucket.filter((entry) => entry.snapshot.pool?.role === "pool"); // fork: see FORK.md.
     const defaults = bucket.filter((entry) => entry.isDefault);
-    const customs = bucket.filter((entry) => !entry.isDefault && !pools.includes(entry));
+    const customs = bucket.filter((entry) => !entry.isDefault && !pools.includes(entry)); // fork: see FORK.md.
     sorted.push(...pools, ...defaults, ...customs);
   }
   return sorted;
 }
 
 /**
- * The catalog composer-style pickers offer: an active pool stands in for its member accounts.
- * Settings pickers keep `deriveProviderInstanceEntries` so every account stays selectable there.
+ * fork: the catalog composer-style pickers offer: an active pool stands in for its member accounts.
+ * Settings pickers keep `deriveProviderInstanceEntries`, which lists every account. See FORK.md.
  */
 export function deriveComposerProviderInstanceEntries(
   providers: ReadonlyArray<ServerProvider>,
@@ -262,9 +262,9 @@ export function resolveDefaultProviderModelSelection(
 }
 
 /**
- * Names the account a pooled thread last ran on. Account names usually repeat the provider's
+ * fork: names the account a pooled thread last ran on. Account names usually repeat the provider's
  * ("Claude - iCloud"), so the pool's name is dropped from the front to leave the part that tells
- * accounts apart.
+ * accounts apart. See FORK.md.
  */
 export function resolvePoolMemberLabel(
   providers: ReadonlyArray<ServerProvider>,

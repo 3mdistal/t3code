@@ -95,15 +95,21 @@ account with the most usage left instead of stopping. Ported from ScriptedAlchem
 the Account pools section of `docs/user/providers-claude.md`.
 
 - Pool-only files: `packages/contracts/src/providerPool.ts`, `packages/client-runtime/src/providerPools.ts`,
-  `apps/server/src/provider/providerPoolSnapshot.ts`, and `ProviderPoolCatalog.ts`, `ProviderPoolRouting.ts` and
-  `ProviderPoolFailover.ts` in `apps/server/src/orchestration-v2/`. On the web, `ProviderPoolsSettings.tsx` and
-  its `.logic.ts`, `ProviderLimitedUntil.tsx`, and `routes/settings.account-pools.tsx`.
+  `packages/shared/src/providerInstanceDisplay.ts`, `apps/server/src/provider/providerPoolSnapshot.ts`, and
+  `ProviderPoolCatalog.ts`, `ProviderPoolRouting.ts`, `ProviderPoolDispatch.ts` and `ProviderPoolFailover.ts` in
+  `apps/server/src/orchestration-v2/`. On the web, `ProviderPoolsSettings.tsx` and its `.logic.ts`,
+  `ProviderLimitedUntil.tsx`, and `routes/_chat.settings.account-pools.tsx`.
 - Upstream files it changes most:
-  - `apps/server/src/orchestration-v2/Orchestrator.ts`: every command that starts or moves a turn calls
-    `resolveRouting`, and failover is the internal `run.pool-failover` command.
+  - `apps/server/src/orchestration-v2/Orchestrator.ts`: every command that starts or moves a turn routes its
+    model choice through `ProviderPoolDispatch.ts`, and failover is the internal `run.pool-failover` command.
+    Failover reuses upstream's steering restart, which the patch moves into `replaceRunAttempt` with upstream's
+    variable names kept, so most upstream edits to that code rebase without conflicts.
   - `apps/server/src/provider/ProviderRegistry.ts`: publishes each pool as a provider and remembers limited
     accounts.
-  - `apps/server/src/serverSettings.ts`: the `providerPools` key, and the reserved `pool_` instance ids.
+  - `apps/server/src/serverSettings.ts`: the `providerPools` key, and the reserved `pool_` instance ids. Pool
+    validation lives in `ProviderPoolRouting.ts`.
+  - `runtimeLayer.ts` and the replay harness build run execution over the orchestrator, because the usage-limit
+    hook dispatches into it. Both keep upstream's layer order and reach the orchestrator through `Layer.suspend`.
   - The web model picker, the Providers settings, and the project default model picker, which lists the pool in
     place of its accounts as the composer does.
 - Stock compatibility:
@@ -116,10 +122,13 @@ the Account pools section of `docs/user/providers-claude.md`.
     `ProjectService.ts`.
   - Stock T3 drops `providerPools` the next time it saves settings, so after a rollback the accounts stay but
     the pool is gone.
-- Tests: `ProviderPoolRouting.test.ts`, `ProviderPoolFailover.test.ts`, `ProviderPoolFailover.integration.test.ts`,
-  `providerPoolSnapshot.test.ts`, `providerPool.test.ts`, `providerPools.test.ts` and
-  `ProviderPoolsSettings.logic.test.ts`, `serverSettings.fork.test.ts` and `ProjectService.fork.test.ts`, plus
-  pool cases inside upstream test files.
+- Markers: each change to an upstream file has a `fork:` comment on its line, or above it for a block. The
+  exceptions are `apps/web/src/routeTree.gen.ts`, which is generated, and the `package.json` files of
+  `client-runtime` and `shared`, which can't hold comments.
+- Tests: each pool-only module has a `.fork.test.ts`, and so does each upstream module the patch changes in a way
+  a test can see, such as `serverSettings`, `ProjectService`, `OrchestratorMcpService`, `ScheduledTaskService`,
+  `providerStatusCache`, `ChatView.logic`, `providerInstances` and `handoff`. Upstream test files keep only marked
+  lines that the patch's required fields need, such as `providerPools: {}` or `markLimited` in a mock.
 
 ## Versions
 

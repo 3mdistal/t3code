@@ -48,11 +48,11 @@ import {
 import { formatRelativeTime } from "../../timestampFormat";
 import { useEnvironmentSettings } from "../../hooks/useSettings";
 import { getCustomModelOptionsByInstance } from "../../modelSelection";
-import { deriveComposerProviderInstanceEntries } from "../../providerInstances";
+import { deriveComposerProviderInstanceEntries } from "../../providerInstances"; // fork: see FORK.md.
 import { usePrimaryCloudLinkState } from "../../cloud/primaryCloudLinkState";
 import { requestConfirmDialog } from "../../confirmDialog";
 import { webhookAddress } from "@t3tools/client-runtime/webhook-address";
-import { composerModelSelectionFor } from "@t3tools/client-runtime/provider-pools";
+import { composerModelSelectionFor } from "@t3tools/client-runtime/provider-pools"; // fork: see FORK.md.
 import { Link, useNavigate } from "@tanstack/react-router";
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { useNowMinute } from "../../hooks/useNowMinute";
@@ -1148,8 +1148,8 @@ function ScheduledTaskEditorForm({
     : task;
   const selectedProjectId = draft.projectId || projects[0]?.id || "";
   const selectedProject = projects.find((project) => project.id === selectedProjectId);
-  // A task's runs start threads the way the composer does, so it offers a pool in place of its
-  // accounts, and shows a task saved on the pool's first account as the pool.
+  // fork: a task's runs start threads the way the composer does, so it offers a pool in place of
+  // its accounts, and shows a task saved on the pool's first account as the pool. See FORK.md.
   const instanceEntries = deriveComposerProviderInstanceEntries(
     providers,
     settings,
@@ -1157,7 +1157,7 @@ function ScheduledTaskEditorForm({
   );
 
   const firstInstance = instanceEntries[0];
-  const keyedSelection = draft.modelKey ? splitModelKey(draft.modelKey) : null;
+  const keyedSelection = draft.modelKey ? splitModelKey(draft.modelKey) : null; // fork: see FORK.md.
   const draftSelection =
     keyedSelection === null ? null : composerModelSelectionFor(providers, keyedSelection);
   const baseModelSelection =
@@ -1241,7 +1241,7 @@ function ScheduledTaskEditorForm({
       return;
     }
     const modelSelection =
-      baseModelSelection !== null &&
+      baseModelSelection !== null && // fork: see FORK.md.
       baseModelSelection.instanceId === selection.instanceId &&
       baseModelSelection.model === selection.model
         ? baseModelSelection

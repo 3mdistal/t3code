@@ -91,7 +91,7 @@ export function resolvePromptLinkModelSelection(
   providers: ReadonlyArray<
     Pick<
       ServerProvider,
-      "instanceId" | "driver" | "enabled" | "availability" | "status" | "pool"
+      "instanceId" | "driver" | "enabled" | "availability" | "status" | "pool" // fork: see FORK.md.
     > & {
       readonly models: ReadonlyArray<
         SelectableModelOption & { readonly isDefault?: boolean | undefined }
@@ -101,7 +101,7 @@ export function resolvePromptLinkModelSelection(
   request: { readonly provider: string; readonly model: string | null },
 ): { readonly selection: ModelSelection; readonly exact: boolean } | null {
   const driver = PROVIDER_ALIASES[request.provider] ?? request.provider;
-  // The pool outranks its members, which composer pickers no longer offer.
+  // fork: the pool outranks its members, which composer pickers no longer offer. See FORK.md.
   const usable = [
     ...providers.filter((provider) => provider.pool?.role === "pool"),
     ...providers.filter((provider) => provider.pool?.role !== "pool"),
