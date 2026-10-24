@@ -143,6 +143,21 @@ on that machine. Existing threads stay where they started. If resource checks ar
 unavailable or all eligible machines are full, choose a machine manually to continue.
 Mobile keeps its manual environment selection.
 
+### Memory and CPU limits
+
+On Windows and macOS, each machine watches its own memory and CPU. When a machine
+runs low, work that agents and scheduled tasks start waits in its thread's queue,
+with a notice explaining why. Messages you send yourself from the app always start.
+Held work then starts on its own, one thread at a time, oldest first, once the
+machine has room again. Choose **Resume** in a thread's composer to start its work now.
+
+To let one thread's agents launch work anyway, send `launch anyway` in that thread.
+It counts while it's your latest message there.
+
+When memory is critically low, T3 also stops the newest running turn every 30 seconds
+until memory recovers. It skips turns waiting for your answer. A stopped thread
+continues later from where it was interrupted.
+
 ### Tailscale HTTPS
 
 Join both devices to the same tailnet. In the desktop app, enable **Tailscale

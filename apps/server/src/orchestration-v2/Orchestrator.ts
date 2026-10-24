@@ -150,6 +150,7 @@ import {
   noEligibleMemberCause,
   planQueuedRunRepin,
 } from "./ProviderPoolDispatch.ts"; // fork: see FORK.md.
+import { makeLimitsAdmission } from "../resourceLimits/OrchestratorAdmission.ts"; // fork: limits, see FORK.md.
 import * as ProviderContinuationRequests from "@t3tools/provider-core/server/ProviderContinuationRequests";
 import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
 import * as RunExecutionService from "./RunExecutionService.ts";
@@ -994,6 +995,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   const threadDispatch = yield* ThreadCommandExecutor.ThreadCommandExecutor;
   const poolRouting = yield* makePoolRouting; // fork: account pools, see FORK.md.
   const { resolveRouting } = poolRouting;
+  const limitsAdmission = yield* makeLimitsAdmission; // fork: limits, see FORK.md.
 
   const routeSelection = Effect.fn("Orchestrator.routeSelection")(function* (
     input: Parameters<typeof resolveRouting>[0] & {
@@ -1508,6 +1510,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         readonly failedRunId?: RunId;
         readonly endedRunId?: RunId;
         readonly queuedRunId?: RunId;
+        readonly admitted?: boolean; // fork: limits, see FORK.md.
       },
     ) {
       if (!(yield* projectionStore.canStartQueuedRun(threadId))) return;
@@ -1532,6 +1535,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const queuedMessage = projection.messages.find(
         (candidate) => candidate.id === storedQueuedRun.userMessageId,
       );
+      // fork: limits, see FORK.md. The limits may hold the run in the queue instead.
+      const limitsHold = yield* limitsAdmission.holdQueuedRun({
+        admitted: options?.admitted,
+        projection,
+        run: storedQueuedRun,
+        ordinal: nextTurnItemOrdinal(projection),
+      });
+      if (limitsHold !== undefined) {
+        return yield* writeSystemEvents([limitsHold.run, limitsHold.notice]);
+      }
       const modelSelection = queuedRunModelSelection(projection, storedQueuedRun);
       // fork: the run may be repinned to another account below, see FORK.md.
       const pinnedRun = {
@@ -5749,7 +5762,18 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       dispatchMode.type === "defer_start" ||
       dispatchMode.type === "start_immediately" ||
       dispatchMode.type === "queue_after_active";
-    const shouldQueue = queueBehindRun !== undefined && startsOrQueuesRun;
+    // fork: limits, see FORK.md. With nothing to queue behind, a run the limits hold queues on its own.
+    const heldByLimits = yield* limitsAdmission.newRunNotice({
+      projection,
+      message: command,
+      mode: dispatchMode.type,
+      skip:
+        queueBehindRun !== undefined ||
+        pendingMergeBackTransfers.length > 0 ||
+        pendingForkTransferForThread(projection) !== undefined,
+    });
+    const shouldQueue =
+      (queueBehindRun !== undefined || heldByLimits !== undefined) && startsOrQueuesRun; // fork: limits, see FORK.md.
     // Client messages resume held queues; server continuations and scheduled tasks do not.
     // Provider failure or usage limits re-hold the queue. Failed worktree setup keeps it held
     // until a worktree exists, so queued messages cannot start in the project checkout.
@@ -5793,9 +5817,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const queueProviderThread =
         activeProviderThread ??
         projection.providerThreads.find(
-          (candidate) => candidate.id === queueBehindRun.providerThreadId,
+          (candidate) => candidate.id === queueBehindRun?.providerThreadId, // fork: limits, see FORK.md.
         );
-      if (queueProviderThread === undefined) {
+      // fork: limits, see FORK.md. A run the limits hold may have no run to queue behind.
+      if (queueProviderThread === undefined && queueBehindRun !== undefined) {
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
           commandType: command.type,
@@ -5806,6 +5831,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const ordinal = nextRunOrdinal(projection);
       const runId = idAllocator.derive.run({ threadId: command.threadId, ordinal });
       const targetProviderThread =
+        queueProviderThread !== undefined && // fork: limits, see FORK.md.
         modelSelection.instanceId === queueProviderThread.providerInstanceId
           ? queueProviderThread
           : rootProviderThreadsForProvider(projection, modelSelection.instanceId)[0];
@@ -5853,7 +5879,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const attemptId = idAllocator.derive.runAttempt({ runId, attemptOrdinal: 1 });
       const rootNodeId = idAllocator.derive.rootNode({ runId });
       const checkpointScope =
-        queueBehindRun.status === "preparing" || worktreeMissingRun !== undefined
+        queueBehindRun?.status === "preparing" || worktreeMissingRun !== undefined // fork: limits, see FORK.md.
           ? null
           : yield* runtimePolicy.resolve({ thread: projection.thread, modelSelection }).pipe(
               Effect.flatMap((resolvedRuntimePolicy) =>
@@ -5903,6 +5929,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         activeAttemptId: attemptId,
         status: "queued",
         ...(worktreeMissingRun !== undefined ||
+        heldByLimits !== undefined || // fork: limits, see FORK.md.
         (heldRunsToRelease.length === 0 && queueIsHeld && !wakeSkipsHold)
           ? { queueHeld: true }
           : {}),
@@ -6060,6 +6087,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             updatedAt: now,
           },
         });
+      }
+      // fork: limits, see FORK.md.
+      if (heldByLimits !== undefined) {
+        const ordinal = yield* nextTurnItemOrdinal(projection);
+        yield* emitEvent(limitsAdmission.noticeEvent(run, heldByLimits, ordinal, now));
       }
       if (goalStopRunId !== undefined) {
         return yield* stopRunForQueuedCommand({
@@ -9841,6 +9873,17 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           updatedAt: now,
         },
       });
+      // fork: limits, see FORK.md. A run the limits hold waits in the queue instead of starting.
+      const limitsHold = yield* limitsAdmission.holdPreparedRun({
+        projection,
+        run: state.run,
+        ordinal: nextTurnItemOrdinal(projection),
+      });
+      if (limitsHold !== undefined) {
+        yield* emitEvent(limitsHold.run);
+        yield* emitEvent(limitsHold.notice);
+        return;
+      }
       yield* emitEvent({
         type: "run.updated",
         threadId: command.threadId,
@@ -13099,7 +13142,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         yield* mapDispatchError(command)(
           startNextQueuedRun(
             command.threadId,
-            command.type === "queued-run.start" ? { queuedRunId: command.runId } : undefined,
+            command.type === "queued-run.start"
+              ? { queuedRunId: command.runId, admitted: true } // fork: limits, see FORK.md.
+              : { admitted: true }, // fork: limits, see FORK.md.
           ),
         );
       }
@@ -13244,7 +13289,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       yield* mapDispatchError(command)(
         startNextQueuedRun(
           command.threadId,
-          command.type === "queued-run.start" ? { queuedRunId: command.runId } : undefined,
+          command.type === "queued-run.start"
+            ? { queuedRunId: command.runId, admitted: true } // fork: limits, see FORK.md.
+            : { admitted: true }, // fork: limits, see FORK.md.
         ),
       );
     }
