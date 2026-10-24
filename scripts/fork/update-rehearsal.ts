@@ -227,8 +227,16 @@ async function expectUpToDate(version: string, env: Record<string, string>): Pro
   const { app, call, settled } = await launch(env);
   try {
     NodeAssert.equal(await app.evaluate(({ app }) => app.getVersion()), version);
-    await call("checkForUpdate");
-    const checked = await settled("the check to finish", 120_000, ["idle", "checking"]);
+    // Right after releases change, github.com's releases/latest can answer 404
+    // for a while, which the updater reports as an error, so errors retry.
+    const checked = await waitFor("a check to finish without an error", 900_000, async () => {
+      await call("checkForUpdate");
+      const result = await settled("the check to finish", 120_000, ["idle", "checking"]);
+      if (result.status !== "error") return result;
+      log(`The check failed (${result.message}); checking again.`);
+      await NodeTimers.setTimeout(15_000);
+      return undefined;
+    });
     NodeAssert.equal(checked.status, "up-to-date", JSON.stringify(checked));
     log(`${version} sees no update.`);
   } catch (error) {
