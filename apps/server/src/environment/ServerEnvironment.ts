@@ -258,7 +258,7 @@ export const make = Effect.gen(function* () {
       modelCatalogRefresh: true,
       usagePriceOverrides: true,
       usageModelAliases: true,
-      providerPools: true,
+      providerPools: true, // fork: account pools, see FORK.md.
       threadPinning: true,
       threadPinReorder: true,
       threadActiveReorder: true,

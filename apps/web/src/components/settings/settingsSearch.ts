@@ -31,7 +31,7 @@ export type SettingsPath =
   | "/settings/threads"
   | "/settings/browser"
   | "/settings/devices"
-  | "/settings/account-pools"
+  | "/settings/account-pools" // fork: see FORK.md.
   | "/settings/scheduled-tasks"
   | "/settings/source-control"
   | "/settings/worktrees"
@@ -76,7 +76,7 @@ export interface SettingsSearchItem {
   readonly textGeneratorsOnly?: boolean;
   readonly secondary?: boolean;
   readonly requiresThreadAutoSettlement?: boolean;
-  readonly requiresProviderPools?: boolean;
+  readonly requiresProviderPools?: boolean; // fork: see FORK.md.
 }
 
 export interface SettingsSearchAvailability {
@@ -87,7 +87,7 @@ export interface SettingsSearchAvailability {
   readonly canManageLocalBackend: boolean;
   readonly isWslSettingsRowVisible: boolean;
   readonly hasThreadAutoSettlement: boolean;
-  readonly hasProviderPools: boolean;
+  readonly hasProviderPools: boolean; // fork: see FORK.md.
   readonly managedTunnelActive?: boolean;
   readonly hasPeerLinkHost?: boolean;
   readonly hasFastWorktreeCheckoutEnvironment?: boolean;
@@ -109,7 +109,7 @@ export const SETTINGS_SECTION_LABELS: Readonly<Record<SettingsPath, string>> = {
   "/settings/threads": msg("Threads"),
   "/settings/browser": msg("Browser"),
   "/settings/devices": msg("Devices"),
-  "/settings/account-pools": "Account pools",
+  "/settings/account-pools": "Account pools", // fork: see FORK.md.
   "/settings/scheduled-tasks": msg("Scheduled tasks"),
   "/settings/source-control": msg("Source control & issues"),
   "/settings/worktrees": msg("Worktrees"),
@@ -155,7 +155,7 @@ export const SETTINGS_NAV_GROUPS: ReadonlyArray<{
     heading: msg("Agents"),
     paths: [
       "/settings/providers",
-      "/settings/account-pools",
+      "/settings/account-pools", // fork: see FORK.md.
       "/settings/threads",
       "/settings/browser",
       "/settings/devices",
@@ -1043,8 +1043,8 @@ export const SETTINGS_SEARCH_ITEMS = [
     ],
   },
   {
-    id: "account-pools",
-    title: "Account pools",
+    id: "account-pools", // fork: see FORK.md.
+    title: msg("Account pools"),
     to: "/settings/account-pools",
     searchTerms: [
       msg(
@@ -1499,7 +1499,7 @@ const SETTINGS_CATEGORY_SCOPES: Readonly<Record<SettingsPath, SettingsSearchScop
   "/settings/threads": null,
   "/settings/browser": null,
   "/settings/devices": null,
-  "/settings/account-pools": null,
+  "/settings/account-pools": null, // fork: see FORK.md.
   "/settings/source-control": "environment-defaults",
   "/settings/worktrees": "project-defaults",
   "/settings/connections": "connections",
@@ -1585,6 +1585,7 @@ export function getThreadAutoSettlementSearchAvailability(
   };
 }
 
+// fork: whether any environment supports account pools, see FORK.md.
 interface ProviderPoolsSearchEnvironment {
   readonly serverConfig: {
     readonly environment: { readonly capabilities: { readonly providerPools?: boolean } };
@@ -1655,7 +1656,7 @@ export function filterAvailableSettingsSearchItems(
       (!item.primaryEnvironmentOnly || availability.hasPrimaryEnvironment === true) &&
       (!item.wslAvailableOnly || availability.isWslSettingsRowVisible) &&
       (!item.requiresThreadAutoSettlement || availability.hasThreadAutoSettlement) &&
-      (!item.requiresProviderPools || availability.hasProviderPools) &&
+      (!item.requiresProviderPools || availability.hasProviderPools) && // fork: see FORK.md.
       (!item.managedTunnelOnly || availability.managedTunnelActive === true) &&
       (!item.peerLinksOnly || availability.hasPeerLinkHost === true) &&
       (!item.fastWorktreeCheckoutOnly ||

@@ -127,7 +127,7 @@ function SettingsContentLayout() {
   const location = useLocation();
   const { search, environment } = useSettingsScope();
   const contentScopeKey =
-    location.pathname === "/settings/diagnostics" ||
+    location.pathname === "/settings/diagnostics" || // fork: see FORK.md.
     location.pathname === "/settings/providers" ||
     location.pathname === "/settings/account-pools"
       ? environment?.environmentId
@@ -171,7 +171,7 @@ function SettingsRouteLayout() {
       singleEnvironment={
         pathname === "/settings/providers" ||
         pathname === "/settings/secrets" ||
-        pathname === "/settings/account-pools"
+        pathname === "/settings/account-pools" // fork: see FORK.md.
       }
       deviceOnly={SETTINGS_DEVICE_ONLY_PATHS.has(pathname)}
       onChange={(next) => {

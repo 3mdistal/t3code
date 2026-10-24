@@ -233,6 +233,7 @@ const cancelBackgroundOnlyTask = (
             layerAdapters,
             Layer.mock(ProviderRegistry.ProviderRegistry)({
               getProviders: Effect.succeed([provider]),
+              getPublishedProviders: Effect.succeed([provider]), // fork: pools, see FORK.md.
             }),
             Layer.mock(ProjectService.ProjectService)({}),
             Layer.mock(SecretRequests.SecretRequests)({}),

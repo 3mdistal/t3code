@@ -1055,9 +1055,9 @@ it.effect.each([
         }),
         Layer.mock(ProviderRegistry.ProviderRegistry)({
           getProviders: Effect.succeed([]),
-          getPublishedProviders: Effect.succeed([]),
+          getPublishedProviders: Effect.succeed([]), // fork: see FORK.md.
           streamChanges: Stream.never,
-          streamPublishedChanges: Stream.never,
+          streamPublishedChanges: Stream.never, // fork: see FORK.md.
         }),
         Layer.mock(UsageLimitSources.UsageLimitSources)({ streamChanges: Stream.make([]) }),
         Layer.mock(RemoteOpenTargets.RemoteOpenTargets)({
@@ -1434,8 +1434,14 @@ it.effect("on-demand clients get provider config without workspace snapshots", (
       }),
       Layer.mock(ProviderRegistry.ProviderRegistry)({
         getProviders: Effect.sync(() => registryProviders),
+        getPublishedProviders: Effect.sync(() => registryProviders), // fork: see FORK.md.
         streamChanges: Stream.fromQueue(providerChanges).pipe(
           Stream.tap(() => Queue.offer(pulled, undefined)),
+        ),
+        // fork: the published stream starts with the current list, see FORK.md.
+        streamPublishedChanges: Stream.concat(
+          Stream.fromEffect(Effect.sync(() => registryProviders)),
+          Stream.fromQueue(providerChanges).pipe(Stream.tap(() => Queue.offer(pulled, undefined))),
         ),
         refresh: () => Effect.sync(() => registryProviders),
         refreshWorkspaceSnapshot: () => Effect.sync(() => registryProviders),
@@ -1801,6 +1807,8 @@ it.effect("a missing thread worktree gets its project's skills in the cwd snapsh
         })),
       );
     const responses = yield* Queue.unbounded<unknown>();
+    // fork: the handler answers with the published list, which the refresh updates; see FORK.md.
+    let published: ReadonlyArray<ServerProvider> = [provider];
     const services = Layer.mergeAll(
       layerUnusedConfigRpcServices,
       Layer.mock(ProviderRegistry.ProviderRegistry)({
@@ -1808,7 +1816,14 @@ it.effect("a missing thread worktree gets its project's skills in the cwd snapsh
         refreshWorkspaceSnapshot: (input) =>
           Effect.map(scan(input.scanCwd ?? input.cwd), (snapshot) => [
             { ...provider, workspaceSnapshots: [{ ...snapshot, cwd: input.cwd }] },
-          ]),
+          ]).pipe(
+            Effect.tap((providers) =>
+              Effect.sync(() => {
+                published = providers; // fork: see FORK.md.
+              }),
+            ),
+          ),
+        getPublishedProviders: Effect.sync(() => published), // fork: see FORK.md.
       }),
       Layer.mock(ProviderInstanceRegistry.ProviderInstanceRegistry)({
         listInstances: Effect.succeed([]),

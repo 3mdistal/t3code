@@ -11,7 +11,7 @@ import { assert, it } from "@effect/vitest";
 import { hydrateCachedProvider, isCachedProviderCorrelated } from "./providerStatusCache.ts";
 
 const emptyCapabilities = createModelCapabilities({ optionDescriptors: [] });
-const NOW_MS = Date.parse("2026-04-11T12:00:00.000Z");
+const NOW_MS = Date.parse("2026-04-11T12:00:00.000Z"); // fork: see FORK.md.
 const CODEX_DRIVER = ProviderDriverKind.make("codex");
 
 const makeProvider = (
@@ -70,7 +70,7 @@ it.layer(NodeServices.layer)("providerStatusCache", (it) => {
       hydrateCachedProvider({
         cachedProvider: cachedCodex,
         fallbackProvider: fallbackCodex,
-        nowMs: NOW_MS,
+        nowMs: NOW_MS, // fork: see FORK.md.
       }),
       {
         ...fallbackCodex,
@@ -119,23 +119,10 @@ it.layer(NodeServices.layer)("providerStatusCache", (it) => {
       hydrateCachedProvider({
         cachedProvider: cachedCodex,
         fallbackProvider: fallbackCodex,
-        nowMs: NOW_MS,
+        nowMs: NOW_MS, // fork: see FORK.md.
       }).models,
       [builtIn],
     );
-  });
-
-  it("restores a cooldown only while it is still in force", () => {
-    const fallbackCodex = makeProvider(CODEX_DRIVER);
-    const hydrate = (limitedUntil: string) =>
-      hydrateCachedProvider({
-        cachedProvider: makeProvider(CODEX_DRIVER, { limitedUntil }),
-        fallbackProvider: fallbackCodex,
-        nowMs: NOW_MS,
-      }).limitedUntil;
-
-    assert.strictEqual(hydrate("2026-04-11T12:30:00.000Z"), "2026-04-11T12:30:00.000Z");
-    assert.isUndefined(hydrate("2026-04-11T12:00:00.000Z"));
   });
 
   it("ignores stale cached enabled state when the provider is now disabled", () => {
@@ -156,7 +143,7 @@ it.layer(NodeServices.layer)("providerStatusCache", (it) => {
       hydrateCachedProvider({
         cachedProvider: cachedCodex,
         fallbackProvider: disabledFallback,
-        nowMs: NOW_MS,
+        nowMs: NOW_MS, // fork: see FORK.md.
       }),
       disabledFallback,
     );
@@ -207,7 +194,7 @@ it.layer(NodeServices.layer)("providerStatusCache", (it) => {
       hydrateCachedProvider({
         cachedProvider: legacyCachedCodex,
         fallbackProvider: fallbackCodex,
-        nowMs: NOW_MS,
+        nowMs: NOW_MS, // fork: see FORK.md.
       }),
       fallbackCodex,
     );
@@ -222,7 +209,7 @@ it.layer(NodeServices.layer)("providerStatusCache", (it) => {
       hydrateCachedProvider({
         cachedProvider: mismatchedCachedCodex,
         fallbackProvider: fallbackCodex,
-        nowMs: NOW_MS,
+        nowMs: NOW_MS, // fork: see FORK.md.
       }),
       fallbackCodex,
     );

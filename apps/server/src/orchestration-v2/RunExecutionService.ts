@@ -58,7 +58,7 @@ import {
 } from "@t3tools/provider-core/server/failure";
 import * as RunFinalizationService from "./RunFinalizationService.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
-import { ProviderUsageLimitHook } from "./ProviderPoolFailover.ts";
+import { ProviderUsageLimitHook } from "./ProviderPoolFailover.ts"; // fork: see FORK.md.
 import * as TurnItemPositionStore from "./TurnItemPositionStore.ts";
 import { userFacingDatabaseErrorMessage } from "./UserFacingErrors.ts";
 
@@ -720,7 +720,7 @@ export const layer: Layer.Layer<
     const finalizationObserver = yield* RunFinalizationService.RunFinalizationObserver;
     const turnAnalytics = yield* ProviderUsageAnalytics.ProviderTurnAnalytics;
     const threadCommands = yield* ThreadCommandExecutor.ThreadCommandExecutor;
-    const usageLimitHook = yield* ProviderUsageLimitHook;
+    const usageLimitHook = yield* ProviderUsageLimitHook; // fork: see FORK.md.
 
     const writeFinalRunEvents = Effect.fn("RunExecutionService.writeFinalRunEvents")(
       function* (input: {
@@ -1268,12 +1268,13 @@ export const layer: Layer.Layer<
             : input.hasWorkspaceMoved(),
         );
         const finalizeRootRun = Effect.fn("RunExecutionService.finalizeRootRun")(function* (
-          reported: ProviderTerminalEvent,
+          reported: ProviderTerminalEvent, // fork: see FORK.md.
           abandonedProviderTurn?: OrchestrationV2ProviderTurn,
         ) {
           if (yield* Ref.get(rootRunFinalized)) {
             return;
           }
+          // fork: a usage limit on a pooled account fails over, see FORK.md.
           const resolution =
             reported.status === "failed" && reported.failure.class === "usage_limit"
               ? yield* usageLimitHook.onUsageLimit({
@@ -1313,7 +1314,7 @@ export const layer: Layer.Layer<
               ...(input.shouldFinalizeRun === undefined
                 ? {}
                 : { shouldFinalizeRun: input.shouldFinalizeRun }),
-              // Stop, or a pool failover that won, may commit between the
+              // fork: stop, or a pool failover that won, may commit between the
               // ownership read and this terminal write. Gate the events and
               // checkpoint together.
               ...(input.shouldFinalizeRun === undefined && resolution === null
@@ -1337,7 +1338,7 @@ export const layer: Layer.Layer<
               openRunOwnedSubagentsTerminal: terminal,
               ...(abandonedProviderTurn === undefined ? {} : { abandonedProviderTurn }),
               terminal: settledTerminal,
-              failureItemPersisted: terminal === reported && settledTerminal.status === "failed",
+              failureItemPersisted: terminal === reported && settledTerminal.status === "failed", // fork: see FORK.md.
               refreshAfterTurn,
             }).pipe(
               Effect.mapError(

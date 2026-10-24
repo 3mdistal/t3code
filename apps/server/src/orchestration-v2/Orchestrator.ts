@@ -81,8 +81,6 @@ import {
   TurnItemId,
   TrimmedNonEmptyString,
   managedRuntimeModeCeilingMessage,
-  findProviderPool,
-  providerPoolDriver,
 } from "@t3tools/contracts";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import { modelSelectionsEqual } from "@t3tools/shared/model";
@@ -190,8 +188,11 @@ import {
   type ShellSnapshotOptions,
 } from "./ProjectionStore.ts";
 import { ProviderAdapterRegistryV2 } from "./ProviderAdapterRegistry.ts";
-import { ProviderPoolCatalog } from "./ProviderPoolCatalog.ts";
-import { routeModelSelection, type RoutedSelection } from "./ProviderPoolRouting.ts";
+import {
+  makePoolRouting,
+  noEligibleMemberCause,
+  planQueuedRunRepin,
+} from "./ProviderPoolDispatch.ts"; // fork: see FORK.md.
 import * as ProviderContinuationRequests from "@t3tools/provider-core/server/ProviderContinuationRequests";
 import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
 import * as RunExecutionService from "./RunExecutionService.ts";
@@ -677,7 +678,7 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
     case "prepared-run.progress":
     case "prepared-run.fail":
     case "prepared-run.retry":
-    case "run.pool-failover":
+    case "run.pool-failover": // fork: see FORK.md.
     case "subagent.stop":
     case "run.interrupt":
     case "queued-message.promote-to-steer":
@@ -1659,41 +1660,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           organization: managedPolicy.organization,
           maxRuntimeMode: managedPolicy.limits.maxRuntimeMode,
         };
-  const poolCatalog = yield* ProviderPoolCatalog;
-
-  /**
-   * Runs wherever a selection enters a thread, so everything downstream only
-   * ever sees a concrete member: run, thread, session, and adapter ids never
-   * carry a pool id.
-   */
-  const resolveRouting = Effect.fn("Orchestrator.resolveRouting")(function* (input: {
-    readonly selection: ModelSelection;
-    readonly current: { readonly instanceId: ProviderInstanceId; readonly busy: boolean } | null;
-    readonly threadId: ThreadId;
-    readonly projectId: OrchestrationV2AppThread["projectId"];
-    readonly excluded?: ReadonlySet<ProviderInstanceId>;
-  }): Effect.fn.Return<RoutedSelection> {
-    const providers = yield* poolCatalog.getPublishedProviders;
-    // Most dispatches name no pool; keep the settings read off that path.
-    if (
-      findProviderPool(providers, input.selection.instanceId) === null &&
-      providerPoolDriver(input.selection.instanceId) === null
-    ) {
-      return { type: "unrouted", selection: input.selection };
-    }
-    const settings = yield* serverSettings.getSettings.pipe(Effect.orDie);
-    const nowMs = DateTime.toEpochMillis(yield* DateTime.now);
-    return routeModelSelection({
-      selection: input.selection,
-      providers,
-      settings,
-      projectId: input.projectId,
-      threadId: input.threadId,
-      current: input.current,
-      ...(input.excluded === undefined ? {} : { excluded: input.excluded }),
-      nowMs,
-    });
-  });
+  const poolRouting = yield* makePoolRouting; // fork: account pools, see FORK.md.
+  const { resolveRouting } = poolRouting;
 
   const routeSelection = Effect.fn("Orchestrator.routeSelection")(function* (
     input: Parameters<typeof resolveRouting>[0] & {
@@ -1706,7 +1674,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       return yield* new OrchestratorDispatchError({
         commandId: input.commandId,
         commandType: input.commandType,
-        cause: `No account in the ${routed.pool.displayName ?? routed.pool.driver} pool is enabled for this project.`,
+        cause: noEligibleMemberCause(routed),
       });
     }
     return routed;
@@ -2430,107 +2398,28 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     ]);
   });
 
-  /**
-   * A queued run was pinned to a member at dispatch. Routing it again at
-   * promotion lets a run queued behind a member that has since cooled start
-   * on a healthy sibling instead of holding the queue.
-   */
+  // fork: a queued run routes through its pool again when it starts, see FORK.md.
   const repinQueuedRun = Effect.fn("Orchestrator.repinQueuedRun")(function* (input: {
     readonly projection: OrchestrationV2ThreadProjection;
     readonly queuedRun: OrchestrationV2Run;
   }) {
     const { projection, queuedRun } = input;
-    const threadId = projection.thread.id;
-    const routed = yield* resolveRouting({
-      selection: queuedRun.modelSelection,
-      current: { instanceId: projection.thread.providerInstanceId, busy: false },
-      threadId,
-      projectId: projection.thread.projectId,
-    });
-    if (routed.type !== "routed") return null;
-    const instanceId = routed.selection.instanceId;
-    if (instanceId === queuedRun.providerInstanceId) return null;
-    const attempt = projection.attempts.find(
-      (candidate) => candidate.id === queuedRun.activeAttemptId,
-    );
-    const rootNode = projection.nodes.find((candidate) => candidate.id === queuedRun.rootNodeId);
-    const previousThread = projection.providerThreads.find(
-      (candidate) => candidate.id === queuedRun.providerThreadId,
-    );
-    if (attempt === undefined || rootNode === undefined || previousThread === undefined) {
-      return null;
-    }
-    const now = yield* DateTime.now;
-    const providerThread: OrchestrationV2ProviderThread = rootProviderThreadsForProvider(
+    const plan = planQueuedRunRepin({
       projection,
-      instanceId,
-    )[0] ?? {
-      ...previousThread,
-      id: idAllocator.derive.providerThread({
-        driver: previousThread.driver,
-        nativeThreadId: `pending:${queuedRun.id}:${instanceId}`,
+      queuedRun,
+      routed: yield* resolveRouting({
+        selection: queuedRun.modelSelection,
+        current: { instanceId: projection.thread.providerInstanceId, busy: false },
+        threadId: projection.thread.id,
+        projectId: projection.thread.projectId,
       }),
-      providerInstanceId: instanceId,
-      providerSessionId: null,
-      nativeThreadRef: null,
-      nativeConversationHeadRef: null,
-      status: "not_loaded",
-      handoffIds: [],
-      createdAt: now,
-      updatedAt: now,
-    };
-    const run: OrchestrationV2Run = {
-      ...queuedRun,
-      providerInstanceId: instanceId,
-      modelSelection: routed.selection,
-      providerThreadId: providerThread.id,
-    };
-    yield* writeSystemEvents([
-      ...(providerThread.id === previousThread.id
-        ? []
-        : [
-            {
-              type: "provider-thread.updated" as const,
-              threadId,
-              driver: providerThread.driver,
-              providerInstanceId: instanceId,
-              occurredAt: now,
-              payload: providerThread,
-            },
-          ]),
-      {
-        type: "run.updated" as const,
-        threadId,
-        runId: run.id,
-        nodeId: rootNode.id,
-        providerInstanceId: instanceId,
-        occurredAt: now,
-        payload: run,
-      },
-      {
-        type: "run-attempt.updated" as const,
-        threadId,
-        runId: run.id,
-        nodeId: rootNode.id,
-        providerInstanceId: instanceId,
-        occurredAt: now,
-        payload: {
-          ...attempt,
-          providerInstanceId: instanceId,
-          providerThreadId: providerThread.id,
-        },
-      },
-      {
-        type: "node.updated" as const,
-        threadId,
-        runId: run.id,
-        nodeId: rootNode.id,
-        providerInstanceId: instanceId,
-        occurredAt: now,
-        payload: { ...rootNode, providerThreadId: providerThread.id },
-      },
-    ]);
-    return run;
+      now: yield* DateTime.now,
+      providerThreadFor: (instanceId) => rootProviderThreadsForProvider(projection, instanceId)[0],
+      deriveProviderThreadId: idAllocator.derive.providerThread,
+    });
+    if (plan === null) return null;
+    yield* writeSystemEvents(plan.events);
+    return plan.run;
   });
 
   const isStaleQuestionWake = Effect.fn("Orchestrator.isStaleQuestionWake")(function* (
@@ -2625,7 +2514,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       },
     ) {
       if (!(yield* projectionStore.canStartQueuedRun(threadId))) return;
-      let projection = yield* readCommandProjection(threadId);
+      let projection = yield* readCommandProjection(threadId); // fork: see FORK.md.
       if (
         projection.thread.archivedAt !== null ||
         projection.thread.deletedAt !== null ||
@@ -2682,12 +2571,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         (candidate) => candidate.id === storedQueuedRun.userMessageId,
       );
       const modelSelection = queuedRunModelSelection(projection, storedQueuedRun);
+      // fork: the run may be repinned to another account below, see FORK.md.
       const pinnedRun = {
         ...storedQueuedRun,
         modelSelection,
         providerInstanceId: modelSelection.instanceId,
       };
-      const repinnedRun = yield* repinQueuedRun({ projection, queuedRun: pinnedRun });
+      const repinnedRun = yield* repinQueuedRun({ projection, queuedRun: pinnedRun }); // fork: see FORK.md.
       if (repinnedRun !== null) {
         projection = yield* readCommandProjection(threadId);
       }
@@ -4159,6 +4049,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       });
     }
 
+    // fork: a pool id routes to one of its accounts, see FORK.md.
     const modelSelection = (yield* routeSelection({
       commandId: command.commandId,
       commandType: command.type,
@@ -4175,8 +4066,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       id: command.threadId,
       projectId: command.projectId,
       title: command.title,
-      providerInstanceId: modelSelection.instanceId,
-      modelSelection,
+      providerInstanceId: modelSelection.instanceId, // fork: see FORK.md.
+      modelSelection, // fork: see FORK.md.
       runtimeMode: command.runtimeMode,
       interactionMode: command.interactionMode,
       branch: command.branch,
@@ -4208,7 +4099,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     yield* emitEvent({
       type: "thread.created",
       threadId: command.threadId,
-      providerInstanceId: modelSelection.instanceId,
+      providerInstanceId: modelSelection.instanceId, // fork: see FORK.md.
       occurredAt: now,
       payload: thread,
     });
@@ -4217,16 +4108,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         type: "provider-thread.updated",
         threadId: command.threadId,
         driver: command.importedNativeThread.ref.driver,
-        providerInstanceId: modelSelection.instanceId,
+        providerInstanceId: modelSelection.instanceId, // fork: see FORK.md.
         occurredAt: now,
         payload: {
           id: idAllocator.derive.providerThread({
             driver: command.importedNativeThread.ref.driver,
-            providerInstanceId: modelSelection.instanceId,
+            providerInstanceId: modelSelection.instanceId, // fork: see FORK.md.
             nativeThreadId: command.importedNativeThread.ref.nativeId,
           }),
           driver: command.importedNativeThread.ref.driver,
-          providerInstanceId: modelSelection.instanceId,
+          providerInstanceId: modelSelection.instanceId, // fork: see FORK.md.
           providerSessionId: null,
           appThreadId: command.threadId,
           ownerNodeId: null,
@@ -4552,6 +4443,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         cause: `Thread ${command.threadId} is deleted.`,
       });
     }
+    // fork: a pool id routes to one of its accounts, see FORK.md.
     const modelSelection =
       command.type === "thread.model-selection.set" || command.type === "provider.switch"
         ? (yield* routeSelection({
@@ -4858,7 +4750,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           .getThreadProviderContext(
             command.threadId,
             command.type === "thread.model-selection.set" || command.type === "provider.switch"
-              ? modelSelection.instanceId
+              ? modelSelection.instanceId // fork: see FORK.md.
               : undefined,
           )
           .pipe(mapDispatchError(command))
@@ -4866,12 +4758,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     const providerSwitchPlan =
       command.type === "thread.model-selection.set" || command.type === "provider.switch"
         ? yield* Effect.gen(function* () {
+            // fork: see FORK.md.
             yield* providerAdapters.get(modelSelection.instanceId).pipe(
               Effect.mapError(
                 (cause) =>
                   new OrchestratorProviderAdapterError({
                     commandId: command.commandId,
-                    providerInstanceId: modelSelection.instanceId,
+                    providerInstanceId: modelSelection.instanceId, // fork: see FORK.md.
                     cause,
                   }),
               ),
@@ -4879,7 +4772,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             const plan = yield* providerSwitchService
               .plan({
                 projection: providerContext!,
-                targetModelSelection: modelSelection,
+                targetModelSelection: modelSelection, // fork: see FORK.md.
               })
               .pipe(mapDispatchError(command));
             if (plan.instanceChanged || plan.releaseProviderSessionIds.length > 0) {
@@ -5611,8 +5504,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         case "provider.switch":
           return {
             ...thread,
-            providerInstanceId: modelSelection.instanceId,
-            modelSelection,
+            providerInstanceId: modelSelection.instanceId, // fork: see FORK.md.
+            modelSelection, // fork: see FORK.md.
             updatedAt: now,
           };
       }
@@ -5696,7 +5589,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         case "thread.interaction-mode.set":
           return "thread.interaction-mode-updated" as const;
         case "thread.model-selection.set":
-          return thread.providerInstanceId === modelSelection.instanceId
+          return thread.providerInstanceId === modelSelection.instanceId // fork: see FORK.md.
             ? ("thread.model-selection-updated" as const)
             : ("thread.provider-switched" as const);
         case "provider.switch":
@@ -7379,7 +7272,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     });
     const now = yield* DateTime.now;
     const emitEvent = emit(events, command);
-    const providers = yield* poolCatalog.getPublishedProviders;
+    const providers = yield* poolRouting.getPublishedProviders;
     const nameOf = (instanceId: ProviderInstanceId) =>
       providers.find((provider) => provider.instanceId === instanceId)?.displayName ?? instanceId;
     yield* emitEvent({
@@ -7809,6 +7702,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       ]);
       projection = applyToProjection(projection, event);
     }
+    // fork: a pool id routes to one of its accounts, see FORK.md.
     let modelSelection = (yield* routeSelection({
       commandId: command.commandId,
       commandType: command.type,
@@ -10251,6 +10145,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         });
       }
 
+      // fork: a pool id routes to one of its accounts, see FORK.md.
       const modelSelection = (yield* routeSelection({
         commandId: command.commandId,
         commandType: command.type,
@@ -10264,7 +10159,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           (cause) =>
             new OrchestratorProviderAdapterError({
               commandId: command.commandId,
-              providerInstanceId: modelSelection.instanceId,
+              providerInstanceId: modelSelection.instanceId, // fork: see FORK.md.
               cause,
             }),
         ),
@@ -10295,8 +10190,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           childThreadId,
           parentNodeId: taskNodeId,
           activeProviderThreadId: null,
-          providerInstanceId: modelSelection.instanceId,
-          modelSelection,
+          providerInstanceId: modelSelection.instanceId, // fork: see FORK.md.
+          modelSelection, // fork: see FORK.md.
           title: taskTitle,
           now,
           createdBy: command.createdBy,
@@ -10314,13 +10209,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         origin: "app_owned",
         createdBy: command.createdBy,
         driver: targetAdapter.driver,
-        providerInstanceId: modelSelection.instanceId,
+        providerInstanceId: modelSelection.instanceId, // fork: see FORK.md.
         providerThreadId: null,
         childThreadId,
         nativeTaskRef: null,
         prompt: command.task,
         title: command.title ?? null,
-        model: modelSelection.model,
+        model: modelSelection.model, // fork: see FORK.md.
         modelSelection,
         ...(command.completionWake === undefined ? {} : { completionWake: command.completionWake }),
         status: "running",
@@ -10366,7 +10261,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         subagentId: taskNodeId,
         origin: "app_owned",
         driver: targetAdapter.driver,
-        providerInstanceId: modelSelection.instanceId,
+        providerInstanceId: modelSelection.instanceId, // fork: see FORK.md.
         childThreadId,
         prompt: command.task,
         result: null,
@@ -10377,7 +10272,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         type: "thread.created",
         threadId: childThreadId,
         driver: targetAdapter.driver,
-        providerInstanceId: modelSelection.instanceId,
+        providerInstanceId: modelSelection.instanceId, // fork: see FORK.md.
         occurredAt: now,
         payload: childThread,
       });
@@ -10387,7 +10282,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         runId: parentRun.id,
         nodeId: taskNodeId,
         driver: targetAdapter.driver,
-        providerInstanceId: modelSelection.instanceId,
+        providerInstanceId: modelSelection.instanceId, // fork: see FORK.md.
         occurredAt: now,
         payload: taskNode,
       });
@@ -10397,7 +10292,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         runId: parentRun.id,
         nodeId: taskNodeId,
         driver: targetAdapter.driver,
-        providerInstanceId: modelSelection.instanceId,
+        providerInstanceId: modelSelection.instanceId, // fork: see FORK.md.
         occurredAt: now,
         payload: task,
       });
@@ -10407,7 +10302,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         runId: parentRun.id,
         nodeId: taskNodeId,
         driver: targetAdapter.driver,
-        providerInstanceId: modelSelection.instanceId,
+        providerInstanceId: modelSelection.instanceId, // fork: see FORK.md.
         occurredAt: now,
         payload: taskTurnItem,
       });
@@ -10422,7 +10317,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         messageId: childMessageId,
         text: command.task,
         attachments: [],
-        modelSelection,
+        modelSelection, // fork: see FORK.md.
         dispatchMode:
           command.workspaceStrategy === undefined
             ? { type: "start_immediately" }
@@ -10457,7 +10352,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         },
         basePoint: null,
         sourceProviderInstanceId: parentRun.providerInstanceId,
-        targetProviderInstanceId: modelSelection.instanceId,
+        targetProviderInstanceId: modelSelection.instanceId, // fork: see FORK.md.
         targetRunId: childRun.id,
         status: "consumed",
         resolution: null,
@@ -10471,7 +10366,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         type: "context-transfer.created",
         threadId: childThreadId,
         runId: childRun.id,
-        providerInstanceId: modelSelection.instanceId,
+        providerInstanceId: modelSelection.instanceId, // fork: see FORK.md.
         occurredAt: now,
         payload: spawnTransfer,
       });
@@ -16081,9 +15976,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       case "prepared-run.retry":
         yield* dispatchPreparedRunRetry(command, events);
         break;
-      case "run.pool-failover":
-        yield* dispatchRunPoolFailover(command, events, effects);
-        break;
+      case "run.pool-failover": // fork: see FORK.md.
+        yield* dispatchRunPoolFailover(command, events, effects); // fork: see FORK.md.
+        break; // fork: see FORK.md.
       case "runtime-request.respond":
         yield* dispatchRuntimeRequestRespond(command, events, effects);
         break;
