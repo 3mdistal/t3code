@@ -78,6 +78,21 @@ models; skills come back unmarked, so visible, when time runs out.
 - Test: `apps/server/src/provider/codexSkillInvocability.fork.test.ts`, with the slow-disk cases on the test
   clock.
 
+### Git starts off the event loop on Windows (`fork:`)
+
+Node starts a child process with a synchronous `CreateProcessW` on the event loop. On the PC, one start of Git
+for Windows' `git.exe` took about half a second, and pull request discovery starts hundreds of git processes a
+minute, so the server froze for seconds at a time. On Windows, plain git commands now start from a worker thread
+that relays their stdio, exit codes and kills. Pipelines, shell commands, `git.cmd` shims, detached runs, non-pipe
+stdio and every other program keep Effect's spawner. If the worker dies or the server stops, the server ends the
+git process trees it knows about with taskkill, or a plain kill when taskkill can't run. Proposed upstream; drop
+this patch once upstream ships it or an equivalent.
+
+- `apps/server/src/process/GitSpawnWorker.ts`: the worker and the `ChildProcessSpawner` in front of it.
+- `apps/server/src/server.ts`: the platform layer provides it, so every git caller gets it, including
+  `ProcessRunner`.
+- Test: `apps/server/src/process/GitSpawnWorker.fork.test.ts`, which runs live git.
+
 ### macOS signing without upstream's App ID (`fork:`)
 
 Upstream's passkey entitlements need a provisioning profile for upstream's App ID, which the fork can't get.
