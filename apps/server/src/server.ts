@@ -88,6 +88,7 @@ import * as DesktopBrowserChannel from "./preview/DesktopBrowserChannel.ts";
 import * as ServerBrowserStream from "./preview/ServerBrowserStream.ts";
 import * as PreviewBrowser from "./preview/PreviewBrowser.ts";
 import * as ProcessRunner from "./processRunner.ts";
+import * as GitSpawnWorker from "./process/GitSpawnWorker.ts"; // fork: see FORK.md.
 import * as GitManager from "./git/GitManager.ts";
 import * as EnvironmentTheme from "./environmentTheme.ts";
 import * as Keybindings from "./keybindings.ts";
@@ -372,7 +373,8 @@ const layerHttpServer = Layer.unwrap(
   }),
 ).pipe(Layer.provide(ManagedPolicy.layer));
 
-const layerPlatformServices = DocumentText.layer.pipe(
+// fork: git starts from a worker thread on Windows, see FORK.md.
+const layerPlatformServices = Layer.mergeAll(DocumentText.layer, GitSpawnWorker.layer).pipe(
   Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
 );
 
@@ -1191,6 +1193,11 @@ const layerMakeServer = Layer.unwrap(
       Layer.provideMerge(layerPlatformServices),
     );
   }),
-).pipe(Layer.provide(ProcessRunner.layer));
+).pipe(
+  Layer.provide(ProcessRunner.layer),
+  // fork: ProcessRunner is built once, here, for every inner use too, so it needs the
+  // worker's spawner as well. See FORK.md.
+  Layer.provide(layerPlatformServices),
+);
 
 export const runServer = Layer.launch(layerMakeServer);
