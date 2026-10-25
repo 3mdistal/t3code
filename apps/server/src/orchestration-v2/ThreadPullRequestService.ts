@@ -196,7 +196,9 @@ export const make = Effect.gen(function* () {
               ? null
               : yield* git.branchPullRequest(
                   { cwd, branch: first.branch },
-                  { refresh: request.refresh },
+                  // fork: the fresh-git-state check below covers changed answers, so skip
+                  // rechecking every unchanged merged one each sweep. See FORK.md.
+                  { refresh: request.refresh, confirmClosed: false },
                 );
           if (detected !== null && !pullRequestMatchesProject(detected, resolvedProject)) {
             return finishBackfill(group);

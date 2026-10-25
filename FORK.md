@@ -92,6 +92,19 @@ this patch once upstream ships it or an equivalent.
   `ProcessRunner`.
 - Test: `apps/server/src/process/GitSpawnWorker.fork.test.ts`, which runs live git.
 
+### Pull request sweeps skip a redundant git recheck (`fork:`)
+
+`branchPullRequest` rechecks every merged or closed answer against fresh git state, because settlement and worktree
+cleanup act on one. Discovery asked for that recheck on every group on every one-minute sweep, although it checks
+fresh git state itself before persisting a change, so the recheck started about 105 git processes per sweep on the
+PC while changing nothing. Discovery now passes `confirmClosed: false`; settlement and cleanup keep the recheck.
+Upstream's open pull request #24099 does this for discovery and settlement both; drop this patch when it lands.
+
+- `apps/server/src/git/GitManager.ts`: the `confirmClosed` option.
+- `apps/server/src/orchestration-v2/ThreadPullRequestService.ts`: discovery passes it.
+- Tests: `apps/server/src/git/GitManager.fork.test.ts` and
+  `apps/server/src/orchestration-v2/ThreadPullRequestService.fork.test.ts`.
+
 ### macOS signing without upstream's App ID (`fork:`)
 
 Upstream's passkey entitlements need a provisioning profile for upstream's App ID, which the fork can't get.
