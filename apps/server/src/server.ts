@@ -1185,6 +1185,9 @@ const layerMakeServer = Layer.unwrap(
       Layer.provideMerge(
         RelayTracing.layerServerRelayBroker.pipe(Layer.provide(ManagedPolicy.layer)),
       ),
+      // fork: layerHttpServer also outputs Node's spawner, so the worker sits inside it to
+      // reach the layers it wraps. See FORK.md.
+      Layer.provideMerge(layerPlatformServices),
       Layer.provideMerge(layerHttpServer),
       Layer.provide(layerApplicationObservability),
       Layer.provideMerge(FetchHttpClient.layer),
