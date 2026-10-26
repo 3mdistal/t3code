@@ -8,6 +8,7 @@ import {
   type ServerProvider,
   type ServerSettings,
 } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
 
 import {
   choosePoolMember,
@@ -356,7 +357,7 @@ describe("routeModelSelection", () => {
             credentialFingerprint: fingerprints[index],
             windows: [
               {
-                id: "session",
+                id: "five_hour",
                 kind: "session",
                 label: "Session",
                 usedPercent: index === 0 ? 20 : 80,
@@ -387,8 +388,8 @@ describe("routeModelSelection", () => {
             checkedAt: "2026-10-19T11:00:00.000Z",
             credentialFingerprint: "fp",
             windows: [
-              { id: "session", kind: "session", label: "Session", usedPercent: 20 },
-              { id: "weekly", kind: "weekly", label: "Weekly", usedPercent: 80 },
+              { id: "five_hour", kind: "session", label: "Session", usedPercent: 20 },
+              { id: "seven_day", kind: "weekly", label: "Weekly", usedPercent: 80 },
             ],
           },
         }),
@@ -396,14 +397,14 @@ describe("routeModelSelection", () => {
           usageLimits: {
             checkedAt: "2026-10-19T11:00:00.000Z",
             credentialFingerprint: "fp",
-            windows: [{ id: "session", kind: "session", label: "Session", usedPercent: 40 }],
+            windows: [{ id: "five_hour", kind: "session", label: "Session", usedPercent: 40 }],
           },
         }),
         provider("claudeAgent_other", {
           usageLimits: {
             checkedAt: "2026-10-19T11:00:00.000Z",
             credentialFingerprint: "other",
-            windows: [{ id: "session", kind: "session", label: "Session", usedPercent: 90 }],
+            windows: [{ id: "five_hour", kind: "session", label: "Session", usedPercent: 90 }],
           },
         }),
       ],
@@ -428,8 +429,8 @@ describe("routeModelSelection", () => {
           usageLimits: {
             checkedAt: "2026-10-19T11:00:00.000Z",
             windows: [
-              { id: "weekly", kind: "weekly", label: "Weekly", usedPercent: 80 },
-              { id: "session", kind: "session", label: "Session", usedPercent: 20 },
+              { id: "seven_day", kind: "weekly", label: "Weekly", usedPercent: 80 },
+              { id: "five_hour", kind: "session", label: "Session", usedPercent: 20 },
             ],
           },
         }),
@@ -442,6 +443,71 @@ describe("routeModelSelection", () => {
       health.map((entry) => entry.usedPercent),
       [null, null, 80],
     );
+  });
+
+  const usage = (...windows: ReadonlyArray<[string, number, number | null]>) => ({
+    checkedAt: "2026-10-19T11:00:00.000Z",
+    windows: windows.map(([windowId, usedPercent, resetsAtMs]) => ({
+      id: windowId,
+      kind: windowId === "five_hour" ? ("session" as const) : ("weekly" as const),
+      label: windowId,
+      usedPercent,
+      ...(resetsAtMs === null
+        ? {}
+        : { resetsAt: DateTime.formatIso(DateTime.makeUnsafe(resetsAtMs)) }),
+    })),
+  });
+
+  it("holds an account with a spent session or week until it resets, but not for one model's window", () => {
+    const health = poolMemberHealth({
+      members: [
+        provider("claudeAgent", {
+          usageLimits: usage(["five_hour", 0, null], ["seven_day", 100, later(60)]),
+        }),
+        provider("claudeAgent_work", {
+          usageLimits: usage(
+            ["five_hour", 10, later(30)],
+            ["seven_day", 30, later(90)],
+            ["seven_day_fable", 100, later(90)],
+            ["monthly_spend", 100, null],
+          ),
+        }),
+        provider("claudeAgent_reset", {
+          usageLimits: usage(["five_hour", 100, later(-5)], ["seven_day", 40, later(90)]),
+        }),
+      ],
+      settings,
+      projectId,
+      nowMs,
+    });
+    assert.deepEqual(
+      health.map((entry) => [entry.limitedUntilMs, entry.usedPercent]),
+      [
+        [later(60), 100],
+        [null, 30],
+        [null, 100],
+      ],
+    );
+  });
+
+  it("moves a thread off an account whose week is spent before a turn fails there", () => {
+    const routed = route(
+      "pool_claudeAgent",
+      [
+        stamped("claudeAgent", { usageLimits: usage(["seven_day", 100, later(60)]) }),
+        stamped("claudeAgent_work", { usageLimits: usage(["seven_day", 87, later(90)]) }),
+        pool,
+      ],
+      { instanceId: "claudeAgent" },
+    );
+    assert.equal(routed.type, "routed");
+    if (routed.type === "routed") {
+      assert.deepEqual(routed.decision, {
+        type: "member",
+        instanceId: id("claudeAgent_work"),
+        reason: "spread",
+      });
+    }
   });
 
   it("reports no eligible member when the project turned every member off", () => {
