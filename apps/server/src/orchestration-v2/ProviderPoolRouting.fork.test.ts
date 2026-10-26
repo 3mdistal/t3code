@@ -121,14 +121,13 @@ describe("choosePoolMember", () => {
     }
   });
 
-  it("breaks equal quota ties with rendezvous scores and treats unknown usage as zero", () => {
+  it("breaks equal quota ties with rendezvous scores", () => {
     const expected =
       rendezvousScore(threadId, a.instanceId) > rendezvousScore(threadId, b.instanceId) ? a : b;
     for (const [aUsage, bUsage] of [
       [20, 20],
       [null, null],
-      [null, 0],
-      [0, null],
+      [100, 100],
     ] as const) {
       assert.deepEqual(
         choose([
@@ -138,11 +137,28 @@ describe("choosePoolMember", () => {
         { type: "member", instanceId: expected.instanceId, reason: "spread" },
       );
     }
-    assert.deepEqual(choose([{ ...a, usedPercent: 20 }, b]), {
-      type: "member",
-      instanceId: b.instanceId,
-      reason: "spread",
-    });
+  });
+
+  it("ranks unknown usage after any known room left and before a known-spent account", () => {
+    for (const [first, second] of [
+      [a, b],
+      [b, a],
+    ] as const) {
+      for (const [ahead, behind] of [
+        [99, null],
+        [0, null],
+        [null, 100],
+        [99, 100],
+      ] as const) {
+        assert.deepEqual(
+          choose([
+            { ...second, usedPercent: behind },
+            { ...first, usedPercent: ahead },
+          ]),
+          { type: "member", instanceId: first.instanceId, reason: "spread" },
+        );
+      }
+    }
   });
 
   it("skips excluded members and reports when every member is unusable", () => {
