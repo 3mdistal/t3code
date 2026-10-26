@@ -1,5 +1,6 @@
 import type { ModelPreferences } from "@t3tools/contracts/settings";
 import {
+  applyProviderPoolsPatch, // fork: see FORK.md.
   DEFAULT_MODEL_BY_PROVIDER,
   DEFAULT_TEXT_GENERATION_MODEL,
   DEFAULT_TEXT_GENERATION_MODEL_BY_PROVIDER,
@@ -589,7 +590,7 @@ export function applyServerSettingsPatch(
         }
       : {}),
     ...(providerPoolsPatch !== undefined // fork: see FORK.md.
-      ? { providerPools: mergeSettingsEntries(current.providerPools, providerPoolsPatch) }
+      ? { providerPools: applyProviderPoolsPatch(current.providerPools, providerPoolsPatch) }
       : {}),
     // fork: limits, see FORK.md.
     ...(resourceLimitsPatch !== undefined ? { resourceLimits: resourceLimitsPatch } : {}),
