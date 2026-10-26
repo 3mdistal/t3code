@@ -1,18 +1,20 @@
 // fork: limits, see FORK.md.
 import { RegistryContext, useAtomValue } from "@effect/atom-react";
 import type {
+  EffectiveResourceLimits,
   EnvironmentId,
   ResourceLimitsSettings,
   ResourceLimitsStatus,
 } from "@t3tools/contracts";
-import { resolveEnvironmentMachineKind } from "@t3tools/contracts";
-import { useContext, useEffect, useRef, useState } from "react";
+import { resolveEnvironmentMachineKind, USE_PERCENT } from "@t3tools/contracts";
+import { useContext, useEffect, useId, useRef, useState } from "react";
 
 import { usePrimarySettings, useUpdateEnvironmentSettings } from "~/hooks/useSettings";
 import type { EnvironmentPresentation } from "~/state/environments";
 import { serverEnvironment } from "~/state/server";
 import { formatUpcomingTimestamp } from "~/timestampFormat";
 import { Button } from "../ui/button";
+import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../ui/collapsible";
 import {
   Dialog,
   DialogDescription,
@@ -24,15 +26,20 @@ import {
 } from "../ui/dialog";
 import { Input } from "../ui/input";
 import { Label } from "../ui/label";
+import { Slider } from "../ui/slider";
+import { Switch } from "../ui/switch";
 import { EnvironmentRow, environmentTransportLabel } from "./EnvironmentRow";
 import { FoldedSettingsSection } from "./FoldedSettingsSection";
 import {
+  consequences,
+  holdLabel,
   limitFieldsFor,
   limitsForm,
-  limitsLabel,
   limitsPatch,
   limitsStateLabel,
-  readingsLabel,
+  percentOnlyLimits,
+  previewLimits,
+  usageLabel,
 } from "./MachineLimits.logic";
 import { searchableSetting } from "./settingsSearch";
 
@@ -103,17 +110,20 @@ function MachineLimitsStatus({
     registry.refresh(resourcesAtom);
   }, [registry, resourcesAtom, saved]);
 
-  const status = result._tag === "Success" ? result.value.limits : undefined;
-  if (status === undefined) return null;
+  const resources = result._tag === "Success" ? result.value : undefined;
+  const status = resources?.limits;
+  if (resources === undefined || status === undefined) return null;
+  const totalBytes = resources.totalMemoryBytes;
   const formatUntil = (epochMs: number) =>
     formatUpcomingTimestamp(new Date(epochMs).toISOString(), timestampFormat);
 
   return (
     <div className="mt-1.5 flex items-start justify-between gap-3">
       <div className="min-w-0 text-xs text-muted-foreground">
-        <p className="text-foreground">{limitsStateLabel(status, formatUntil)}</p>
-        <p>{readingsLabel(status)}</p>
-        <p>{limitsLabel(status.limits)}</p>
+        <p className="text-foreground">
+          {limitsStateLabel(status, formatUntil)} · {usageLabel(status, totalBytes)}
+        </p>
+        <p>{holdLabel(status.limits, saved, totalBytes)}</p>
       </div>
       <Button size="xs" variant="outline" disabled={!canEdit} onClick={() => setEditing(true)}>
         Edit limits
@@ -124,6 +134,7 @@ function MachineLimitsStatus({
           label={label}
           status={status}
           saved={saved}
+          totalBytes={totalBytes}
           onClose={() => setEditing(false)}
         />
       ) : null}
@@ -131,22 +142,29 @@ function MachineLimitsStatus({
   );
 }
 
+const gib = (bytes: number) => `${Math.round(bytes / 1024 ** 3)} GiB`;
+
 function MachineLimitsDialog({
   environmentId,
   label,
   status,
   saved,
+  totalBytes,
   onClose,
 }: {
   readonly environmentId: EnvironmentId;
   readonly label: string;
   readonly status: ResourceLimitsStatus;
   readonly saved: ResourceLimitsSettings;
+  readonly totalBytes: number;
   readonly onClose: () => void;
 }) {
   const updateSettings = useUpdateEnvironmentSettings(environmentId);
-  const [form, setForm] = useState(() => limitsForm(saved));
-  const patch = limitsPatch(form, status.limits);
+  const commitCharge = !status.limits.usesMemoryPressure;
+  const [form, setForm] = useState(() => limitsForm(saved, commitCharge));
+  const patch = limitsPatch(form, commitCharge);
+  const fields = limitFieldsFor(commitCharge);
+  const followed = percentOnlyLimits(form, commitCharge, totalBytes);
 
   const save = () => {
     if (patch === null) return;
@@ -160,44 +178,84 @@ function MachineLimitsDialog({
         <DialogHeader>
           <DialogTitle>Limits on {label}</DialogTitle>
           <DialogDescription>
-            {status.limits.usesMemoryPressure
-              ? "macOS memory pressure always pauses work at warn and is critical at critical. "
-              : null}
-            Leave a field empty to use this machine's default.
+            How full agents may make this machine&apos;s memory before T3 holds their new work.
+            Messages you send yourself always start.
           </DialogDescription>
         </DialogHeader>
         <DialogPanel>
           <form
-            className="grid grid-cols-2 gap-4"
+            className="grid gap-5"
             onSubmit={(event) => {
               event.preventDefault();
               save();
             }}
           >
-            {limitFieldsFor(status.limits).map((field) => {
-              const id = `machine-limit-${field.key}`;
-              const current = status.limits[field.key];
-              return (
-                <div key={field.key} className="grid gap-1.5">
-                  <Label htmlFor={id}>
-                    {field.label} ({field.unit})
-                  </Label>
-                  <Input
-                    id={id}
-                    inputMode="decimal"
-                    placeholder={
-                      saved[field.key] !== undefined
-                        ? "Default"
-                        : current === null
-                          ? "Off"
-                          : String(current)
-                    }
-                    value={form[field.key]}
-                    onChange={(event) => setForm({ ...form, [field.key]: event.target.value })}
-                  />
+            {commitCharge ? null : (
+              <div className="flex items-start justify-between gap-4">
+                <div className="min-w-0">
+                  <p className="text-sm font-medium">Hold work at a share of memory too</p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    macOS memory pressure holds new agent work when it warns, and stops the newest
+                    turn when it&apos;s critical.
+                  </p>
                 </div>
-              );
-            })}
+                <Switch
+                  aria-label="Hold work at a share of memory too"
+                  checked={form.usePercent !== null}
+                  onCheckedChange={(checked) =>
+                    setForm({ ...form, usePercent: checked ? USE_PERCENT.default : null })
+                  }
+                />
+              </div>
+            )}
+            {form.usePercent === null ? null : (
+              <UsePercent
+                percent={form.usePercent}
+                totalBytes={totalBytes}
+                limits={previewLimits(form, commitCharge, totalBytes)}
+                onPercent={(usePercent) => setForm({ ...form, usePercent })}
+              />
+            )}
+            <Collapsible defaultOpen={fields.some(({ key }) => saved[key] !== undefined)}>
+              <CollapsibleTrigger className="text-xs text-muted-foreground underline-offset-4 hover:underline">
+                Advanced: set each line yourself
+              </CollapsibleTrigger>
+              <CollapsiblePanel>
+                <div className="grid gap-3 pt-3">
+                  <p className="text-xs text-muted-foreground">
+                    {form.usePercent === null
+                      ? "Empty fields stay off."
+                      : "Empty fields follow the percentage. A filled one wins."}
+                  </p>
+                  <div className="grid grid-cols-2 gap-3">
+                    {fields.map((field) => {
+                      const id = `machine-limit-${field.key}`;
+                      const placeholder = followed[field.key];
+                      return (
+                        <div key={field.key} className="grid content-end gap-1.5">
+                          <Label htmlFor={id}>
+                            {field.label} ({field.unit})
+                          </Label>
+                          <Input
+                            id={id}
+                            size="sm"
+                            inputMode="decimal"
+                            placeholder={placeholder === null ? "Off" : String(placeholder)}
+                            value={form.lines[field.key]}
+                            onChange={(event) =>
+                              setForm({
+                                ...form,
+                                lines: { ...form.lines, [field.key]: event.target.value },
+                              })
+                            }
+                          />
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              </CollapsiblePanel>
+            </Collapsible>
             <button type="submit" hidden />
           </form>
         </DialogPanel>
@@ -211,5 +269,61 @@ function MachineLimitsDialog({
         </DialogFooter>
       </DialogPopup>
     </Dialog>
+  );
+}
+
+function UsePercent({
+  percent,
+  totalBytes,
+  limits,
+  onPercent,
+}: {
+  readonly percent: number;
+  readonly totalBytes: number;
+  readonly limits: EffectiveResourceLimits;
+  readonly onPercent: (percent: number) => void;
+}) {
+  const labelId = useId();
+  return (
+    <div className="grid gap-4">
+      <div className="grid gap-2">
+        <div className="flex items-baseline justify-between gap-3">
+          <p id={labelId} className="text-sm">
+            Use up to <span className="text-2xl font-semibold tabular-nums">{percent}%</span> of
+            this machine&apos;s memory
+          </p>
+          <span className="shrink-0 text-xs text-muted-foreground">
+            {gib(totalBytes)}
+            {percent === USE_PERCENT.default ? " · default" : null}
+          </span>
+        </div>
+        <Slider
+          aria-labelledby={labelId}
+          value={percent}
+          onValueChange={onPercent}
+          min={USE_PERCENT.minimum}
+          max={USE_PERCENT.maximum}
+        />
+        <div className="flex justify-between text-xs text-muted-foreground">
+          <span>{USE_PERCENT.minimum}% · more room for you</span>
+          <span>{USE_PERCENT.maximum}% · more for agents</span>
+        </div>
+      </div>
+      <div className="grid gap-1.5 text-sm">
+        {consequences(limits, totalBytes).map((line) => (
+          <p key={line.text}>
+            <span className="font-medium">{line.text}</span>{" "}
+            <span className="text-muted-foreground">({line.detail})</span>
+          </p>
+        ))}
+        {limits.pauseAvailableGiB === null || limits.usesMemoryPressure ? null : (
+          <p className="text-xs text-muted-foreground">
+            Also holds work while available memory is under {Math.round(limits.pauseAvailableGiB)}{" "}
+            GiB. &ldquo;Left&rdquo; is the room programs can still reserve, so it counts the page
+            file.
+          </p>
+        )}
+      </div>
+    </div>
   );
 }

@@ -53,6 +53,7 @@ const layerProjections = ProjectionStore.layer.pipe(Layer.provide(layerDatabase)
 const layerLimits = ResourceLimits.layer.pipe(
   Layer.provide(layerProjections),
   Layer.provide(Layer.succeed(HostProcess.Platform, "win32")),
+  Layer.provide(Layer.succeed(ResourceLimits.TotalMemoryBytes, 128 * GiB)),
 );
 const layerTest = ThreadManagementService.layer.pipe(
   Layer.provideMerge(
@@ -86,6 +87,7 @@ const makeGovernor = Effect.gen(function* () {
   const closings = yield* Ref.make<ReadonlyArray<string>>([]);
   const governor = yield* Governor.make().pipe(
     Effect.provideService(HostProcess.Platform, "win32"),
+    Effect.provideService(ResourceLimits.TotalMemoryBytes, 128 * GiB),
     Effect.provideService(ProviderSessionManager.ProviderSessionManagerV2, {
       ...sessions,
       releaseIdleSessions: () =>
@@ -356,12 +358,13 @@ it.effect("R4: idle sessions close on every pass over the limits, before any wor
   }).pipe(Effect.provide(layerTest)),
 );
 
-it.effect("R1: a saved limit shows in the machine's status before the next pass", () =>
+it.effect("R1: a saved percentage shows in the machine's status before the next pass", () =>
   Effect.gen(function* () {
     const settings = yield* ServerSettings.ServerSettingsService;
     const limits = yield* ResourceLimits.ResourceLimits;
     const governor = yield* Governor.make().pipe(
       Effect.provideService(HostProcess.Platform, "win32"),
+      Effect.provideService(ResourceLimits.TotalMemoryBytes, 128 * GiB),
       Effect.provideService(ServerSettings.ServerSettingsService, {
         ...settings,
         // One change: whatever is saved when the governor follows it.
@@ -369,11 +372,11 @@ it.effect("R1: a saved limit shows in the machine's status before the next pass"
       }),
     );
     yield* governor.pass(yield* comfortable);
-    assert.equal((yield* limits.status)?.limits.pauseAvailableGiB, 8);
+    assert.equal((yield* limits.status)?.limits.pauseHeadroomGiB, 25.6);
 
-    yield* settings.updateSettings({ resourceLimits: { pauseAvailableGiB: 9 } });
+    yield* settings.updateSettings({ resourceLimits: { usePercent: 70 } });
     yield* governor.followSettings;
-    assert.equal((yield* limits.status)?.limits.pauseAvailableGiB, 9);
+    assert.equal((yield* limits.status)?.limits.pauseHeadroomGiB, 38.4);
   }).pipe(Effect.provide(layerTest)),
 );
 
