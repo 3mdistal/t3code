@@ -18,11 +18,52 @@ export type ProviderPoolConfig = typeof ProviderPoolConfig.Type;
 export const ProviderPoolSettings = Schema.Record(ProviderDriverKind, ProviderPoolConfig);
 export type ProviderPoolSettings = typeof ProviderPoolSettings.Type;
 
+/**
+ * Applied to the pool the server holds, not the page's copy of it, so quick
+ * ticks sent before the page catches up all land. `members` adds (true) or
+ * removes (false) single accounts; `memberInstanceIds` replaces the list.
+ */
+export const ProviderPoolPatch = Schema.Struct({
+  enabled: Schema.optionalKey(Schema.Boolean),
+  memberInstanceIds: Schema.optionalKey(Schema.Array(ProviderInstanceId)),
+  members: Schema.optionalKey(Schema.Record(ProviderInstanceId, Schema.Boolean)),
+});
+export type ProviderPoolPatch = typeof ProviderPoolPatch.Type;
+
 export const ProviderPoolSettingsPatch = Schema.Record(
   ProviderDriverKind,
-  Schema.NullOr(ProviderPoolConfig),
+  Schema.NullOr(ProviderPoolPatch),
 );
 export type ProviderPoolSettingsPatch = typeof ProviderPoolSettingsPatch.Type;
+
+/** A new pool starts off until it is switched on, and a pool left with no accounts is removed. */
+export function applyProviderPoolsPatch(
+  current: ProviderPoolSettings,
+  patch: ProviderPoolSettingsPatch,
+): ProviderPoolSettings {
+  const next = new Map(Object.entries(current));
+  for (const [driver, change] of Object.entries(patch)) {
+    const pool = next.get(driver);
+    let memberInstanceIds = change?.memberInstanceIds ?? pool?.memberInstanceIds ?? [];
+    for (const [instanceId, ticked] of Object.entries(change?.members ?? {})) {
+      const memberId = ProviderInstanceId.make(instanceId);
+      if (!ticked) {
+        memberInstanceIds = memberInstanceIds.filter((existing) => existing !== memberId);
+      } else if (!memberInstanceIds.includes(memberId)) {
+        memberInstanceIds = [...memberInstanceIds, memberId];
+      }
+    }
+    if (change === null || memberInstanceIds.length === 0) {
+      next.delete(driver);
+    } else {
+      next.set(driver, {
+        enabled: change.enabled ?? pool?.enabled ?? false,
+        memberInstanceIds,
+      });
+    }
+  }
+  return Object.fromEntries(next);
+}
 
 export const ServerProviderPool = Schema.Union([
   Schema.Struct({
