@@ -128,6 +128,9 @@ the Account pools section of `docs/user/providers-claude.md`.
     accounts.
   - `apps/server/src/serverSettings.ts`: the `providerPools` key, and the reserved `pool_` instance ids. Pool
     validation lives in `ProviderPoolRouting.ts`.
+  - `packages/shared/src/serverSettings.ts` applies a pool patch with `applyProviderPoolsPatch`. A tick names one
+    account and the server applies it to the pool it holds, so quick ticks from a page that hasn't caught up all
+    land.
   - `runtimeLayer.ts` and the replay harness build run execution over the orchestrator, because the usage-limit
     hook dispatches into it. Both keep upstream's layer order and reach the orchestrator through `Layer.suspend`.
   - The web model picker, the Providers settings, and the project default model picker, which lists the pool in
