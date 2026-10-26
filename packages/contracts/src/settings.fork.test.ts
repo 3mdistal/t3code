@@ -33,7 +33,8 @@ describe("providerPools settings", () => {
     const patch = {
       providerPools: {
         claudeAgent: { enabled: false, memberInstanceIds: ["claudeAgent", "claudeAgent_icloud"] },
-        codex: null,
+        codex: { members: { codex: true, codex_2: false } },
+        cursor: null,
       },
     };
     expect(decodeServerSettingsPatch(patch)).toEqual(patch);
