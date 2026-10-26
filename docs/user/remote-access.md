@@ -137,11 +137,14 @@ When memory is critically low, T3 also stops the newest running turn every 30 se
 until memory recovers. It skips turns waiting for your answer. A stopped thread
 continues later from where it was interrupted.
 
-**Settings → Connections → Load balancing** shows each machine's limits and readings,
-even with one machine. Choose **Edit limits** to change them on that machine, and leave
-a field empty to use its default. Windows pauses when commit headroom is under 25 GiB
-or available memory is under 8 GiB, resumes once they are over 35 GiB and 12 GiB, and
-is critically low under 10 GiB of headroom. macOS follows its own memory pressure.
+**Settings → Connections → Load balancing** shows how full each machine is and when it
+holds work, even with one machine. Choose **Edit limits** to set how much of that
+machine's memory agents may use, from 50% to 90%. At the default 80%, new agent work
+waits once 80% is in use, starts again under 72%, and the newest turn stops at 92%.
+On Windows, the room left counts the page file, and work also waits while available
+memory is low. macOS follows its own memory pressure; turn on a percentage there to
+hold work sooner. Under **Advanced**, set any line yourself, or hold work over a CPU
+percentage, which is off by default.
 
 ### Tailscale HTTPS
 
