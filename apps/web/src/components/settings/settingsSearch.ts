@@ -1448,7 +1448,7 @@ export const SETTINGS_SEARCH_ITEMS = [
       msg(
         "automatic machine environment resources cpu memory capacity preference weight shared projects",
       ),
-      "limits pause headroom available memory pressure critical", // fork: limits, see FORK.md.
+      "limits percent percentage hold pause headroom available memory pressure critical", // fork: limits, see FORK.md.
     ],
   },
   {
