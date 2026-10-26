@@ -46,7 +46,8 @@ With two or more Claude accounts, you can offer them as one. In **Settings >
 Account pools**, tick the Claude accounts to share and turn on **Pool these
 accounts**. The model picker then shows a single Claude entry in place of the
 ticked accounts. A new thread starts on the account with the most usage left, and
-stays on it until that account reaches a usage limit. The turn then continues on
+stays on it until that account reaches a usage limit. An account whose usage T3
+Code can't read comes after every account known to have usage left. The turn then continues on
 the account with the most usage left, and the thread's model picker shows the
 account that ran it. When every account is limited, the thread stops with the
 earliest reset time, so **Resume at reset** continues it on the first account
