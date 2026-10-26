@@ -4,7 +4,6 @@ import {
   providerLimitedUntilMs,
   type ProviderDriverKind,
   type ProviderInstanceId,
-  type ProviderPoolConfig,
   type ProviderPoolSettings,
   type ProviderPoolSettingsPatch,
   type ServerProvider,
@@ -148,21 +147,15 @@ export type ProviderPoolChange =
   | { readonly type: "tick"; readonly instanceId: ProviderInstanceId; readonly ticked: boolean }
   | { readonly type: "enabled"; readonly enabled: boolean };
 
+/** Carries only the change: the page's copy of the pool may be behind a save still in flight. */
 export function buildProviderPoolPatch(
   driver: ProviderDriverKind,
-  current: ProviderPoolConfig | undefined,
   change: ProviderPoolChange,
 ): ProviderPoolSettingsPatch {
-  const memberInstanceIds = current?.memberInstanceIds ?? [];
-  if (change.type === "enabled") {
-    return { [driver]: { enabled: change.enabled, memberInstanceIds } };
-  }
-  const others = memberInstanceIds.filter((instanceId) => instanceId !== change.instanceId);
-  const nextMembers = change.ticked ? [...others, change.instanceId] : others;
   return {
     [driver]:
-      nextMembers.length === 0
-        ? null
-        : { enabled: current?.enabled ?? false, memberInstanceIds: nextMembers },
+      change.type === "enabled"
+        ? { enabled: change.enabled }
+        : { members: { [change.instanceId]: change.ticked } },
   };
 }

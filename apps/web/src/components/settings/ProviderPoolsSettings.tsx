@@ -57,13 +57,7 @@ export function ProviderPoolsSettings({
       ) : (
         cards.map((card) => {
           const update = (change: ProviderPoolChange) =>
-            updateSettings({
-              providerPools: buildProviderPoolPatch(
-                card.driver,
-                providerPools[card.driver],
-                change,
-              ),
-            });
+            updateSettings({ providerPools: buildProviderPoolPatch(card.driver, change) });
           return (
             <SettingsSection key={card.driver} title={card.label}>
               <SettingsRow

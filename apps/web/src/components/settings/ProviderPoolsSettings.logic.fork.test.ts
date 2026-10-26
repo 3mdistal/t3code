@@ -1,4 +1,12 @@
-import { ProviderDriverKind, ProviderInstanceId, type ServerProvider } from "@t3tools/contracts";
+import {
+  DEFAULT_SERVER_SETTINGS,
+  ProviderDriverKind,
+  ProviderInstanceId,
+  type ProviderPoolSettingsPatch,
+  type ServerProvider,
+  type ServerSettings,
+} from "@t3tools/contracts";
+import { applyServerSettingsPatch } from "@t3tools/shared/serverSettings";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -132,53 +140,49 @@ describe("modelCoverageLabel", () => {
 });
 
 describe("buildProviderPoolPatch", () => {
-  const config = { enabled: true, memberInstanceIds: [id("codex"), id("codex_2")] };
+  const tick = (instanceId: string, ticked = true) =>
+    buildProviderPoolPatch(codex, { type: "tick", instanceId: id(instanceId), ticked });
+  const save = (
+    providerPools: ServerSettings["providerPools"],
+    ...patches: ReadonlyArray<ProviderPoolSettingsPatch>
+  ) =>
+    patches.reduce<ServerSettings>(
+      (saved, patch) => applyServerSettingsPatch(saved, { providerPools: patch }),
+      { ...DEFAULT_SERVER_SETTINGS, providerPools },
+    ).providerPools;
+  const pool = { [codex]: { enabled: true, memberInstanceIds: [id("codex"), id("codex_2")] } };
 
   it("creates a pool that is off when the first account is ticked", () => {
-    expect(
-      buildProviderPoolPatch(codex, undefined, {
-        type: "tick",
-        instanceId: id("codex"),
-        ticked: true,
-      }),
-    ).toEqual({ [codex]: { enabled: false, memberInstanceIds: ["codex"] } });
-  });
-
-  it("appends a newly ticked account and keeps the switch as it was", () => {
-    expect(
-      buildProviderPoolPatch(codex, config, {
-        type: "tick",
-        instanceId: id("codex_traex"),
-        ticked: true,
-      }),
-    ).toEqual({
-      [codex]: { enabled: true, memberInstanceIds: ["codex", "codex_2", "codex_traex"] },
+    expect(save({}, tick("codex"))).toEqual({
+      [codex]: { enabled: false, memberInstanceIds: ["codex"] },
     });
   });
 
-  it("removes only the unticked account", () => {
-    expect(
-      buildProviderPoolPatch(codex, config, {
-        type: "tick",
-        instanceId: id("codex"),
-        ticked: false,
-      }),
-    ).toEqual({ [codex]: { enabled: true, memberInstanceIds: ["codex_2"] } });
+  it("keeps every tick sent before the page catches up, in the order they were sent", () => {
+    expect(save(pool, tick("codex_traex"), tick("codex_3"), tick("codex", false))).toEqual({
+      [codex]: { enabled: true, memberInstanceIds: ["codex_2", "codex_traex", "codex_3"] },
+    });
+  });
+
+  it("ignores a repeated tick, so clicking again while a save is in flight changes nothing", () => {
+    expect(save(pool, tick("codex_2"), tick("codex_2"))).toEqual(pool);
   });
 
   it("removes the pool when the last account is unticked", () => {
-    expect(
-      buildProviderPoolPatch(
-        codex,
-        { enabled: false, memberInstanceIds: [id("codex")] },
-        { type: "tick", instanceId: id("codex"), ticked: false },
-      ),
-    ).toEqual({ [codex]: null });
+    expect(save(pool, tick("codex", false), tick("codex_2", false))).toEqual({});
   });
 
-  it("flips the switch without changing the accounts, and only patches its own driver", () => {
-    expect(buildProviderPoolPatch(codex, config, { type: "enabled", enabled: false })).toEqual({
-      [codex]: { enabled: false, memberInstanceIds: ["codex", "codex_2"] },
+  it("flips the switch without touching ticks still in flight, and only patches its own driver", () => {
+    const claudePool = { [claude]: { enabled: true, memberInstanceIds: [id("claudeAgent")] } };
+    expect(
+      save(
+        { ...pool, ...claudePool },
+        tick("codex_traex"),
+        buildProviderPoolPatch(codex, { type: "enabled", enabled: false }),
+      ),
+    ).toEqual({
+      ...claudePool,
+      [codex]: { enabled: false, memberInstanceIds: ["codex", "codex_2", "codex_traex"] },
     });
   });
 });
