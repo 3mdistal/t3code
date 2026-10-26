@@ -105,6 +105,18 @@ Upstream's open pull request #24099 does this for discovery and settlement both;
 - Tests: `apps/server/src/git/GitManager.fork.test.ts` and
   `apps/server/src/orchestration-v2/ThreadPullRequestService.fork.test.ts`.
 
+### A steer sent before the provider turn starts waits in the queue (`fork:`)
+
+The web composer offers Steer as soon as a run reads as running, which can be seconds before its provider turn
+starts. The server sent an explicit steer straight to the run, which then failed with "No running provider turn
+found for active run". The fork carries upstream's open pull request #23559, which checks an explicit steer against
+the same gaps as automatic delivery, so it queues there. Its manual live check,
+`apps/server/scripts/verify-steer-running-turn.ts`, isn't carried. Drop this patch when #23559 lands.
+
+- `apps/server/src/orchestration-v2/CommandPolicy.ts`: `resolveDeliveryIntent`.
+- Test: #23559's own changes to `apps/server/src/orchestration-v2/CommandPolicy.test.ts`, which replace upstream's
+  assertion that an explicit steer goes straight to the run.
+
 ### macOS signing without upstream's App ID (`fork:`)
 
 Upstream's passkey entitlements need a provisioning profile for upstream's App ID, which the fork can't get.
