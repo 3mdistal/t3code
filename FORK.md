@@ -192,8 +192,15 @@ Users read about it in the Memory and CPU limits section of `docs/user/remote-ac
   Work launched from a thread whose latest message is her "launch anyway" starts too. Idle sessions close on
   every pass over the limits, before anything waits. Below the critical line, the newest running turn is
   interrupted every 30 s, and its thread queues a resume note. Held threads start oldest first, 90 s apart.
-- Limit-only files: `apps/server/src/resourceLimits/`, `packages/contracts/src/resourceLimits.ts`, and
-  `apps/web/src/components/settings/MachineLimits*`.
+- `resourceLimits.usePercent` (50 to 90) sets every memory line from one number. The reserve is (100 - N)% of RAM,
+  and each line is the reserve times one of the memory gate's ratios, so 80% of the PC's RAM gives its
+  25 / 8 GiB pause, 35 / 12 GiB release and 10 GiB critical lines. A saved line wins over its derived one.
+  Windows defaults to 80%. macOS has no percentage until one is saved, because memory pressure already decides
+  there, and R7 hasn't yet checked on the Mini whether 80% would hold work while pressure is normal.
+  `resolveResourceLimits` in contracts does the derivation for both the server and the dialog. CPU stays out of
+  the percentage and is off by default.
+- Limit-only files: `apps/server/src/resourceLimits/`, `packages/contracts/src/resourceLimits.ts`,
+  `apps/web/src/components/settings/MachineLimits*`, and the `apps/web/src/components/ui/slider.tsx` primitive.
 - Upstream files it changes:
   - `apps/server/src/orchestration-v2/Orchestrator.ts`: the three places a run can start call into
     `resourceLimits/OrchestratorAdmission.ts`: `dispatchMessage`, `startNextQueuedRun`, and

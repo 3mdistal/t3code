@@ -18,7 +18,7 @@ import {
   TIMING,
 } from "./policy.ts";
 
-const pc = effectiveLimits({}, "win32")!;
+const pc = effectiveLimits({}, "win32", 128 * GiB)!;
 
 const reading = (headroom: number, available: number, extra: Partial<HostReading> = {}) =>
   ({
@@ -33,36 +33,65 @@ const reading = (headroom: number, available: number, extra: Partial<HostReading
   }) satisfies HostReading;
 
 describe("effectiveLimits", () => {
-  it("prefills the PC with the memory gate's lines and lets saved values override them", () => {
+  it("gives the PC the memory gate's lines from 80% of its RAM", () => {
     expect(pc).toEqual({
-      pauseHeadroomGiB: 25,
-      pauseAvailableGiB: 8,
-      releaseHeadroomGiB: 35,
-      releaseAvailableGiB: 12,
-      criticalHeadroomGiB: 10,
+      pauseHeadroomGiB: 25.6,
+      pauseAvailableGiB: 8.2,
+      releaseHeadroomGiB: 35.8,
+      releaseAvailableGiB: 12.3,
+      criticalHeadroomGiB: 10.2,
       pauseCpuPercent: null,
       usesMemoryPressure: false,
     });
-    expect(effectiveLimits({ pauseHeadroomGiB: 30, pauseCpuPercent: 90 }, "win32")).toMatchObject({
+  });
+
+  it("moves every memory line with the percentage, and a saved line wins over its own", () => {
+    expect(effectiveLimits({ usePercent: 70 }, "win32", 128 * GiB)).toMatchObject({
+      pauseHeadroomGiB: 38.4,
+      pauseAvailableGiB: 12.3,
+      releaseHeadroomGiB: 53.8,
+      releaseAvailableGiB: 18.4,
+      criticalHeadroomGiB: 15.4,
+    });
+    expect(
+      effectiveLimits(
+        { usePercent: 90, pauseHeadroomGiB: 30, pauseCpuPercent: 90 },
+        "win32",
+        128 * GiB,
+      ),
+    ).toMatchObject({
       pauseHeadroomGiB: 30,
-      pauseAvailableGiB: 8,
+      pauseAvailableGiB: 4.1,
+      releaseHeadroomGiB: 17.9,
       pauseCpuPercent: 90,
     });
   });
 
-  it("lets macOS memory pressure decide and ignores commit lines, which macOS doesn't have", () => {
-    expect(effectiveLimits({ pauseHeadroomGiB: 30, pauseAvailableGiB: 4 }, "darwin")).toMatchObject(
-      {
-        pauseHeadroomGiB: null,
-        pauseAvailableGiB: 4,
-        criticalHeadroomGiB: null,
-        usesMemoryPressure: true,
-      },
-    );
+  it("keeps macOS on memory pressure alone until a percentage is saved", () => {
+    expect(effectiveLimits({}, "darwin", 64 * GiB)).toMatchObject({
+      pauseAvailableGiB: null,
+      releaseAvailableGiB: null,
+      usesMemoryPressure: true,
+    });
+    expect(effectiveLimits({ usePercent: 80 }, "darwin", 64 * GiB)).toEqual({
+      pauseHeadroomGiB: null,
+      pauseAvailableGiB: 12.8,
+      releaseHeadroomGiB: null,
+      releaseAvailableGiB: 17.9,
+      criticalHeadroomGiB: null,
+      pauseCpuPercent: null,
+      usesMemoryPressure: true,
+    });
+  });
+
+  it("ignores commit lines on macOS, which has no commit charge", () => {
+    expect(
+      effectiveLimits({ pauseHeadroomGiB: 30, pauseAvailableGiB: 4 }, "darwin", 64 * GiB),
+    ).toMatchObject({ pauseHeadroomGiB: null, pauseAvailableGiB: 4, criticalHeadroomGiB: null });
   });
 
   it("has no limits on Linux, which keeps upstream's cap", () => {
-    expect(effectiveLimits({ pauseHeadroomGiB: 30 }, "linux")).toBeNull();
+    expect(effectiveLimits({ usePercent: 80 }, "linux", 128 * GiB)).toBeNull();
   });
 });
 
@@ -100,7 +129,7 @@ describe("nextState", () => {
   });
 
   it("follows macOS memory pressure", () => {
-    const mac = effectiveLimits({}, "darwin")!;
+    const mac = effectiveLimits({}, "darwin", 64 * GiB)!;
     const at = (memoryPressure: HostReading["memoryPressure"]) =>
       reading(0, 1, { commitLimitBytes: null, committedBytes: null, memoryPressure });
     expect(nextState("ok", at("normal"), mac, null)).toBe("ok");

@@ -1,4 +1,5 @@
 // fork: limits. Who may start a run while the machine is over its limits; see FORK.md.
+import * as NodeOS from "node:os";
 import type {
   EffectiveResourceLimits,
   OrchestrationV2AppThread,
@@ -24,6 +25,11 @@ import {
   TIMING,
   waitingReason,
 } from "./policy.ts";
+
+/** The machine's RAM, which "use up to N%" is a share of. */
+export const TotalMemoryBytes = Context.Reference<number>("t3/resourceLimits/TotalMemoryBytes", {
+  defaultValue: () => NodeOS.totalmem(),
+});
 
 export interface WaitingThread {
   readonly threadId: ThreadId;
@@ -101,7 +107,7 @@ const make = Effect.fn("makeResourceLimits")(function* () {
   const projections = yield* ProjectionStore.ProjectionStoreV2;
   const snapshot = yield* Ref.make<LimitsSnapshot>({
     ...UNLIMITED,
-    limits: effectiveLimits({}, platform),
+    limits: effectiveLimits({}, platform, yield* TotalMemoryBytes),
   });
 
   // Memory gate's rule: Alice's "launch anyway" counts while it's the newest message that started
