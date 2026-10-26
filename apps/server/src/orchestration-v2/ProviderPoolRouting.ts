@@ -75,6 +75,21 @@ const isCooling = (member: PoolMemberHealth, nowMs: number): boolean =>
   member.limitedUntilMs !== null && member.limitedUntilMs > nowMs;
 
 /**
+ * Known room left ranks first, then unknown usage, then a known-spent account:
+ * a failed usage probe shouldn't beat an account known to have room.
+ */
+const usageTier = (usedPercent: number | null): number =>
+  usedPercent === null ? 1 : usedPercent >= 100 ? 2 : 0;
+
+const spreadsBefore = (member: PoolMemberHealth, best: PoolMemberHealth, threadId: ThreadId) => {
+  const tier = usageTier(member.usedPercent) - usageTier(best.usedPercent);
+  if (tier !== 0) return tier < 0;
+  const used = (member.usedPercent ?? 0) - (best.usedPercent ?? 0);
+  if (used !== 0) return used < 0;
+  return rendezvousScore(threadId, member.instanceId) > rendezvousScore(threadId, best.instanceId);
+};
+
+/**
  * Rendezvous hashing breaks quota ties with no cursor to persist, and a
  * member that cools moves only its own threads.
  */
@@ -99,13 +114,7 @@ export function choosePoolMember(input: PoolRoutingInput): PoolRoutingDecision {
   }
   const spread = healthy.reduce<PoolMemberHealth | undefined>(
     (best, member) =>
-      best === undefined ||
-      (member.usedPercent ?? 0) < (best.usedPercent ?? 0) ||
-      ((member.usedPercent ?? 0) === (best.usedPercent ?? 0) &&
-        rendezvousScore(input.threadId, member.instanceId) >
-          rendezvousScore(input.threadId, best.instanceId))
-        ? member
-        : best,
+      best === undefined || spreadsBefore(member, best, input.threadId) ? member : best,
     undefined,
   );
   if (spread !== undefined) {
