@@ -254,8 +254,13 @@ Every push to `fork/main` runs **Fork release**. It:
 4. Publishes `vX.Y.Z-alice.N` as the latest release, with the installers, the update manifests (`latest.yml`,
    `latest-mac.yml`, `latest-linux.yml`), the blockmaps, the CLI archives, and `SHA256SUMS`.
 
-Nothing is published unless CI and every build pass. If publishing fails partway, delete the half-made release
-with `gh release delete vX.Y.Z-alice.N --cleanup-tag --yes` and re-run the workflow.
+Nothing is published unless CI and the Linux and Windows builds pass. macOS can be missing: GitHub sometimes has no
+macOS arm64 runner free, and cancels a job that waits about 15 minutes for one. The release then publishes without
+macOS, says so in its notes and as a warning on the run, and the next release includes macOS again. Until then a
+Mac's update check finds no `latest-mac.yml`. Re-running the macOS job doesn't add it to a published release.
+
+If publishing fails partway, delete the half-made release with `gh release delete vX.Y.Z-alice.N --cleanup-tag --yes`
+and re-run the workflow.
 
 Installed apps check the fork's latest release 15 seconds after launch and then every 4 minutes. A new release
 shows in the sidebar's update pill, which downloads it and then restarts into it. This is upstream's flow: the app
