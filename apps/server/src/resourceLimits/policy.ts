@@ -4,14 +4,15 @@
 // Each running session is about 2 GiB, and stock T3 has no limit that covers this outside Linux. The
 // rules here are the memory gate's (teenylilconfig docs/memgate.md), moved into T3's run scheduler.
 import * as DateTime from "effect/DateTime";
-import type {
-  EffectiveResourceLimits,
-  MemoryPressureLevel,
-  OrchestrationV2ConversationMessage,
-  ResourceLimitsSettings,
-  ResourceLimitsState,
-  RunId,
-  ThreadId,
+import {
+  type EffectiveResourceLimits,
+  type MemoryPressureLevel,
+  type OrchestrationV2ConversationMessage,
+  resolveResourceLimits,
+  type ResourceLimitsSettings,
+  type ResourceLimitsState,
+  type RunId,
+  type ThreadId,
 } from "@t3tools/contracts";
 
 export const GiB = 2 ** 30;
@@ -37,50 +38,17 @@ const CPU_RELEASE_MARGIN = 10;
 
 const LAUNCH_ANYWAY_PHRASE = "launch anyway";
 
-/** Alice's memory gate thresholds for the PC (teenylilconfig windows/hosts/teenylilpc/memgate.json). */
-const WINDOWS_DEFAULTS: EffectiveResourceLimits = {
-  pauseHeadroomGiB: 25,
-  pauseAvailableGiB: 8,
-  releaseHeadroomGiB: 35,
-  releaseAvailableGiB: 12,
-  criticalHeadroomGiB: 10,
-  pauseCpuPercent: null,
-  usesMemoryPressure: false,
-};
+/** Linux keeps upstream's cap, so the fork's limits run on Windows and macOS only. */
+export const limitsSupported = (platform: NodeJS.Platform) =>
+  platform === "win32" || platform === "darwin";
 
-// macOS keeps free memory low on purpose and compresses before it swaps, so its own pressure level
-// decides by default. Available-memory lines can be added per machine.
-const MACOS_DEFAULTS: EffectiveResourceLimits = {
-  pauseHeadroomGiB: null,
-  pauseAvailableGiB: null,
-  releaseHeadroomGiB: null,
-  releaseAvailableGiB: null,
-  criticalHeadroomGiB: null,
-  pauseCpuPercent: null,
-  usesMemoryPressure: true,
-};
-
-/** The limits in force on a platform, or null where the fork has none (Linux keeps upstream's cap). */
-export function effectiveLimits(
+/** The limits in force on a platform, or null where the fork has none. */
+export const effectiveLimits = (
   saved: ResourceLimitsSettings,
   platform: NodeJS.Platform,
-): EffectiveResourceLimits | null {
-  const defaults =
-    platform === "win32" ? WINDOWS_DEFAULTS : platform === "darwin" ? MACOS_DEFAULTS : null;
-  if (defaults === null) return null;
-  const commit = platform === "win32";
-  return {
-    pauseHeadroomGiB: commit ? (saved.pauseHeadroomGiB ?? defaults.pauseHeadroomGiB) : null,
-    pauseAvailableGiB: saved.pauseAvailableGiB ?? defaults.pauseAvailableGiB,
-    releaseHeadroomGiB: commit ? (saved.releaseHeadroomGiB ?? defaults.releaseHeadroomGiB) : null,
-    releaseAvailableGiB: saved.releaseAvailableGiB ?? defaults.releaseAvailableGiB,
-    criticalHeadroomGiB: commit
-      ? (saved.criticalHeadroomGiB ?? defaults.criticalHeadroomGiB)
-      : null,
-    pauseCpuPercent: saved.pauseCpuPercent ?? defaults.pauseCpuPercent,
-    usesMemoryPressure: defaults.usesMemoryPressure,
-  };
-}
+  totalBytes: number,
+): EffectiveResourceLimits | null =>
+  limitsSupported(platform) ? resolveResourceLimits(saved, platform === "win32", totalBytes) : null;
 
 export interface HostReading {
   readonly sampledAt: number;
