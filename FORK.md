@@ -91,8 +91,8 @@ git process trees it knows about with taskkill, or a plain kill when taskkill ca
 this patch once upstream ships it or an equivalent.
 
 - `apps/server/src/process/GitSpawnWorker.ts`: the worker and the `ChildProcessSpawner` in front of it.
-- `apps/server/src/server.ts`: the platform layer provides it, so every git caller gets it, including
-  `ProcessRunner`.
+- `apps/server/src/server.ts`: provides it inside the HTTP server layer, whose `NodeServices` would otherwise give
+  every layer it wraps Node's spawner, and outside it for `ProcessRunner` and the rest.
 - Test: `apps/server/src/process/GitSpawnWorker.fork.test.ts`, which runs live git.
 
 ### Pull request sweeps skip a redundant git recheck (`fork:`)
