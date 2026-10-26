@@ -37,6 +37,7 @@ import {
   interruptedNote,
   latestUserMessage,
   launchAnyway,
+  limitsSupported,
   newestInterruptible,
   nextState,
   offUntil,
@@ -44,7 +45,13 @@ import {
   type RunningTurn,
   TIMING,
 } from "./policy.ts";
-import { isOff, liveState, ResourceLimits, type WaitingThread } from "./ResourceLimits.ts";
+import {
+  isOff,
+  liveState,
+  ResourceLimits,
+  TotalMemoryBytes,
+  type WaitingThread,
+} from "./ResourceLimits.ts";
 
 /** A running session the hook may ask about, keyed by its provider's session id. */
 interface SessionInfo {
@@ -90,6 +97,7 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
   const limits = yield* ResourceLimits;
   const settings = yield* ServerSettings.ServerSettingsService;
   const platform = yield* HostProcess.Platform;
+  const totalBytes = yield* TotalMemoryBytes;
   const config = yield* ServerConfig.ServerConfig;
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -351,7 +359,7 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
       Effect.map((current) => current.resourceLimits),
       Effect.orElseSucceed(() => ({})),
     );
-    const effective = effectiveLimits(saved, platform);
+    const effective = effectiveLimits(saved, platform, totalBytes);
     if (effective === null) return;
     const switchedOffUntil = offUntil(yield* readJson(files.off), now);
     const remembered = yield* Ref.get(memory);
@@ -569,7 +577,7 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
   /** A saved change shows in Settings at once; the next pass decides what it means for held work. */
   const followSettings = settings.streamChanges.pipe(
     Stream.runForEach((current) => {
-      const effective = effectiveLimits(current.resourceLimits, platform);
+      const effective = effectiveLimits(current.resourceLimits, platform, totalBytes);
       return effective === null
         ? Effect.void
         : limits.update((snapshot) => ({ ...snapshot, limits: effective })).pipe(Effect.asVoid);
@@ -582,7 +590,7 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
 export const layer = Layer.effectDiscard(
   Effect.gen(function* () {
     const platform = yield* HostProcess.Platform;
-    if (effectiveLimits({}, platform) === null) return;
+    if (!limitsSupported(platform)) return;
     const readings = yield* HostReadings;
     const governor = yield* make();
     yield* governor.restore;
