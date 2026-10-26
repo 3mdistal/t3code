@@ -155,6 +155,29 @@ const sharesLogin = (a: ServerProvider, b: ServerProvider): boolean => {
   return email !== undefined && email !== "" && email === b.auth.email?.trim().toLowerCase();
 };
 
+/**
+ * The windows that stop every model on an account. One model's own weekly
+ * window or an extra-usage budget leaves the account's other work running.
+ */
+const ACCOUNT_WINDOW_IDS = new Map<string, ReadonlySet<string>>([
+  ["claudeAgent", new Set(["five_hour", "seven_day"])],
+  ["codex", new Set(["primary", "secondary", "individual"])],
+]);
+
+const accountWindows = (provider: ServerProvider) => {
+  const ids = ACCOUNT_WINDOW_IDS.get(provider.driver);
+  return (provider.usageLimits?.windows ?? []).filter(
+    (window) => ids === undefined || ids.has(window.id),
+  );
+};
+
+/** A spent window holds the account until it resets, as a limit error would. */
+const spentUntilMs = (provider: ServerProvider, nowMs: number): ReadonlyArray<number> =>
+  accountWindows(provider).flatMap((window) => {
+    const resetsAtMs = window.resetsAt === undefined ? Number.NaN : Date.parse(window.resetsAt);
+    return window.usedPercent >= 100 && resetsAtMs > nowMs ? [resetsAtMs] : [];
+  });
+
 export function poolMemberHealth(input: {
   readonly members: ReadonlyArray<ServerProvider>;
   readonly settings: Parameters<typeof resolveProjectProviderInstanceEnabled>[0];
@@ -165,12 +188,14 @@ export function poolMemberHealth(input: {
     const sharing = input.members.filter(
       (candidate) => candidate === member || sharesLogin(member, candidate),
     );
-    const limitedUntilMs = sharing.reduce<number | null>((latest, candidate) => {
-      const untilMs = providerLimitedUntilMs(candidate, input.nowMs);
-      return untilMs === null || (latest !== null && latest >= untilMs) ? latest : untilMs;
-    }, null);
+    const untilMs = sharing.flatMap((candidate) => {
+      const limited = providerLimitedUntilMs(candidate, input.nowMs);
+      const spent = spentUntilMs(candidate, input.nowMs);
+      return limited === null ? spent : [...spent, limited];
+    });
+    const limitedUntilMs = untilMs.length === 0 ? null : Math.max(...untilMs);
     const usedPercent = sharing
-      .flatMap((candidate) => candidate.usageLimits?.windows ?? [])
+      .flatMap(accountWindows)
       .reduce<number | null>((highest, window) => Math.max(highest ?? 0, window.usedPercent), null);
     return {
       instanceId: member.instanceId,
