@@ -100,6 +100,13 @@ jobs:
     name: CI
     needs: version
     if: needs.version.outputs.released == 'false'
+    # A called workflow gets no more than this, and GitHub won't start the run if
+    # one of fork-ci.yml's jobs asks for more. Upstream's CI asks for id-token for
+    # a task cache that only switches on in pingdotgg/t3code.
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
     uses: ./.github/workflows/fork-ci.yml
 
   bundle:
