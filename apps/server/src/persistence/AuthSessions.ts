@@ -394,7 +394,8 @@ export const make = Effect.gen(function* () {
 
   const getById: AuthSessionRepository["Service"]["getById"] = (input) =>
     getSessionRowById(input).pipe(
-      NodeSqliteClient.readOnly,
+      // fork: FORK.md — session and ticket verification cannot queue behind bulk reads.
+      (effect) => NodeSqliteClient.readOnly(effect, { priority: "interactive" }),
       Effect.mapError(
         toPersistenceSqlOrDecodeError(
           "AuthSessionRepository.getById:query",

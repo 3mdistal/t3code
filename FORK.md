@@ -120,6 +120,34 @@ the same gaps as automatic delivery, so it queues there. Its manual live check,
 - Test: #23559's own changes to `apps/server/src/orchestration-v2/CommandPolicy.test.ts`, which replace upstream's
   assertion that an explicit steer goes straight to the run.
 
+### Connections recover when SQLite is busy (`fork:`)
+
+The checkpoint worker used WAL allocation and a failed truncate as reasons to hold writers, even after every
+frame was checkpointed. A reader can prevent reset indefinitely. Admission now counts outstanding frames,
+keeping the 10,000-frame backpressure threshold; busy truncation retries in the background. The physical WAL
+can retain a reader's pinned prefix plus that backlog and the current transaction until the reader closes.
+The existing journal size limit and checkpoint durability settings are unchanged.
+
+Session and WebSocket-ticket verification reserve a separate, lazy read-only worker for their indexed session
+lookup. They retain the writer inside an existing write transaction. Upstream added a pool of four reader
+workers in v0.1.6 (#27097); the lane is one more worker beside the pool, which the pool never routes to, so
+session checks still don't wait behind four long reads. If the lane's worker can't start, those lookups use
+the pool and the pool stays on. Without the lane, session checks would wait only while all four pool readers
+are held by long reads, so it may be droppable later. Since v0.1.6 upstream itself retries a failed
+permission load with backoff while the connection stays up (#27008), so the fork no longer patches the
+client; its test checks that sending recovers without a reload after a failed or timed-out load.
+
+- `packages/shared/src/nodeSqliteClient.ts`: checkpoint admission and the interactive read lane. It also
+  exports `READER_POOL_SIZE` so the tests can hold every pool reader.
+- `apps/server/src/persistence/AuthSessions.ts`: the session lookup uses that lane. Upstream moved this
+  lookup from the writer to the bulk reader in v0.1.3 (#23902); the fork swaps that `readOnly` step for the
+  reserved lane. The environment descriptor uses static/filesystem state and has no database-read queue.
+- Tests: `packages/shared/src/nodeSqliteClient.fork.test.ts`,
+  `apps/server/src/auth/SessionStore.fork.test.ts` and
+  `packages/client-runtime/src/state/session.fork.test.ts`. The auth test holds the writer, then every pool
+  reader, and calls the real repository, session and ticket verifiers, so a sync that bypasses the reserved
+  lane fails CI whichever connection upstream otherwise chooses.
+
 ### macOS signing without upstream's App ID (`fork:`)
 
 Upstream's passkey entitlements need a provisioning profile for upstream's App ID, which the fork can't get.
