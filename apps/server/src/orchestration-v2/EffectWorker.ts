@@ -8,6 +8,7 @@ import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Metric from "effect/Metric";
 import * as Option from "effect/Option";
+import * as Ref from "effect/Ref"; // fork: see FORK.md.
 import * as Schema from "effect/Schema";
 
 import {
@@ -593,7 +594,15 @@ export interface OrchestrationEffectWorkerOptions {
   readonly workerId?: string;
   readonly leaseDurationMs?: number;
   readonly maxAttempts?: number;
+  readonly backgroundConcurrency?: number; // fork: see FORK.md.
 }
+
+// fork: background effects such as checkpoint captures may hold at most this many effect workers at
+// once. The daemon runs more workers than this, so the rest stay free for the effects that start,
+// steer or interrupt a turn. See FORK.md.
+const DEFAULT_BACKGROUND_EFFECT_CONCURRENCY = 4;
+const isControlEffect = (effect: EffectOutbox.OrchestrationEffectV2) =>
+  EffectOutbox.CONTROL_EFFECT_TYPES.some((effectType) => effectType === effect.request.type);
 
 export const layerWithOptions = (
   options: OrchestrationEffectWorkerOptions = {},
@@ -610,6 +619,18 @@ export const layerWithOptions = (
       const workerId = options.workerId ?? `orchestration-v2:${process.pid}`;
       const leaseDurationMs = Math.max(1, options.leaseDurationMs ?? 30_000);
       const maxAttempts = Math.max(1, options.maxAttempts ?? 5);
+      // fork: see FORK.md.
+      const backgroundConcurrency = Math.max(
+        1,
+        options.backgroundConcurrency ?? DEFAULT_BACKGROUND_EFFECT_CONCURRENCY,
+      );
+      const backgroundSlotsInUse = yield* Ref.make(0);
+      const takeBackgroundSlot = Ref.modify(
+        backgroundSlotsInUse,
+        (inUse): readonly [boolean, number] =>
+          inUse < backgroundConcurrency ? [true, inUse + 1] : [false, inUse],
+      );
+      const releaseBackgroundSlot = Ref.update(backgroundSlotsInUse, (inUse) => inUse - 1);
       const wasCancelled = (effectId: string) =>
         outbox.get(effectId).pipe(
           Effect.map(
@@ -701,10 +722,20 @@ export const layerWithOptions = (
           : terminalizeClaim(effect, cause);
 
       // The worker probes for work repeatedly, including when the outbox is empty.
-      const runOnce = Effect.fnUntraced(
-        function* (excludeRestartContinuations = false) {
+      const runClaim = Effect.fnUntraced(
+        // fork: was runOnce, see FORK.md.
+        function* (
+          excludeRestartContinuations = false,
+          backgroundSlot: { held: boolean }, // fork: see FORK.md.
+        ) {
           const claimExit = yield* Effect.exit(
-            outbox.claimNext({ workerId, leaseDurationMs, excludeRestartContinuations }),
+            outbox.claimNext({
+              workerId,
+              leaseDurationMs,
+              excludeRestartContinuations,
+              // fork: without a background slot, only control effects. See FORK.md.
+              ...(backgroundSlot.held ? {} : { effectTypes: EffectOutbox.CONTROL_EFFECT_TYPES }),
+            }),
           );
           yield* increment(orchestrationEffectClaimsTotal, {
             result: Exit.isFailure(claimExit)
@@ -715,6 +746,14 @@ export const layerWithOptions = (
           });
           if (Exit.isFailure(claimExit)) return yield* Effect.failCause(claimExit.cause);
           const claimed = claimExit.value;
+          // fork: a control effect runs without the background slot, see FORK.md.
+          if (
+            backgroundSlot.held &&
+            Option.match(claimed, { onNone: () => true, onSome: isControlEffect })
+          ) {
+            backgroundSlot.held = false;
+            yield* releaseBackgroundSlot;
+          }
           if (Option.isNone(claimed)) {
             return false;
           }
@@ -813,12 +852,24 @@ export const layerWithOptions = (
             ),
           ),
       );
+      // fork: a background slot is held from before the claim until the effect settles, see FORK.md.
+      const runOnce = (excludeRestartContinuations = false) =>
+        Effect.acquireUseRelease(
+          takeBackgroundSlot.pipe(Effect.map((held) => ({ held }))),
+          (backgroundSlot) => runClaim(excludeRestartContinuations, backgroundSlot),
+          (backgroundSlot) => (backgroundSlot.held ? releaseBackgroundSlot : Effect.void),
+        );
 
       return OrchestrationEffectWorkerV2.of({
         awaitWork: outbox.awaitAvailable,
         runOnce: runOnce(),
         runRecoveryOnce: runOnce(true),
-        nextClaimableAt: outbox.nextClaimableAt.pipe(
+        // fork: with every background slot taken, only a control effect can be claimed. See FORK.md.
+        nextClaimableAt: Effect.flatMap(Ref.get(backgroundSlotsInUse), (inUse) =>
+          inUse < backgroundConcurrency
+            ? outbox.nextClaimableAt
+            : outbox.nextClaimableAtFor(EffectOutbox.CONTROL_EFFECT_TYPES),
+        ).pipe(
           Effect.mapError(
             (cause) =>
               new OrchestrationEffectWorkerError({
@@ -845,7 +896,8 @@ export interface OrchestrationEffectDaemonOptions {
   readonly livenessPollIntervalMs?: number;
 }
 
-const DEFAULT_EFFECT_WORKER_CONCURRENCY = 4;
+// fork: two workers more than the background share, see FORK.md.
+const DEFAULT_EFFECT_WORKER_CONCURRENCY = DEFAULT_BACKGROUND_EFFECT_CONCURRENCY + 2;
 const DEFAULT_EFFECT_WORKER_LIVENESS_POLL_INTERVAL_MS = 30_000;
 
 export const runDaemonWithOptions = (options: OrchestrationEffectDaemonOptions = {}) =>
