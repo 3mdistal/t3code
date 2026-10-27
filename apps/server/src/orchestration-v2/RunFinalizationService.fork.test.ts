@@ -136,7 +136,9 @@ it.effect(
       assert.deepEqual(calls, ["capture", "capture", "capture"]);
       assert.deepEqual(refreshes, ["/thread-1", "/thread-2"]);
 
-      yield* TestClock.adjust(Duration.minutes(5));
+      yield* TestClock.adjust(Duration.seconds(299));
+      assert.deepEqual(refreshes, ["/thread-1", "/thread-2"]);
+      yield* TestClock.adjust(Duration.seconds(1));
       yield* Deferred.await(thirdStarted);
       assert.deepEqual(refreshes, ["/thread-1", "/thread-2", "/thread-3"]);
     }).pipe(Effect.provide(finalizationLayer(observer, calls)));
