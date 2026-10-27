@@ -2,6 +2,7 @@ import type { AuthSessionState, EnvironmentId, ServerConfig } from "@t3tools/con
 import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
+import * as Schedule from "effect/Schedule"; // fork: FORK.md
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import { HttpClient } from "effect/http";
@@ -152,7 +153,20 @@ function makeEnvironmentSessionAtoms<R, E>(
             prepared,
             signer,
             remoteAuthorization,
-          }).pipe(Effect.provideService(HttpClient.HttpClient, client.value));
+          }).pipe(
+            // fork: FORK.md
+            Effect.provideService(HttpClient.HttpClient, client.value), // fork: FORK.md
+            Effect.retry({
+              // fork: FORK.md — mounted permission consumers must recover after a transient load failure.
+              schedule: Schedule.spaced("1 second"), // fork: FORK.md
+              while: (error) =>
+                error._tag === "RemoteEnvironmentAuthTimeoutError" ||
+                error._tag === "RemoteEnvironmentAuthFetchError" ||
+                error._tag === "EnvironmentInternalError" ||
+                (error._tag === "RemoteEnvironmentAuthUndeclaredStatusError" &&
+                  error.status >= 500), // fork: FORK.md
+            }), // fork: FORK.md
+          ); // fork: FORK.md
         });
       })
       .pipe(

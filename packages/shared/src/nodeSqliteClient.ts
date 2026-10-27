@@ -51,10 +51,29 @@ const ReadOnly = Context.Reference<typeof Effect.interruptible | undefined>(
   { defaultValue: () => undefined },
 );
 
+// fork: FORK.md — short connection reads have a worker independent of bulk snapshots.
+const ReadPriority = Context.Reference<"bulk" | "interactive">(
+  "@t3tools/shared/nodeSqliteClient/ReadPriority",
+  { defaultValue: () => "bulk" },
+);
+
 /** Wrap the whole transaction; existing write transactions retain the writer, and writes on the reader fail as readonly. */
-export const readOnly = <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E, R> =>
-  Effect.uninterruptibleMask((restore) =>
-    restore(Effect.provideService(effect, ReadOnly, restore)),
+export const readOnly = <A, E, R>(
+  effect: Effect.Effect<A, E, R>,
+  options?: { readonly priority: "interactive" },
+): Effect.Effect<A, E, R> =>
+  // fork: FORK.md
+  Effect.uninterruptibleMask(
+    (restore) =>
+      restore(
+        Effect.provideService(
+          options === undefined
+            ? effect
+            : Effect.provideService(effect, ReadPriority, options.priority),
+          ReadOnly,
+          restore,
+        ),
+      ), // fork: FORK.md
   );
 
 interface Acquired {
@@ -528,6 +547,7 @@ const initialize = () => {
   truncate = db.prepare("PRAGMA wal_checkpoint(TRUNCATE)");
 };
 const atCeiling = (state) => state.log >= workerData.backpressureFrames;
+const needsBackpressure = (state) => state.log - state.checkpointed >= workerData.backpressureFrames; // fork: bound retained work rather than already copied frames, see FORK.md.
 const exceedsSizeLimit = () =>
   journalSizeLimit >= 0 && statSync(workerData.filename + "-wal").size > journalSizeLimit;
 const schedule = (state, blocked) => {
@@ -556,7 +576,7 @@ const check = (id, nextJournalSizeLimit, force, nextGeneration = generation) => 
     });
     return;
   }
-  const blocked = (atCeiling(state) || oversized) && state.checkpointed < state.log;
+  const blocked = needsBackpressure(state); // fork: FORK.md
   parentPort.postMessage({ type: "checkpoint", id, generation, ...state, blocked });
   schedule(state, blocked);
 };
@@ -573,7 +593,7 @@ const finishTruncate = (truncateId) => {
     db.exec("PRAGMA busy_timeout = 5000;");
   }
   const state = frames.get();
-  const blocked = (atCeiling(state) && (busy || state.checkpointed < state.log)) || exceedsSizeLimit();
+  const blocked = needsBackpressure(state); // fork: a busy reset is separate from outstanding checkpoint work, see FORK.md.
   pendingTruncate = undefined;
   parentPort.postMessage({
     type: "checkpoint",
@@ -587,7 +607,7 @@ const finishTruncate = (truncateId) => {
     pendingBarriers--;
     parentPort.postMessage("barrier");
   }
-  schedule(state, blocked);
+  schedule(state, blocked || busy); // fork: retry truncation without keeping writers gated, see FORK.md.
 };
 parentPort.on("message", (request) => {
   clearTimeout(idle);
@@ -675,7 +695,9 @@ const startCheckpointWorker = Effect.fnUntraced(function* (
   const gated = () =>
     !stopped &&
     !writer.isTransaction &&
-    (unknown || blocked || truncate !== undefined || log >= CHECKPOINT_BACKPRESSURE_FRAMES);
+    (unknown ||
+      truncate !== undefined ||
+      (checkpointed < log && (blocked || log - checkpointed >= CHECKPOINT_BACKPRESSURE_FRAMES))); // fork: FORK.md — a pinned reader can prevent reset after checkpointing finishes.
   const wake = () => {
     if (!gated() && elected === undefined) {
       elected = waiters.shift();
@@ -1088,18 +1110,31 @@ const make = Effect.fn("makeWithDatabase")(function* (
   const acquireReader =
     options.readerWorker && isFileDatabase ? yield* makeReader(options) : undefined;
   const readerSemaphore = yield* Semaphore.make(1);
+  const acquireInteractiveReader =
+    options.readerWorker && isFileDatabase ? yield* makeReader(options) : undefined; // fork: FORK.md
+  const interactiveReaderSemaphore = yield* Semaphore.make(1); // fork: FORK.md
 
   const writer = { name: "writer" as const, lock: semaphore, connection };
   let activeWriter: ConnectionOwner | undefined;
-  const route = Effect.withFiber((fiber) =>
-    acquireReader !== undefined && Context.get(fiber.context, ReadOnly)
-      ? Effect.map(acquireReader, (readerConnection) =>
-          readerConnection === undefined
-            ? writer
-            : { name: "reader" as const, lock: readerSemaphore, connection: readerConnection },
-        )
-      : Effect.succeed(writer),
-  );
+  const route = Effect.withFiber((fiber) => {
+    // fork: FORK.md
+    const interactive = fiber.getRef(ReadPriority) === "interactive"; // fork: FORK.md
+    const acquire = interactive ? acquireInteractiveReader : acquireReader; // fork: FORK.md
+    const lock = interactive ? interactiveReaderSemaphore : readerSemaphore; // fork: FORK.md
+    return (
+      // fork: FORK.md
+      acquire !== undefined && Context.get(fiber.context, ReadOnly) // fork: FORK.md
+        ? Effect.map(
+            acquire,
+            (readerConnection) =>
+              // fork: FORK.md
+              readerConnection === undefined
+                ? writer
+                : { name: "reader" as const, lock, connection: readerConnection }, // fork: FORK.md
+          )
+        : Effect.succeed(writer)
+    ); // fork: FORK.md
+  }); // fork: FORK.md
 
   const acquired = (
     target: { readonly name: Acquired["connection"] },
