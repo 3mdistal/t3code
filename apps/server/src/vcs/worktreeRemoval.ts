@@ -6,6 +6,7 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 
 import type * as GitVcsDriver from "./GitVcsDriver.ts";
+import { deleteWorktreeFolder } from "./worktreeDeleteWorker.ts"; // fork: see FORK.md.
 
 const INDEX_LIST_MAX_BYTES = 64 * 1024 * 1024;
 
@@ -155,7 +156,8 @@ export const removeLinkedWorktree = Effect.fn("WorktreeRemoval.removeLinkedWorkt
   const gitFileContents = yield* fileSystem
     .readFileString(gitFile)
     .pipe(Effect.mapError(() => notAWorktree));
-  yield* fileSystem.remove(worktreePath, { recursive: true }).pipe(
+  // fork: deletes from a worker thread, not with Node's `rm`, which starves the file pool. See FORK.md.
+  yield* deleteWorktreeFolder(worktreePath).pipe(
     Effect.tapError(() => fileSystem.writeFileString(gitFile, gitFileContents).pipe(Effect.ignore)),
     Effect.mapError((cause) => refuse(`failed to delete '${worktreePath}'`, cause)),
   );
