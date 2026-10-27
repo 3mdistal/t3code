@@ -230,6 +230,9 @@ Upstream's passkey entitlements need a provisioning profile for upstream's App I
   `node scripts/fork/ci-workflows.ts`. The sync runs it after every rebase, and `scripts/fork/ci-workflows.test.ts`
   fails CI if any upstream workflow could run.
 - `.github/workflows/fork-release.yml`, `scripts/fork/versions.ts` and `scripts/fork/sync.ts`, described below.
+  `fork-release.yml` runs `fork-ci.yml` as a called workflow, which gets no more permissions than its caller, so its
+  `ci` job grants whatever `fork-ci.yml`'s jobs ask for (`id-token: write` since v0.1.3, for upstream's task cache).
+  Otherwise GitHub won't start the release. `scripts/fork/ci-workflows.test.ts` checks this.
 - Tests: `scripts/fork/*.test.ts` and `apps/desktop/src/updates/updateChannels.fork.test.ts`.
 
 ### Account pools (`pools:`)
