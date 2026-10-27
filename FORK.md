@@ -120,6 +120,30 @@ the same gaps as automatic delivery, so it queues there. Its manual live check,
 - Test: #23559's own changes to `apps/server/src/orchestration-v2/CommandPolicy.test.ts`, which replace upstream's
   assertion that an explicit steer goes straight to the run.
 
+### Connections recover when SQLite is busy (`fork:`)
+
+The checkpoint worker used WAL allocation and a failed truncate as reasons to hold writers, even after every
+frame was checkpointed. A reader can prevent reset indefinitely. Admission now counts outstanding frames,
+keeping the 10,000-frame backpressure threshold; busy truncation retries in the background. The physical WAL
+can retain a reader's pinned prefix plus that backlog and the current transaction until the reader closes.
+The existing journal size limit and checkpoint durability settings are unchanged.
+
+Session and WebSocket-ticket verification reserve a separate, lazy read-only worker for their indexed session
+lookup. They retain the writer inside an existing write transaction. A mounted client retries transient
+permission-load failures after one second, so sending recovers without a reload; an explicit denied grant
+stays denied. This is shared web, desktop and mobile client logic, with no new UI or persisted data.
+
+- `packages/shared/src/nodeSqliteClient.ts`: checkpoint admission and the interactive read lane.
+- `apps/server/src/persistence/AuthSessions.ts`: the session lookup uses that lane. Upstream moved this
+  lookup from the writer to the bulk reader in v0.1.3 (#23902); the fork swaps that `readOnly` step for the
+  reserved lane. The environment descriptor uses static/filesystem state and has no database-read queue.
+- `packages/client-runtime/src/state/session.ts`: retry transient session-state requests.
+- Tests: `packages/shared/src/nodeSqliteClient.fork.test.ts`,
+  `apps/server/src/auth/SessionStore.fork.test.ts` and
+  `packages/client-runtime/src/state/session.fork.test.ts`. The auth test holds both the writer and the bulk
+  reader in turn and calls the real repository, session and ticket verifiers, so a sync that bypasses the
+  reserved lane fails CI whichever connection upstream otherwise chooses.
+
 ### macOS signing without upstream's App ID (`fork:`)
 
 Upstream's passkey entitlements need a provisioning profile for upstream's App ID, which the fork can't get.
