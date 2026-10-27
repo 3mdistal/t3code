@@ -118,6 +118,22 @@ jobs:
     expect(generated).toContain("runs-on: windows-2025\n");
   });
 
+  it("gives the release's CI call every permission Fork CI's jobs ask for", () => {
+    const release = read("fork-release.yml").replaceAll("\r\n", "\n");
+    const call = /^ {2}ci:\n(?:(?: {4}.*)?\n)*/m.exec(release)?.[0] ?? "";
+    expect(call).toContain("uses: ./.github/workflows/fork-ci.yml");
+    const requested = [
+      ...read("fork-ci.yml")
+        .replaceAll("\r\n", "\n")
+        .matchAll(/^ {6}([a-z-]+): (read|write)$/gm),
+    ].map(([, name, level]) => [name, level] as const);
+    expect(requested).toContainEqual(["contents", "read"]);
+    for (const [name, level] of requested) {
+      const granted = level === "read" ? "(read|write)" : "write";
+      expect(call).toMatch(new RegExp(`^ {6}${name}: ${granted}$`, "m"));
+    }
+  });
+
   it("refuses a runner it cannot map", () => {
     expect(() =>
       forkWorkflow("name: CI\non:\n  push:\njobs:\n  a:\n    runs-on: blacksmith-gpu\n", {
