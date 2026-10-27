@@ -144,6 +144,32 @@ stays denied. This is shared web, desktop and mobile client logic, with no new U
   reader in turn and calls the real repository, session and ticket verifiers, so a sync that bypasses the
   reserved lane fails CI whichever connection upstream otherwise chooses.
 
+### Stalled checkpoint captures can't hold up turns (`fork:`)
+
+On Oct 26, all four orchestration effect workers sat on `checkpoint.capture` effects for over a quarter of an hour.
+Seven turn starts and a steer waited behind them until the backend was killed. Three of those captures had already
+committed their checkpoint and were stuck in the workspace refresh that follows it. The fork makes two changes:
+
+- Background effects hold at most four workers, and the daemon runs six, so two are always free for the effects
+  that drive a turn (`CONTROL_EFFECT_TYPES`: start, steer, interrupt, restart, continue after a restart, answer a
+  runtime request, detach a session). A worker with no background slot claims only those. A type upstream adds
+  later counts as background.
+- Once a capture's checkpoint is committed, the capture effect settles. The refresh of the Changes panel and PR
+  status runs beside the workers, at most two at a time, and is dropped after five minutes. The thread's next turn
+  no longer waits for it. Upstream's refresh already skips the PR lookup once a queued follow-up turn has
+  started, which it does as soon as the capture commits, so PR discovery doesn't change.
+
+Upstream hasn't been asked yet.
+
+- `apps/server/src/orchestration-v2/EffectOutbox.ts`: `CONTROL_EFFECT_TYPES`, the `effectTypes` filter on
+  `claimNext`, and `nextClaimableAtFor`.
+- `apps/server/src/orchestration-v2/EffectWorker.ts`: the background slots, and six workers by default.
+- `apps/server/src/orchestration-v2/RunFinalizationService.ts`: the refresh after a capture.
+- Tests: `apps/server/src/orchestration-v2/EffectWorker.fork.test.ts` and
+  `apps/server/src/orchestration-v2/RunFinalizationService.fork.test.ts`. Upstream's
+  `RunFinalizationService.test.ts` and `RunFinalizationQueue.test.ts` pass unchanged: the refresh starts before
+  the capture effect returns.
+
 ### macOS signing without upstream's App ID (`fork:`)
 
 Upstream's passkey entitlements need a provisioning profile for upstream's App ID, which the fork can't get.
