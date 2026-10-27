@@ -45,10 +45,29 @@ const ReadOnly = Context.Reference<typeof Effect.interruptible | undefined>(
   { defaultValue: () => undefined },
 );
 
+// fork: FORK.md — short connection reads have a worker independent of bulk snapshots.
+const ReadPriority = Context.Reference<"bulk" | "interactive">(
+  "@t3tools/shared/nodeSqliteClient/ReadPriority",
+  { defaultValue: () => "bulk" },
+);
+
 /** Wrap the whole transaction; existing write transactions retain the writer, and writes on the reader fail as readonly. */
-export const readOnly = <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E, R> =>
-  Effect.uninterruptibleMask((restore) =>
-    restore(Effect.provideService(effect, ReadOnly, restore)),
+export const readOnly = <A, E, R>(
+  effect: Effect.Effect<A, E, R>,
+  options?: { readonly priority: "interactive" },
+): Effect.Effect<A, E, R> =>
+  // fork: FORK.md
+  Effect.uninterruptibleMask(
+    (restore) =>
+      restore(
+        Effect.provideService(
+          options === undefined
+            ? effect
+            : Effect.provideService(effect, ReadPriority, options.priority),
+          ReadOnly,
+          restore,
+        ),
+      ), // fork: FORK.md
   );
 
 interface Acquired {
@@ -352,7 +371,7 @@ const failedWith = (
 const endsReadTransaction = (sql: string) => /^\s*ROLLBACK\b|^\s*COMMIT\b/i.test(sql);
 
 // WAL readers run concurrently; one worker serialized every read behind the slowest transaction.
-const READER_POOL_SIZE = 4;
+export const READER_POOL_SIZE = 4; // fork: lane tests hold every pool reader, see FORK.md.
 const READER_STARTUP_TIMEOUT = Duration.seconds(10);
 const READER_RETRY_DELAY = Duration.seconds(1);
 const READER_RETRY_MAX_DELAY = Duration.minutes(1);
@@ -966,6 +985,16 @@ const make = Effect.fn("makeWithDatabase")(function* (
       : [];
   // One permit per slot, so a queued read waits for any reader, not one it picked while all were busy.
   const readerAdmission = yield* Semaphore.make(readers.length);
+  // fork: session lookups get a reader the pool never routes to, see FORK.md. Its own flag keeps
+  // the pool on if this one worker fails; interactive reads then share the pool.
+  const interactivePool = { unavailable: false };
+  const interactiveReader =
+    readers.length > 0
+      ? {
+          acquire: yield* makeReader(options.filename, interactivePool),
+          lock: yield* Semaphore.make(1),
+        }
+      : undefined;
 
   interface Target {
     readonly name: Acquired["connection"];
@@ -987,6 +1016,24 @@ const make = Effect.fn("makeWithDatabase")(function* (
     Effect.withFiber((fiber): Effect.Effect<Target, SqlError> => {
       if (readers.length === 0 || readerPool.unavailable || !Context.get(fiber.context, ReadOnly)) {
         return writer;
+      }
+      // fork: see FORK.md.
+      const interactive =
+        fiber.getRef(ReadPriority) === "interactive" && !interactivePool.unavailable
+          ? interactiveReader
+          : undefined;
+      if (interactive !== undefined) {
+        return Effect.flatMap(
+          Effect.provideService(interactive.acquire, ReadOnly, restore),
+          (readerConnection) =>
+            readerConnection === undefined
+              ? writer
+              : Effect.succeed<Target>({
+                  name: "reader",
+                  lock: interactive.lock,
+                  connection: readerConnection,
+                }),
+        );
       }
       const claim = Effect.andThen(
         restore(readerAdmission.take(1)),
