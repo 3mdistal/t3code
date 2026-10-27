@@ -5,6 +5,7 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as SqlSchema from "effect/sql/SqlSchema";
+import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient"; // fork: FORK.md
 
 import {
   AuthClientMetadataDeviceType,
@@ -415,7 +416,8 @@ export const make = Effect.gen(function* () {
     );
 
   const getById: AuthSessionRepository["Service"]["getById"] = (input) =>
-    getSessionRowById(input).pipe(
+    NodeSqliteClient.readOnly(getSessionRowById(input), { priority: "interactive" }).pipe(
+      // fork: FORK.md — session and ticket verification cannot queue behind bulk reads.
       Effect.mapError(
         toPersistenceSqlOrDecodeError(
           "AuthSessionRepository.getById:query",
