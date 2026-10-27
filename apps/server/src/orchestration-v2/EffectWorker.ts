@@ -651,7 +651,15 @@ export const layerWithOptions = (
         (inUse): readonly [boolean, number] =>
           inUse < backgroundConcurrency ? [true, inUse + 1] : [false, inUse],
       );
-      const releaseBackgroundSlot = Ref.update(backgroundSlotsInUse, (inUse) => inUse - 1);
+      // fork: clearing `held` and the count is one step, so an interrupt between them can't leak the slot.
+      const giveBackSlot = (backgroundSlot: { held: boolean }) =>
+        Effect.uninterruptible(
+          Effect.suspend(() => {
+            if (!backgroundSlot.held) return Effect.void;
+            backgroundSlot.held = false;
+            return Ref.update(backgroundSlotsInUse, (inUse) => inUse - 1);
+          }),
+        );
       const wasCancelled = (effectId: string) =>
         outbox.get(effectId).pipe(
           Effect.map(
@@ -767,12 +775,8 @@ export const layerWithOptions = (
           if (Exit.isFailure(claimExit)) return yield* Effect.failCause(claimExit.cause);
           const claimed = claimExit.value;
           // fork: a control effect runs without the background slot, see FORK.md.
-          if (
-            backgroundSlot.held &&
-            Option.match(claimed, { onNone: () => true, onSome: isControlEffect })
-          ) {
-            backgroundSlot.held = false;
-            yield* releaseBackgroundSlot;
+          if (Option.match(claimed, { onNone: () => true, onSome: isControlEffect })) {
+            yield* giveBackSlot(backgroundSlot);
           }
           if (Option.isNone(claimed)) {
             return false;
@@ -877,7 +881,7 @@ export const layerWithOptions = (
         Effect.acquireUseRelease(
           takeBackgroundSlot.pipe(Effect.map((held) => ({ held }))),
           (backgroundSlot) => runClaim(excludeRestartContinuations, backgroundSlot),
-          (backgroundSlot) => (backgroundSlot.held ? releaseBackgroundSlot : Effect.void),
+          giveBackSlot,
         );
 
       return OrchestrationEffectWorkerV2.of({

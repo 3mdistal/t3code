@@ -144,11 +144,13 @@ export const PROCESS_BOUND_EFFECT_TYPES = [
 ] as const satisfies ReadonlyArray<OrchestrationEffectRequestV2["type"]>;
 
 // fork: the effects that drive a provider turn, which keep a reserved share of the effect workers.
+// An interrupt that holds the queue also waits for the thread's delegated tasks to stop.
 // See FORK.md. Any other type, including one upstream adds later, counts as background work.
 export const CONTROL_EFFECT_TYPES = [
   ...PROCESS_BOUND_EFFECT_TYPES,
   "provider-runtime.continue",
   "provider-session.detach",
+  "delegated-tasks.stop",
 ] as const satisfies ReadonlyArray<OrchestrationEffectRequestV2["type"]>;
 
 export const OrchestrationEffectStatusV2 = Schema.Literals([
