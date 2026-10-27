@@ -76,6 +76,33 @@ models; skills come back unmarked, so visible, when time runs out.
 - Test: `apps/server/src/provider/codexSkillInvocability.fork.test.ts`, with the slow-disk cases on the test
   clock.
 
+### Session checks get their own database reader (`fork:`)
+
+Session and WebSocket-ticket verification reserve a separate, lazy read-only worker for their indexed session
+lookup. They retain the writer inside an existing write transaction. Upstream added a pool of four reader
+workers in v0.1.6 (#27097), and since v0.1.11 a read waits for whichever pool reader frees first (#27979); the lane is one
+more worker beside the pool, which the pool never routes to, so session checks still don't wait behind four long
+reads. If the lane's worker can't start, those lookups use
+the pool and the pool stays on. Without the lane, session checks would wait only while all four pool readers
+are held by long reads, so it may be droppable later. Since v0.1.6 upstream itself retries a failed
+permission load with backoff while the connection stays up (#27008), so the fork no longer patches the
+client; its test checks that sending recovers without a reload after a failed or timed-out load.
+
+Until v0.1.11 this patch also changed when the checkpoint worker held writers back. v0.1.11 no longer holds writers
+for checkpoints at all (#23496, #31804): the writer checkpoints its own log past 10,000 frames instead. That part is
+gone.
+
+- `packages/shared/src/nodeSqliteClient.ts`: the interactive read lane. It also
+  exports `READER_POOL_SIZE` so the tests can hold every pool reader.
+- `apps/server/src/persistence/AuthSessions.ts`: the session lookup uses that lane. Upstream moved this
+  lookup from the writer to the bulk reader in v0.1.3 (#23902); the fork swaps that `readOnly` step for the
+  reserved lane. The environment descriptor uses static/filesystem state and has no database-read queue.
+- Tests: `packages/shared/src/nodeSqliteClient.fork.test.ts`,
+  `apps/server/src/auth/SessionStore.fork.test.ts` and
+  `packages/client-runtime/src/state/session.fork.test.ts`. The auth test holds the writer, then every pool
+  reader, and calls the real repository, session and ticket verifiers, so a sync that bypasses the reserved
+  lane fails CI whichever connection upstream otherwise chooses.
+
 ### macOS signing without upstream's App ID (`fork:`)
 
 Upstream's passkey entitlements need a provisioning profile for upstream's App ID, which the fork can't get.
