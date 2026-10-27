@@ -137,7 +137,12 @@ const holdFolder = (directory: string) =>
         })
       : Effect.sync(() => {
           NodeFS.chmodSync(directory, 0o555);
-          return async () => NodeFS.chmodSync(directory, 0o755);
+          // Once only: after an early release, a test can delete the folder before the scope closes.
+          let released = false;
+          return async () => {
+            if (!released) NodeFS.chmodSync(directory, 0o755);
+            released = true;
+          };
         }),
     (release) => Effect.promise(release),
   ).pipe(Effect.map((release) => Effect.promise(release)));
