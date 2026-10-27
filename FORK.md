@@ -152,12 +152,15 @@ committed their checkpoint and were stuck in the workspace refresh that follows 
 
 - Background effects hold at most four workers, and the daemon runs six, so two are always free for the effects
   that drive a turn (`CONTROL_EFFECT_TYPES`: start, steer, interrupt, restart, continue after a restart, answer a
-  runtime request, detach a session). A worker with no background slot claims only those. A type upstream adds
-  later counts as background.
+  runtime request, detach a session, and stop an interrupted thread's delegated tasks, which an interrupt that
+  holds the queue waits for). A worker with no background slot claims only those. A type upstream adds later
+  counts as background. A worker gives its slot back in one uninterruptible step, so an interrupted claim can't
+  leak it.
 - Once a capture's checkpoint is committed, the capture effect settles. The refresh of the Changes panel and PR
   status runs beside the workers, at most two at a time, and is dropped after five minutes. The thread's next turn
-  no longer waits for it. Upstream's refresh already skips the PR lookup once a queued follow-up turn has
-  started, which it does as soon as the capture commits, so PR discovery doesn't change.
+  no longer waits for it. Upstream's refresh skips the PR lookup once a queued follow-up turn has started, and
+  that turn can now start before the refresh runs, so the lookup is skipped more often; the follow-up turn's own
+  refresh does it.
 
 Upstream hasn't been asked yet.
 
