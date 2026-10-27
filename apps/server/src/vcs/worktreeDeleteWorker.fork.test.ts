@@ -17,7 +17,11 @@ import * as NodeWorkerThreads from "node:worker_threads";
 
 import * as ServerConfig from "../config.ts";
 import * as GitVcsDriver from "./GitVcsDriver.ts";
-import { deleteWorktreeFolder, type CreateWorker } from "./worktreeDeleteWorker.ts";
+import {
+  DeleteWorkerFactory,
+  deleteWorktreeFolder,
+  type CreateWorker,
+} from "./worktreeDeleteWorker.ts";
 import { removeLinkedWorktree } from "./worktreeRemoval.ts";
 
 // oxlint-disable-next-line t3code/no-global-process-runtime -- A held folder needs a real Windows host.
@@ -72,19 +76,22 @@ const makeFolders = Effect.gen(function* () {
   return { root, outside, worktree, path };
 });
 
-/** Runs the real walk, but pauses it after its first unlink until `resume`. */
-const pausingWorkers = () => {
+/**
+ * Runs the real walk, but pauses it until `resume` after its first unlink, or after unlinking a
+ * file named `pauseAfter` in any case.
+ */
+const pausingWorkers = (pauseAfter?: string) => {
   const gate = new Int32Array(new SharedArrayBuffer(8));
   const workers: Array<NodeWorkerThreads.Worker> = [];
-  let live = 0;
-  let maxLive = 0;
   const create: CreateWorker = (source, target) => {
     const prelude = `{
-  const gate = require("node:worker_threads").workerData.gate;
+  const { gate, pauseAfter } = require("node:worker_threads").workerData;
   const fs = require("node:fs");
+  const path = require("node:path");
   const unlinkSync = fs.unlinkSync;
   fs.unlinkSync = (file) => {
     unlinkSync(file);
+    if (pauseAfter !== undefined && path.basename(file).toLowerCase() !== pauseAfter) return;
     Atomics.store(gate, 0, 1);
     Atomics.notify(gate, 0);
     Atomics.wait(gate, 1, 0);
@@ -93,17 +100,14 @@ const pausingWorkers = () => {
 `;
     const worker = new NodeWorkerThreads.Worker(prelude + source, {
       eval: true,
-      workerData: { target, gate },
+      workerData: { target, gate, pauseAfter },
     });
     workers.push(worker);
-    maxLive = Math.max(maxLive, ++live);
-    worker.once("exit", () => live--);
     return worker;
   };
   return {
-    create,
     workers,
-    maxLive: () => maxLive,
+    provide: Effect.provideService(DeleteWorkerFactory, create),
     paused: Effect.promise(async () => {
       await Atomics.waitAsync(gate, 0, 0).value;
     }),
@@ -174,14 +178,14 @@ const makeWorktree = Effect.gen(function* () {
   }
   const gitFile = path.join(worktree, ".git");
   // The Windows path runs on every host: Git does the checks there, and this module the delete.
-  const remove = (force: boolean) =>
+  const remove = (force: boolean, onGit: () => void = () => {}) =>
     removeLinkedWorktree({
       operation: "worktreeDeleteWorker.test",
       cwd: repo,
       worktreePath: worktree,
       force,
-      execute: driver.execute,
-      run: (args) => git(repo, args),
+      execute: (input) => Effect.sync(onGit).pipe(Effect.andThen(driver.execute(input))),
+      run: (args) => Effect.sync(onGit).pipe(Effect.andThen(git(repo, args))),
     }).pipe(Effect.provideService(HostProcess.Platform, "win32"));
   const registered = git(repo, ["worktree", "list", "--porcelain"]).pipe(
     Effect.map((list) => list.includes("branch refs/heads/big")),
@@ -200,7 +204,7 @@ it.layer(NodeServices.layer)("deleteWorktreeFolder", (it) => {
       const spy = pausingWorkers();
       yield* spy.resume;
 
-      yield* deleteWorktreeFolder(worktree, spy.create);
+      yield* deleteWorktreeFolder(worktree).pipe(spy.provide);
 
       assert.isFalse(NodeFS.existsSync(worktree));
       assert.equal(snapshot(outside), before);
@@ -260,30 +264,20 @@ it.layer(NodeServices.layer)("deleteWorktreeFolder", (it) => {
     }),
   );
 
-  it.effect("runs one delete at a time", () =>
+  it.effect.each([".git", ".GIT"])("deletes %s after everything else", (marker) =>
     Effect.gen(function* () {
-      const first = yield* makeFolders;
-      const second = yield* makeFolders;
-      const spy = pausingWorkers();
-      const both = yield* Effect.forkChild(
-        Effect.all(
-          [
-            deleteWorktreeFolder(first.worktree, spy.create),
-            deleteWorktreeFolder(second.worktree, spy.create),
-          ],
-          { concurrency: 2 },
-        ),
-      );
+      const { worktree, path } = yield* makeFolders;
+      NodeFS.renameSync(path.join(worktree, ".git"), path.join(worktree, marker));
+      NodeFS.writeFileSync(path.join(worktree, "zzz.txt"), "listed after .git\n");
+      const spy = pausingWorkers(".git");
+      const deleting = yield* deleteWorktreeFolder(worktree).pipe(spy.provide, Effect.forkChild);
       yield* spy.paused;
-      assert.equal(spy.workers.length, 1);
+
+      assert.deepEqual(NodeFS.readdirSync(worktree), []);
 
       yield* spy.resume;
-      yield* Fiber.join(both);
-
-      assert.equal(spy.workers.length, 2);
-      assert.equal(spy.maxLive(), 1);
-      assert.isFalse(NodeFS.existsSync(first.worktree));
-      assert.isFalse(NodeFS.existsSync(second.worktree));
+      yield* Fiber.join(deleting);
+      assert.isFalse(NodeFS.existsSync(worktree));
     }),
   );
 });
@@ -297,7 +291,8 @@ it.layer(layerTest)("removeLinkedWorktree with the delete worker", (it) => {
         const gitFileContents = NodeFS.readFileSync(gitFile, "utf8");
         const spy = pausingWorkers();
         const scope = yield* Scope.make();
-        const deleting = yield* deleteWorktreeFolder(worktree, spy.create).pipe(
+        const deleting = yield* deleteWorktreeFolder(worktree).pipe(
+          spy.provide,
           Effect.forkIn(scope),
         );
         yield* spy.paused;
@@ -337,5 +332,46 @@ it.layer(layerTest)("removeLinkedWorktree with the delete worker", (it) => {
         assert.isFalse(NodeFS.existsSync(worktree));
         assert.isFalse(yield* registered);
       }),
+  );
+
+  it.effect("puts .git back when interrupted just after deleting it", () =>
+    Effect.gen(function* () {
+      const { worktree, gitFile, remove, registered } = yield* makeWorktree;
+      const gitFileContents = NodeFS.readFileSync(gitFile, "utf8");
+      const spy = pausingWorkers(".git");
+      const removing = yield* remove(true).pipe(spy.provide, Effect.forkChild);
+      yield* spy.paused;
+      assert.isFalse(NodeFS.existsSync(gitFile));
+
+      yield* Fiber.interrupt(removing);
+
+      assert.equal(spy.workers[0]?.threadId, -1);
+      assert.equal(NodeFS.readFileSync(gitFile, "utf8"), gitFileContents);
+      yield* remove(true);
+      assert.isFalse(NodeFS.existsSync(worktree));
+      assert.isFalse(yield* registered);
+    }),
+  );
+
+  it.effect("runs one removal at a time, its checks included", () =>
+    Effect.gen(function* () {
+      const first = yield* makeWorktree;
+      const second = yield* makeWorktree;
+      const gitCalls: Array<string> = [];
+
+      yield* Effect.all(
+        [
+          first.remove(false, () => gitCalls.push("first")),
+          second.remove(false, () => gitCalls.push("second")),
+        ],
+        { concurrency: 2 },
+      );
+
+      // A removal that checked before waiting could delete changes made while it waited.
+      const runs = gitCalls.filter((call, index) => call !== gitCalls[index - 1]);
+      assert.equal(runs.length, 2);
+      assert.isFalse(NodeFS.existsSync(first.worktree));
+      assert.isFalse(NodeFS.existsSync(second.worktree));
+    }),
   );
 });
