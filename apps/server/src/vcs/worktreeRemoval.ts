@@ -6,7 +6,7 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 
 import type * as GitVcsDriver from "./GitVcsDriver.ts";
-import { deleteWorktreeFolder } from "./worktreeDeleteWorker.ts"; // fork: see FORK.md.
+import { deleteWorktreeFolder, oneRemovalAtATime } from "./worktreeDeleteWorker.ts"; // fork: see FORK.md.
 
 const INDEX_LIST_MAX_BYTES = 64 * 1024 * 1024;
 
@@ -23,7 +23,8 @@ const INDEX_LIST_MAX_BYTES = 64 * 1024 * 1024;
  * following them, and then has Git drop the now-missing worktree's metadata.
  * Git elsewhere only unlinks links, so other hosts run Git as before.
  */
-export const removeLinkedWorktree = Effect.fn("WorktreeRemoval.removeLinkedWorktree")(function* <
+// fork: exported below, where Windows removals run one at a time. See FORK.md.
+const removeLinkedWorktreeNow = Effect.fn("WorktreeRemoval.removeLinkedWorktree")(function* <
   A,
   E,
   R,
@@ -156,11 +157,17 @@ export const removeLinkedWorktree = Effect.fn("WorktreeRemoval.removeLinkedWorkt
   const gitFileContents = yield* fileSystem
     .readFileString(gitFile)
     .pipe(Effect.mapError(() => notAWorktree));
-  // fork: deletes from a worker thread, not with Node's `rm`, which starves the file pool. See FORK.md.
+  // fork: deletes from a worker thread, not with Node's `rm`, which starves the file pool, and
+  // restores `.git` on interruption too, which can land just after it is deleted. See FORK.md.
   yield* deleteWorktreeFolder(worktreePath).pipe(
-    Effect.tapError(() => fileSystem.writeFileString(gitFile, gitFileContents).pipe(Effect.ignore)),
+    Effect.onError(() => fileSystem.writeFileString(gitFile, gitFileContents).pipe(Effect.ignore)),
     Effect.mapError((cause) => refuse(`failed to delete '${worktreePath}'`, cause)),
   );
   // The folder is gone, so Git only drops the worktree's metadata.
   return yield* input.run(["worktree", "remove", "--force", "--force", "--", worktreePath]);
 });
+
+// fork: see FORK.md.
+export const removeLinkedWorktree = <A, E, R>(
+  input: Parameters<typeof removeLinkedWorktreeNow<A, E, R>>[0],
+) => oneRemovalAtATime(removeLinkedWorktreeNow(input));
