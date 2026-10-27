@@ -194,6 +194,18 @@ Upstream hasn't been asked yet.
   `RunFinalizationService.test.ts` and `RunFinalizationQueue.test.ts` pass unchanged: the refresh starts before
   the capture effect returns.
 
+### Storage cleanup reads git 2.56's message for a broken worktree (`fork:`)
+
+Git 2.56 reports a linked worktree whose `.git` file points at a missing repository as "gitfile does not point to a
+valid repository" instead of "not a git repository". Storage cleanup only matched the old text, so on git 2.56 it
+reported such a worktree as a failed cleanup instead of keeping it as "Repository or branch changed". Either way
+nothing is deleted. Fork CI's GitHub runner has git 2.56, while upstream's runners are still on 2.55. Drop this
+patch once upstream matches the new text.
+
+- `apps/server/src/storageCleanup.ts`: `branchChanged` matches both messages.
+- Test: upstream's `apps/server/src/storageCleanup.test.ts` ("compares the checked-out branch without a full
+  status") fails on git 2.56 without it.
+
 ### macOS signing without upstream's App ID (`fork:`)
 
 Upstream's passkey entitlements need a provisioning profile for upstream's App ID, which the fork can't get.
