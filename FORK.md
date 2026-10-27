@@ -100,15 +100,18 @@ recursive `rm` queues an async request per entry on the four-thread pool that ev
 shares, so deleting a worktree with a pnpm `node_modules` queued 81,180 requests on the PC, a secret read waited
 73 seconds and clients showed "reconnecting". The folder is now deleted by a synchronous `lstat` walk on one worker
 thread, which leaves that pool free. It unlinks junctions and symlinks without entering them, makes read-only files
-writable, and deletes `.git` last, so a delete stopped partway leaves a worktree that a forced retry finishes.
-Interrupting the removal or stopping the server terminates the worker, and one delete runs at a time. Not
-`fs.rmSync`: under Electron 44 it deleted nothing from a folder holding junctions and reported no error, and a
-worker can't stop it partway. Git's checks, the `.git` restore after a failed delete, the final
+writable, and deletes `.git` last (in any case), so a delete stopped partway leaves a worktree that a forced retry
+finishes. Interrupting the removal or stopping the server terminates the worker, and the `.git` restore that
+followed a failed delete now also follows an interruption, which can land just after `.git` goes. Windows removals
+run one at a time, and the slot covers Git's checks too, so a removal queued behind a long delete checks after it
+waits rather than acting on stale checks. Not `fs.rmSync`: under Electron 44 it deleted nothing from a folder
+holding junctions and reported no error, and a worker can't stop it partway. Git's checks, the final
 `git worktree remove --force --force` and other hosts are unchanged. Drop this patch if upstream moves the delete
 off the pool.
 
-- `apps/server/src/vcs/worktreeDeleteWorker.ts`: the worker.
-- `apps/server/src/vcs/worktreeRemoval.ts`: calls it instead of `fileSystem.remove`.
+- `apps/server/src/vcs/worktreeDeleteWorker.ts`: the worker and the one-at-a-time slot.
+- `apps/server/src/vcs/worktreeRemoval.ts`: deletes with the worker, restores `.git` on interruption, and exports
+  `removeLinkedWorktree` through the slot.
 - Test: `apps/server/src/vcs/worktreeDeleteWorker.fork.test.ts`.
 
 ### Pull request sweeps skip a redundant git recheck (`fork:`)
