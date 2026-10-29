@@ -19,7 +19,14 @@ import {
   type SelectionActionPoint,
 } from "~/lib/selectionActions";
 import { Button } from "../ui/button";
+import { Kbd } from "../ui/kbd";
 import { BackgroundThreadContext } from "./backgroundThread";
+// fork: Mod+L presses Cite. See FORK.md.
+import {
+  citeSelectionAriaKeyShortcuts,
+  citeSelectionShortcutLabel,
+  isCiteSelectionShortcut,
+} from "./citeSelectionShortcut";
 
 export function AssistantSelectionToolbar({
   viewport,
@@ -168,11 +175,21 @@ export function AssistantSelectionToolbar({
       event.stopPropagation();
       toolbar.focus({ preventScroll: true });
     };
+    // fork: Mod+L clicks Cite while it shows, so a disabled button ignores it too. See FORK.md.
+    const citeOnShortcut = (event: KeyboardEvent) => {
+      const toolbar = toolbarRef.current;
+      if (!toolbar || event.defaultPrevented || !isCiteSelectionShortcut(event)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      toolbar.click();
+    };
     // Tab belongs to the foreground chat; a background timeline only follows its selection.
     if (!backgroundThread) document.addEventListener("keydown", focusActions, true);
+    document.addEventListener("keydown", citeOnShortcut, true);
     document.addEventListener("selectionchange", actions.selectionChanged);
     return () => {
       document.removeEventListener("keydown", focusActions, true);
+      document.removeEventListener("keydown", citeOnShortcut, true);
       document.removeEventListener("selectionchange", actions.selectionChanged);
       actions.dispose();
       actionsRef.current = null;
@@ -199,6 +216,7 @@ export function AssistantSelectionToolbar({
       variant="glass"
       disabled={tooLong}
       aria-label={tooLong ? gt("Selection is too long to cite") : gt("Cite selection in composer")}
+      aria-keyshortcuts={tooLong ? undefined : citeSelectionAriaKeyShortcuts()}
       className="fixed z-50 max-w-[calc(100vw-1rem)]"
       style={{ left: selection.position.x, top: selection.position.y }}
       onPointerDown={(event) => event.preventDefault()}
@@ -215,6 +233,7 @@ export function AssistantSelectionToolbar({
       {tooLong
         ? gt("Shorten selection")
         : gt("Cite", { $context: "verb, button that quotes the selected text" })}
+      {tooLong ? null : <Kbd className="-me-0.5">{citeSelectionShortcutLabel()}</Kbd>}
     </Button>,
     document.body,
   );
