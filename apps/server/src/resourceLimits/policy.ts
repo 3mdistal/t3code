@@ -19,8 +19,10 @@ export const GiB = 2 ** 30;
 
 export const TIMING = {
   passMs: 15_000,
-  // A new session takes a minute or two to reach its full size, so releases are spaced out.
+  // A new session takes a minute or two to reach its full size, so releases are spaced out,
+  // unless there's room for every recent one to grow (`releaseDue`).
   releaseSpacingMs: 90_000,
+  sessionGrowthMs: 120_000,
   interruptSpacingMs: 30_000,
   // A reading older than this counts as none, and the limits let everything through.
   staleReadingMs: 60_000,
@@ -35,6 +37,9 @@ export const TIMING = {
 
 // CPU has no release line of its own; it releases this many points under the pause line.
 const CPU_RELEASE_MARGIN = 10;
+
+// What one session grows to, for the room a release needs.
+export const SESSION_GIB = 2;
 
 const LAUNCH_ANYWAY_PHRASE = "launch anyway";
 
@@ -105,6 +110,35 @@ export function nextState(
     (cpuPercent !== null && limits.pauseCpuPercent !== null && cpuPercent > limits.pauseCpuPercent)
     ? "paused"
     : "ok";
+}
+
+/**
+ * Whether the next held thread may start, while the machine is under its limits. Releases are
+ * 90 s apart, but one may start every pass when the reading would still be at its release lines
+ * after it and every session released in the last two minutes grow to full size. That needs a
+ * reading and at least one release line; macOS needs memory pressure normal too.
+ */
+export function releaseDue(input: {
+  readonly now: number;
+  readonly lastReleaseAt: number | null;
+  /** Release times within the last `sessionGrowthMs`. */
+  readonly growingSince: ReadonlyArray<number>;
+  readonly reading: HostReading | null;
+  readonly limits: EffectiveResourceLimits;
+}): boolean {
+  const { now, lastReleaseAt, reading, limits } = input;
+  if (lastReleaseAt === null || now - lastReleaseAt >= TIMING.releaseSpacingMs) return true;
+  if (reading === null) return false;
+  if (limits.releaseHeadroomGiB === null && limits.releaseAvailableGiB === null) return false;
+  if (limits.usesMemoryPressure && reading.memoryPressure !== "normal") return false;
+  const growing = input.growingSince.filter((at) => now - at < TIMING.sessionGrowthMs).length;
+  const needed = (growing + 1) * SESSION_GIB;
+  const roomAbove = (value: number | null, line: number | null) =>
+    line === null || (value !== null && value - needed >= line);
+  return (
+    roomAbove(headroomGiB(reading), limits.releaseHeadroomGiB) &&
+    roomAbove(reading.availableBytes / GiB, limits.releaseAvailableGiB)
+  );
 }
 
 export type Provenance = Pick<
