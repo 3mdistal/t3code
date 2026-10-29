@@ -15,6 +15,8 @@ import {
   newestInterruptible,
   nextState,
   offUntil,
+  releaseDue,
+  SESSION_GIB,
   TIMING,
 } from "./policy.ts";
 
@@ -137,6 +139,54 @@ describe("nextState", () => {
     expect(nextState("paused", at("warn"), mac, null)).toBe("paused");
     expect(nextState("ok", at("critical"), mac, null)).toBe("critical");
     expect(nextState("critical", at("normal"), mac, null)).toBe("ok");
+  });
+});
+
+describe("releaseDue", () => {
+  const due = (
+    now: number,
+    growingSince: ReadonlyArray<number>,
+    at: HostReading | null,
+    limits = pc,
+  ) =>
+    releaseDue({
+      now,
+      lastReleaseAt: growingSince.at(-1) ?? null,
+      growingSince,
+      reading: at,
+      limits,
+    });
+
+  it("releases 90 s apart just over the release lines", () => {
+    expect(due(0, [], reading(36, 13))).toBe(true);
+    expect(due(89_000, [0], reading(36, 13))).toBe(false);
+    expect(due(TIMING.releaseSpacingMs, [0], reading(36, 13))).toBe(true);
+  });
+
+  it("releases every pass while each session from the last two minutes still has room to grow", () => {
+    expect(SESSION_GIB).toBe(2);
+    // Room for three sessions over the 12.3 GiB available line, and four over the 35.8 GiB one.
+    const roomy = reading(44, 20);
+    expect(due(15_000, [0], roomy)).toBe(true);
+    expect(due(30_000, [0, 15_000], roomy)).toBe(true);
+    expect(due(45_000, [0, 15_000, 30_000], roomy)).toBe(false);
+    // Two minutes on, the first session counts as grown.
+    expect(due(115_000, [0, 60_000, 70_000], roomy)).toBe(false);
+    expect(due(TIMING.sessionGrowthMs + 5_000, [0, 60_000, 70_000], roomy)).toBe(true);
+  });
+
+  it("keeps the 90 s spacing without a reading, a release line or normal memory pressure", () => {
+    expect(due(15_000, [0], null)).toBe(false);
+    expect(
+      due(15_000, [0], reading(44, 20, { commitLimitBytes: null, committedBytes: null })),
+    ).toBe(false);
+    const mac = (usePercent?: number) =>
+      effectiveLimits(usePercent === undefined ? {} : { usePercent }, "darwin", 128 * GiB)!;
+    const at = (memoryPressure: HostReading["memoryPressure"]) =>
+      reading(0, 60, { commitLimitBytes: null, committedBytes: null, memoryPressure });
+    expect(due(15_000, [0], at("normal"), mac())).toBe(false);
+    expect(due(15_000, [0], at("warn"), mac(80))).toBe(false);
+    expect(due(15_000, [0], at("normal"), mac(80))).toBe(true);
   });
 });
 
