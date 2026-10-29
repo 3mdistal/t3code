@@ -216,6 +216,20 @@ Upstream's passkey entitlements need a provisioning profile for upstream's App I
 - Tests: `scripts/fork/versionScheme.test.ts` holds the plist to upstream's rendered entitlements and checks the
   ad hoc identity.
 
+### Mod+L cites selected assistant text (`fork:`)
+
+Selecting text in an assistant reply shows upstream's floating Cite button. Cmd+L on a Mac, or Ctrl+L elsewhere,
+now presses it while it shows, the way Cursor's Cmd+L adds a selection to chat, and the button shows the shortcut.
+The shortcut lives in the toolbar rather than in the keybindings config: a new default would be written into
+`keybindings.json`, where stock T3 reports the unknown command as an invalid entry. So it can't be rebound, and it
+takes Mod+L only while the button shows; the preview's Mod+L (`preview.focusUrl`) is unchanged.
+
+- `apps/web/src/components/chat/citeSelectionShortcut.ts`: the shortcut, its label and its `aria-keyshortcuts`.
+- `apps/web/src/components/chat/AssistantSelectionToolbar.tsx`: a capture-phase keydown listener clicks Cite, so
+  a disabled (too long) selection ignores it too, and a `Kbd` shows the shortcut on the button.
+- Tests: `apps/web/src/components/chat/citeSelectionShortcut.fork.test.ts` and
+  `apps/web/src/components/chat/AssistantSelectionToolbar.fork.browser.test.tsx`.
+
 ### Fork CI, release and sync (`fork:`)
 
 - Only the fork's own workflows run here: `fork-ci.yml`, `fork-release.yml`, `fork-windows-tests.yml`, and
