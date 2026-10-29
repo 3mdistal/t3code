@@ -111,6 +111,8 @@ const reading = (headroom: number, available: number) =>
     cpuUtilization: null,
   }));
 const comfortable = reading(40, 20);
+// Just over the release lines, with no room to start more than one session at a time.
+const recovered = reading(36, 13);
 const tight = reading(20, 20);
 const critical = reading(5, 20);
 
@@ -300,7 +302,7 @@ it.effect("R2: Start now starts held work, and Alice's queued message isn't stuc
   }).pipe(Effect.provide(layerTest)),
 );
 
-it.effect("R3: held threads start oldest first, at least 90 s apart, once readings recover", () =>
+it.effect("R3: held threads start oldest first, at least 90 s apart, near the lines", () =>
   Effect.gen(function* () {
     const governor = yield* makeGovernor;
     const threads = ["a", "b", "c"].map((name) => ThreadId.make(`thread:r3:${name}`));
@@ -314,7 +316,7 @@ it.effect("R3: held threads start oldest first, at least 90 s apart, once readin
       runs(threadId).pipe(Effect.map((all) => all.join())),
     );
 
-    yield* governor.pass(yield* comfortable);
+    yield* governor.pass(yield* recovered);
     assert.deepEqual(yield* states, ["starting", "queued:held", "queued:held"]);
 
     // New work queues behind the threads already waiting, even with memory back.
@@ -324,7 +326,7 @@ it.effect("R3: held threads start oldest first, at least 90 s apart, once readin
     assert.deepEqual(yield* runs(late), ["queued:held"]);
 
     yield* TestClock.adjust(TIMING.releaseSpacingMs - 1_000);
-    yield* governor.pass(yield* comfortable);
+    yield* governor.pass(yield* recovered);
     assert.deepEqual(yield* states, ["starting", "queued:held", "queued:held"]);
 
     yield* TestClock.adjust("1 second");
@@ -332,8 +334,41 @@ it.effect("R3: held threads start oldest first, at least 90 s apart, once readin
     assert.deepEqual(yield* states, ["starting", "queued:held", "queued:held"]);
 
     yield* TestClock.adjust("15 seconds");
-    yield* governor.pass(yield* comfortable);
+    yield* governor.pass(yield* recovered);
     assert.deepEqual(yield* states, ["starting", "starting", "queued:held"]);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("R3: with room for each new session to grow, held threads start every pass", () =>
+  Effect.gen(function* () {
+    const governor = yield* makeGovernor;
+    const threads = ["a", "b", "c", "d"].map((name) => ThreadId.make(`thread:r3-room:${name}`));
+    yield* Effect.forEach(threads, createThread);
+    yield* governor.pass(yield* tight);
+    for (const threadId of threads) {
+      yield* send(threadId, "agent work", agent);
+      yield* TestClock.adjust("1 second");
+    }
+    const started = Effect.forEach(threads, (threadId) =>
+      runs(threadId).pipe(Effect.map((all) => all.join() === "starting")),
+    );
+
+    // Room over the release lines for three sessions of 2 GiB each.
+    const roomy = reading(44, 20);
+    yield* governor.pass(yield* roomy);
+    yield* TestClock.adjust("15 seconds");
+    yield* governor.pass(yield* roomy);
+    yield* TestClock.adjust("15 seconds");
+    yield* governor.pass(yield* roomy);
+    assert.deepEqual(yield* started, [true, true, true, false]);
+
+    // The fourth waits, and starts two minutes after the first.
+    yield* TestClock.adjust("15 seconds");
+    yield* governor.pass(yield* roomy);
+    assert.deepEqual(yield* started, [true, true, true, false]);
+    yield* TestClock.adjust(TIMING.sessionGrowthMs - 45_000);
+    yield* governor.pass(yield* roomy);
+    assert.deepEqual(yield* started, [true, true, true, true]);
   }).pipe(Effect.provide(layerTest)),
 );
 
