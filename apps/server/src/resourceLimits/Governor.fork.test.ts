@@ -356,19 +356,49 @@ it.effect("R3: with room for each new session to grow, held threads start every 
     // Room over the release lines for three sessions of 2 GiB each.
     const roomy = reading(44, 20);
     yield* governor.pass(yield* roomy);
-    yield* TestClock.adjust("15 seconds");
+    yield* TestClock.adjust("60 seconds");
     yield* governor.pass(yield* roomy);
     yield* TestClock.adjust("15 seconds");
     yield* governor.pass(yield* roomy);
     assert.deepEqual(yield* started, [true, true, true, false]);
 
-    // The fourth waits, and starts two minutes after the first.
-    yield* TestClock.adjust("15 seconds");
+    // The fourth waits while the first is still growing, and starts once it has had two
+    // minutes, 45 s after the third.
+    yield* TestClock.adjust("30 seconds");
     yield* governor.pass(yield* roomy);
     assert.deepEqual(yield* started, [true, true, true, false]);
-    yield* TestClock.adjust(TIMING.sessionGrowthMs - 45_000);
+    yield* TestClock.adjust("15 seconds");
     yield* governor.pass(yield* roomy);
     assert.deepEqual(yield* started, [true, true, true, true]);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("R3: a restart keeps counting the sessions still growing", () =>
+  Effect.gen(function* () {
+    const first = yield* makeGovernor;
+    const threads = ["a", "b", "c"].map((name) => ThreadId.make(`thread:r3-restart:${name}`));
+    yield* Effect.forEach(threads, createThread);
+    yield* first.pass(yield* tight);
+    for (const threadId of threads) {
+      yield* send(threadId, "agent work", agent);
+      yield* TestClock.adjust("1 second");
+    }
+    const started = Effect.forEach(threads, (threadId) =>
+      runs(threadId).pipe(Effect.map((all) => all.join() === "starting")),
+    );
+
+    // Room for two sessions over the 12.3 GiB available line, not three.
+    const twoRoom = reading(44, 17);
+    yield* first.pass(yield* twoRoom);
+    yield* TestClock.adjust("15 seconds");
+    yield* first.pass(yield* twoRoom);
+    assert.deepEqual(yield* started, [true, true, false]);
+
+    const second = yield* makeGovernor;
+    yield* second.restore;
+    yield* TestClock.adjust("15 seconds");
+    yield* second.pass(yield* twoRoom);
+    assert.deepEqual(yield* started, [true, true, false]);
   }).pipe(Effect.provide(layerTest)),
 );
 

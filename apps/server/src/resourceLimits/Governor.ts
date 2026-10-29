@@ -536,6 +536,7 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
       waiting: published.waiting,
       sessions: bySession,
       lastReleaseAt,
+      growingSince,
       lastInterruptAt,
       interruptedRunIds,
     });
@@ -547,6 +548,7 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
       readonly version?: unknown;
       readonly waiting?: unknown;
       readonly lastReleaseAt?: unknown;
+      readonly growingSince?: unknown;
       readonly lastInterruptAt?: unknown;
       readonly interruptedRunIds?: unknown;
     } | null;
@@ -575,8 +577,12 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
     yield* Ref.update(memory, (current) => ({
       ...current,
       lastReleaseAt,
-      // Only the newest release is saved; the next pass drops it once it's old enough.
-      growingSince: lastReleaseAt === null ? [] : [lastReleaseAt],
+      // A file from before `growingSince` was saved has only the newest release.
+      growingSince: Array.isArray(saved.growingSince)
+        ? saved.growingSince.filter((at): at is number => typeof at === "number")
+        : lastReleaseAt === null
+          ? []
+          : [lastReleaseAt],
       lastInterruptAt: number(saved.lastInterruptAt),
       interruptedRunIds: Array.isArray(saved.interruptedRunIds)
         ? saved.interruptedRunIds.filter((id): id is string => typeof id === "string")
