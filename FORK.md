@@ -324,8 +324,8 @@ Users read about it in the Memory and CPU limits section of `docs/user/remote-ac
     `MachineLimitsSection`. `settingsSearch.ts` adds search terms.
   - `packages/client-runtime/src/load-balancing.ts`: Auto balance skips a machine over its limits.
 - The memory gate's hook reads the governor's files under `<stateDir>/resource-limits/`:
-  - `state.json`: state, readings, waiting threads, and each running session's thread and "launch anyway". It's
-    rewritten every pass, so a stale file means T3 isn't guarding.
+  - `state.json`: state, readings, waiting threads, recent release times, and each running session's thread and
+    "launch anyway". It's rewritten every pass, so a stale file means T3 isn't guarding.
   - `off.json`: `memgate off` writes `{ at, until }` in epoch ms. It switches the limits off for at most a day.
   - `inbox/`: one record per subagent launch the hook refused. Its thread resumes with a note listing them.
 - Stock compatibility: holds, notices and resume notes reuse `run.updated`, `turn-item.updated` and system
