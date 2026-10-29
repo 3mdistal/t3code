@@ -649,6 +649,21 @@ stay hidden here: they'd sit over folder rows, which don't move apart to make ro
   the drag labels hidden there.
 - Tests: `apps/web/src/components/sidebar/boringPinDrag.fork.test.ts`.
 
+### Mod+L cites selected assistant text (`fork:`)
+
+Selecting text in an assistant reply shows upstream's floating Cite button. Cmd+L on a Mac, or Ctrl+L elsewhere,
+now presses it while it shows, the way Cursor's Cmd+L adds a selection to chat, and the button shows the shortcut.
+The shortcut lives in the toolbar rather than in the keybindings config: a new default would be written into
+`keybindings.json`, where stock T3 reports the unknown command as an invalid entry. So it can't be rebound, and it
+takes Mod+L only while the button shows; the preview's Mod+L (`preview.focusUrl`) is unchanged. Unlike Tab, it
+also works in a side chat, whose button cites into that chat as a click does.
+
+- `apps/web/src/components/chat/citeSelectionShortcut.ts`: the shortcut, its label and its `aria-keyshortcuts`.
+- `apps/web/src/components/chat/AssistantSelectionToolbar.tsx`: a capture-phase keydown listener clicks Cite, so
+  a disabled (too long) selection ignores it too, and a `Kbd` shows the shortcut on the button.
+- Tests: `apps/web/src/components/chat/citeSelectionShortcut.fork.test.ts` and
+  `apps/web/src/components/chat/AssistantSelectionToolbar.fork.browser.test.tsx`.
+
 ### Fork CI, release and sync (`fork:`)
 
 - Only the fork's own workflows run here: `fork-ci.yml`, `fork-release.yml`, `fork-windows-tests.yml`,
