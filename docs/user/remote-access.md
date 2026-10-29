@@ -150,7 +150,8 @@ On Windows and macOS, each machine watches its own memory and CPU. When a machin
 runs low, work that agents and scheduled tasks start waits in its thread's queue,
 with a notice explaining why. Messages you send yourself from the app always start.
 Held work then starts on its own, one thread at a time, oldest first, once the
-machine has room again. Choose **Resume** in a thread's composer to start its work now.
+machine has room again: 90 seconds apart, or every 15 seconds while there's room for
+each new one to grow. Choose **Resume** in a thread's composer to start its work now.
 
 To let one thread's agents launch work anyway, send `launch anyway` in that thread.
 It counts while it's your latest message there.
