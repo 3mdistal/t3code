@@ -41,6 +41,7 @@ import {
   newestInterruptible,
   nextState,
   offUntil,
+  releaseDue,
   type ResumeNote,
   type RunningTurn,
   TIMING,
@@ -62,6 +63,8 @@ interface SessionInfo {
 interface Memory {
   readonly cpuWindow: ReadonlyArray<number | null>;
   readonly lastReleaseAt: number | null;
+  /** Releases whose sessions may still be growing. */
+  readonly growingSince: ReadonlyArray<number>;
   readonly lastInterruptAt: number | null;
   readonly interruptedRunIds: ReadonlyArray<string>;
   /** Per running turn and its latest message, so the transcript is read once per change. */
@@ -117,6 +120,7 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
   const memory = yield* Ref.make<Memory>({
     cpuWindow: [],
     lastReleaseAt: null,
+    growingSince: [],
     lastInterruptAt: null,
     interruptedRunIds: [],
     sessionCache: new Map(),
@@ -479,10 +483,11 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
 
     // Release oldest first, spaced out, once the reading this pass took is back under the limits.
     let lastReleaseAt = remembered.lastReleaseAt;
+    const growingSince = remembered.growingSince.filter((at) => now - at < TIMING.sessionGrowthMs);
     const released = new Set<ThreadId>();
     if (
       state === "ok" &&
-      (off || lastReleaseAt === null || now - lastReleaseAt >= TIMING.releaseSpacingMs)
+      (off || releaseDue({ now, lastReleaseAt, growingSince, reading, limits: effective }))
     ) {
       const ready = inspected.filter(
         (item) => !dropped.has(item.entry.threadId) && item.held && !item.blocked,
@@ -498,6 +503,7 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
         yield* Effect.logInfo("resource-limits.released", { threadId: item.entry.threadId });
         released.add(item.entry.threadId);
         lastReleaseAt = now;
+        growingSince.push(now);
       }
     }
 
@@ -512,6 +518,7 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
       ...latest,
       cpuWindow,
       lastReleaseAt,
+      growingSince,
       lastInterruptAt,
       interruptedRunIds,
     }));
@@ -564,9 +571,12 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
         })
       : [];
     yield* limits.update((snapshot) => ({ ...snapshot, waiting }));
+    const lastReleaseAt = number(saved.lastReleaseAt);
     yield* Ref.update(memory, (current) => ({
       ...current,
-      lastReleaseAt: number(saved.lastReleaseAt),
+      lastReleaseAt,
+      // Only the newest release is saved; the next pass drops it once it's old enough.
+      growingSince: lastReleaseAt === null ? [] : [lastReleaseAt],
       lastInterruptAt: number(saved.lastInterruptAt),
       interruptedRunIds: Array.isArray(saved.interruptedRunIds)
         ? saved.interruptedRunIds.filter((id): id is string => typeof id === "string")
