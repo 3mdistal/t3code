@@ -545,6 +545,7 @@ const make = Effect.gen(function* () {
           : "--untracked-files=all",
       ],
       maxOutputBytes: 64 * 1024,
+      appendTruncationMarker: true, // fork: keeps, not fails, past the limit, see FORK.md.
     });
     if (status.stdoutTruncated) return "local changes exceed the inspection limit";
     const records = status.stdout.split("\0").filter(Boolean);
@@ -560,6 +561,7 @@ const make = Effect.gen(function* () {
       cwd,
       args: ["ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"],
       maxOutputBytes: 64 * 1024,
+      appendTruncationMarker: true, // fork: keeps, not fails, past the limit, see FORK.md.
     });
     if (ignored.stdoutTruncated) return "ignored files exceed the inspection limit";
     const file = ignored.stdout
@@ -576,6 +578,7 @@ const make = Effect.gen(function* () {
           cwd,
           args,
           maxOutputBytes,
+          appendTruncationMarker: true, // fork: keeps, not fails, past the limit, see FORK.md.
         });
       const admin = yield* inspect(["rev-parse", "--absolute-git-dir"]);
       if (admin.stdoutTruncated || admin.stderrTruncated)

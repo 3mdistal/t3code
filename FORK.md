@@ -206,6 +206,18 @@ patch once upstream matches the new text.
 - Test: upstream's `apps/server/src/storageCleanup.test.ts` ("compares the checked-out branch without a full
   status") fails on git 2.56 without it.
 
+### Storage cleanup keeps a worktree whose file list runs past its limit (`fork:`)
+
+Storage cleanup reads up to 64 KiB of a worktree's local changes, and under the strictest keep rule of its ignored
+files, and keeps the worktree when the list runs longer ("Local changes exceed the inspection limit"). But
+upstream's git calls failed past the limit instead of returning what fit, so the report showed such a worktree as a
+failed cleanup. Nothing was deleted either way. The patch asks for truncated output in those two checks and in the
+submodule checks, which handled it already.
+
+- `apps/server/src/storageCleanup.ts`: `appendTruncationMarker` in `localChangesReason`'s two git calls and in
+  `submoduleRemoval`'s `inspect`. Despite its name, the flag leaves `stdout` as is and sets `stdoutTruncated`.
+- Test: `apps/server/src/storageCleanup.fork.test.ts`.
+
 ### Browser screenshots while Windows hides T3 (`fork:`)
 
 While Windows counts T3's window hidden, such as minimized or behind a locked screen, it composites none of it, so
