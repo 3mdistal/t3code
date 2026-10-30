@@ -206,6 +206,22 @@ patch once upstream matches the new text.
 - Test: upstream's `apps/server/src/storageCleanup.test.ts` ("compares the checked-out branch without a full
   status") fails on git 2.56 without it.
 
+### Browser screenshots while Windows hides T3 (`fork:`)
+
+While Windows counts T3's window hidden, such as minimized or behind a locked screen, it composites none of it, so
+the preview's page paints no frames, even while the client paints it behind the app. An agent's screenshot then
+waits on a frame that never comes, until the server gives up. A screenshot still unanswered 500 ms after it was
+sent, while it's still the tab's screenshot, gets one `webContents.capturePage()`, which composites a frame, and the
+waiting screenshot finishes with it. On the PC, a screenshot stuck this way finished about a second after the call.
+One answered in time gets no call. The call is a second frame copy, and Chromium below 157 can crash when a guest's
+renderer exits with copies in flight (why screenshots go one at a time), so the tab's next screenshot isn't sent
+until the call settles, even when a navigation ends the first screenshot's turn early. It waits 5 s at most: Electron
+can't cancel `capturePage()`, so a call still running then overlaps the next screenshot.
+
+- `apps/desktop/src/preview/DesktopBrowserHost.ts`: `nudgeCapture` around each screenshot the relay sends to the
+  guest.
+- Test: `apps/desktop/src/preview/DesktopBrowserHost.fork.test.ts`.
+
 ### macOS signing without upstream's App ID (`fork:`)
 
 Upstream's passkey entitlements need a provisioning profile for upstream's App ID, which the fork can't get.
