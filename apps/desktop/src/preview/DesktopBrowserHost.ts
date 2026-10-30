@@ -48,6 +48,9 @@ const PAINT_NUDGE_IN_FLIGHT = 2;
 /** Well inside the server's 10 s DESKTOP_ATTACH_TIMEOUT, for a first page that never reports it is up. */
 const FIRST_PAGE_TIMEOUT = "5 seconds";
 const ERR_ABORTED = -3;
+// fork: how long a sent screenshot waits before `nudgeCapture`, and the next one waits on that.
+const CAPTURE_NUDGE = "500 millis";
+const CAPTURE_NUDGE_LIMIT = "5 seconds";
 
 export interface DesktopBrowserTabKey {
   readonly threadId: string;
@@ -267,6 +270,63 @@ export const make = Effect.gen(function* () {
         syncPainting(tab);
       }
     });
+
+  /** fork: each tab's capturePage() from `nudgeCapture` while it runs. */
+  const nudgeCaptures = new WeakMap<AttachedTab, Promise<void>>();
+
+  /**
+   * fork: a window Windows counts hidden paints no frames, so a screenshot still unanswered
+   * `CAPTURE_NUDGE` after it was sent gets one capturePage(), whose frame answers it. The tab's
+   * next screenshot is sent only once that call settles, up to `CAPTURE_NUDGE_LIMIT`, even past
+   * a navigation, so frame copies still go one at a time. See FORK.md.
+   */
+  const nudgeCapture = <A>(
+    tab: AttachedTab,
+    current: () => boolean,
+    send: () => Promise<A>,
+  ): Promise<A> => {
+    const capturing = nudgeCaptures.get(tab);
+    if (capturing !== undefined) {
+      return capturing.then(() =>
+        current()
+          ? nudgeCapture(tab, current, send)
+          : Promise.reject(new Error("The page this screenshot was for has moved on.")),
+      );
+    }
+    let answered = false;
+    let captured = () => {};
+    let gate: Promise<void> | undefined;
+    const { webContents } = tab.debuggee;
+    const pending = send();
+    const answer = () => {
+      answered = true;
+    };
+    pending.then(answer, answer);
+    runFork(
+      Effect.sleep(CAPTURE_NUDGE).pipe(
+        Effect.andThen(Effect.try(() => !answered && current() && !webContents.isDestroyed())),
+        Effect.flatMap((due) =>
+          due
+            ? Effect.tryPromise((): Promise<unknown> => {
+                gate = new Promise<void>((resolve) => {
+                  captured = resolve;
+                });
+                nudgeCaptures.set(tab, gate);
+                return webContents.capturePage();
+              }).pipe(Effect.timeout(CAPTURE_NUDGE_LIMIT))
+            : Effect.void,
+        ),
+        Effect.ignore,
+        Effect.ensuring(
+          Effect.sync(() => {
+            if (gate !== undefined && nudgeCaptures.get(tab) === gate) nudgeCaptures.delete(tab);
+            captured();
+          }),
+        ),
+      ),
+    );
+    return pending;
+  };
 
   /**
    * Chromium counts a focus-emulated guest as captured, so a guest the panel hides would
@@ -567,7 +627,12 @@ export const make = Effect.gen(function* () {
             const run = () =>
               current === undefined || stale()
                 ? sendUnlessStale()
-                : paintUntilAnswered(tab, sendUnlessStale);
+                : paintUntilAnswered(tab, () =>
+                    // fork: a screenshot is nudged while the window is hidden, see `nudgeCapture`.
+                    method === "Page.captureScreenshot"
+                      ? nudgeCapture(tab, current, sendUnlessStale)
+                      : sendUnlessStale(),
+                  );
             return change === null ? run() : change.then(run);
           };
           return method === "Page.captureScreenshot"
