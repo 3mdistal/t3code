@@ -15,6 +15,7 @@ import * as ServerConfig from "../config.ts";
 import { resolveBaseDir } from "../os-jank.ts";
 import { buildTriageLaunchPrompt } from "../triage/triagePrompt.ts";
 import { describeServerProcess, writeTriageSession } from "../triage/triageSession.ts";
+import { TRIAGE_ENABLED, TRIAGE_OFF_REASON } from "../triage/triageOff.ts"; // fork: see FORK.md.
 import { baseDirFlag } from "./config.ts";
 import { interactiveStdin } from "./consoleStdin.ts";
 import { resolveCliCommand } from "./invocation.ts";
@@ -112,9 +113,6 @@ const modelFlag = Flag.String("model").pipe(
   Flag.optional,
 );
 
-// fork: off, see the handler and FORK.md.
-const TRIAGE_ENABLED = false;
-
 export const triageCommand = Command.make("triage", {
   baseDir: baseDirFlag,
   agent: agentFlag,
@@ -125,10 +123,9 @@ export const triageCommand = Command.make("triage", {
   ),
   Command.withHandler((flags) =>
     Effect.gen(function* () {
+      // fork: off, see FORK.md.
       if (!TRIAGE_ENABLED) {
-        yield* Console.error(
-          "t3 triage is off in this fork: it searches and files public issues on pingdotgg/t3code, and this fork's bugs are reported privately.",
-        );
+        yield* Console.error(`t3 triage is off in this fork: ${TRIAGE_OFF_REASON}.`);
         process.exitCode = 1;
         return;
       }
