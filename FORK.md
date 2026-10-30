@@ -149,6 +149,19 @@ Upstream hasn't been asked yet.
 - Tests: `apps/server/src/orchestration-v2/EffectWorker.fork.test.ts` and
   `apps/server/src/orchestration-v2/RunFinalizationService.fork.test.ts`.
 
+### Storage cleanup keeps a worktree whose submodule listing runs past its limit (`fork:`)
+
+Storage cleanup keeps a worktree when a check's git output runs past its limit. Upstream's #26593 asks for
+truncated output in the local-changes and ignored-files checks, but not in the submodule checks, which test
+`stdoutTruncated` too and still fail past the limit, so the report shows such a worktree as a failed cleanup
+instead of "submodule inspection exceeded the limit". Nothing is deleted either way. Drop this patch once upstream
+passes the flag there too.
+
+- `apps/server/src/storageCleanup.ts`: `appendTruncationMarker` in `submoduleRemoval`'s `inspect`. Despite its
+  name, the flag leaves `stdout` as is and sets `stdoutTruncated`.
+- No test: the limit needs about a thousand submodules. The fork's tests for the other two checks went with
+  upstream's in `apps/server/src/storageCleanup.test.ts`.
+
 ### Browser screenshots while Windows hides T3 (`fork:`)
 
 While Windows counts T3's window hidden, such as minimized or behind a locked screen, it composites none of it, so

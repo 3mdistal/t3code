@@ -939,6 +939,7 @@ const make = Effect.gen(function* () {
           cwd,
           args,
           maxOutputBytes,
+          appendTruncationMarker: true, // fork: keeps, not fails, past the limit, see FORK.md.
         });
       const admin = yield* inspect(["rev-parse", "--absolute-git-dir"]);
       if (admin.stdoutTruncated || admin.stderrTruncated)
