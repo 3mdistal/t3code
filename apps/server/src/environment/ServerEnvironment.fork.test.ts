@@ -30,4 +30,20 @@ it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
       expect(descriptor.capabilities.providerPools).toBe(true);
     }),
   );
+
+  it.effect("does not advertise triage, so the command palettes hide it", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const baseDir = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-server-environment-test-",
+      });
+
+      const descriptor = yield* Effect.gen(function* () {
+        const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
+        return yield* serverEnvironment.getDescriptor;
+      }).pipe(Effect.provide(layerServerEnvironment(baseDir)));
+
+      expect(descriptor.capabilities.triage).not.toBe(true);
+    }),
+  );
 });
