@@ -12,7 +12,7 @@ import { codexAuthDeliveryUrl, readCodexAuthHandoff } from "@t3tools/shared/code
 import { receiveCodexAuthCallback, CodexAuthCallbackError } from "./CodexAuthCallback.ts";
 import * as ElectronShell from "../electron/ElectronShell.ts";
 import { providerAuthReturnUrl } from "@t3tools/shared/providerAuthReturnUrl";
-import { promptLinkAppPath } from "@t3tools/shared/promptLinks";
+import { promptLinkAppPath, readThreadLink, THREAD_LINK_SCHEME } from "@t3tools/shared/promptLinks";
 import { readPairingAppLink } from "@t3tools/shared/remote";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { clerkFrontendApiHostnameFromPublishableKey } from "@t3tools/shared/relayAuth";
@@ -203,12 +203,25 @@ export const make = Effect.gen(function* () {
         );
         return true;
       };
+      // fork: the vault's `t3-thread://` links go to the renderer too (see FORK.md).
       const openAppLink = (value: string | undefined) => {
-        if (!value || (promptLinkAppPath(value) === null && readPairingAppLink(value) === null))
+        if (
+          !value ||
+          (promptLinkAppPath(value) === null &&
+            readPairingAppLink(value) === null &&
+            readThreadLink(value) === null)
+        )
           return false;
         void runPromise(webLinks.receive(value));
         return true;
       };
+      // fork: installed Windows and macOS builds also register `t3-thread://` (see FORK.md).
+      if (
+        environment.isPackaged &&
+        (environment.platform === "win32" || environment.platform === "darwin")
+      ) {
+        yield* electronApp.setAsDefaultProtocolClient(THREAD_LINK_SCHEME);
+      }
       const args = yield* HostProcess.Arguments;
       args.some((value) => startProviderAuthHandoff(value) || openAppLink(value));
       const openWebLink = (url: string) => {

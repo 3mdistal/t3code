@@ -5,7 +5,7 @@ import {
 } from "@t3tools/client-runtime/state/runtime";
 import type { EnvironmentId, ScopedThreadRef } from "@t3tools/contracts";
 import { sourceControlClients } from "@t3tools/client-runtime/source-control-clients";
-import { promptLinkAppPath } from "@t3tools/shared/promptLinks";
+import { promptLinkAppPath, readThreadLink, type ThreadLink } from "@t3tools/shared/promptLinks";
 import { readPairingAppLink, resolveRemotePairingTarget } from "@t3tools/shared/remote";
 import { useRouter } from "@tanstack/react-router";
 import * as Effect from "effect/Effect";
@@ -25,14 +25,21 @@ import { useClientSettings } from "../../hooks/useSettings";
 import { useOpenChangeRequestLink } from "../../lib/openPullRequestLink";
 import { selectActiveRightPanelSurface, useRightPanelStore } from "../../rightPanelStore";
 import { appAtomRegistry } from "../../rpc/atomRegistry";
-import { resolveThreadRouteTarget } from "../../threadRoutes";
+import { buildThreadRouteParams, resolveThreadRouteTarget } from "../../threadRoutes";
 import { assetEnvironment } from "../../state/assets";
-import { useEnvironmentHttpBaseUrl, usePrimaryEnvironment } from "../../state/environments";
+import {
+  readPrimaryEnvironmentId,
+  useEnvironmentHttpBaseUrl,
+  usePrimaryEnvironment,
+} from "../../state/environments";
+import { environmentSummaries } from "../../state/presentation";
+import { environmentThreadShells } from "../../state/threads";
 import { previewEnvironment } from "../../state/preview";
 import { allReachableShellsLiveAtom } from "../../state/shell";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { useAtomQueryRunner } from "../../state/use-atom-query-runner";
 import { stackedThreadToast, toastManager } from "../ui/toast";
+import { type KnownThreads, threadLinkTarget } from "./threadLinkTarget";
 
 /** A link handed over by the OS is a plain click: nothing about it asks for the browser. */
 const externalClick = {
@@ -51,6 +58,15 @@ const projectsSettled = (): Promise<void> =>
       Effect.asVoid,
     ),
   );
+
+/** fork: how long a thread link waits for thread lists that are still loading (see FORK.md). */
+const THREAD_LINK_WAIT_MS = 5_000;
+
+const readKnownThreads = (): KnownThreads => ({
+  threadRefs: appAtomRegistry.get(environmentThreadShells.threadRefsAtom),
+  primaryEnvironmentId: readPrimaryEnvironmentId(),
+  connectedEnvironmentIds: appAtomRegistry.get(environmentSummaries.connectedEnvironmentIdsAtom),
+});
 
 /**
  * HTML files are served by this machine's environment, so only its threads can
@@ -163,7 +179,32 @@ export function DesktopWebLinkCoordinator() {
     return threadRef;
   };
 
+  // fork: at launch the thread lists may still be loading, so a thread none lists waits for them
+  // once before falling back (see FORK.md).
+  const openThreadLink = async (url: string, link: ThreadLink) => {
+    let target = threadLinkTarget(link, readKnownThreads(), true);
+    if (target === null) {
+      const waited = new Promise((resolve) => setTimeout(resolve, THREAD_LINK_WAIT_MS));
+      await (localEnvironmentDisabled ? waited : Promise.race([projectsSettled(), waited]));
+      target = threadLinkTarget(link, readKnownThreads(), false);
+    }
+    if (target === null) {
+      reportFailure(url, "No connected environment has this thread.");
+      return;
+    }
+    await router.navigate({
+      to: "/$environmentId/$threadId",
+      params: buildThreadRouteParams(target),
+    });
+  };
+
   const openLink = useEffectEvent(async (url: string) => {
+    // fork: the vault's `t3-thread://` links open their thread (see FORK.md).
+    const threadLink = readThreadLink(url);
+    if (threadLink !== null) {
+      await openThreadLink(url, threadLink);
+      return;
+    }
     const pairingUrl = readPairingAppLink(url);
     if (pairingUrl !== null) {
       await pairFromLink(pairingUrl);
