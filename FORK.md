@@ -203,6 +203,23 @@ Upstream hasn't been asked yet.
   `RunFinalizationService.test.ts` and `RunFinalizationQueue.test.ts` pass unchanged: the refresh starts before
   the capture effect returns.
 
+### A CPU profile of each freeze on Windows (`fork:`)
+
+On the PC the server's event loop freezes for 4 to 13 seconds within a minute after every noon and midnight, and
+for up to 24 seconds at other times. The trace and the stall log show only what was waiting when it stopped, never
+the call that held it. On Windows a worker thread now keeps a rolling CPU profile of the main thread, sampled every
+10 ms, while the main thread bumps a shared counter four times a second. When the counter stops for 3 seconds or
+more, the worker reads the profile back once the main thread is free and saves it as
+`logs/freeze-profiles/freeze-<start>-<length>ms.cpuprofile`, which Chrome's DevTools and VS Code open. The profile
+covers the freeze and up to two minutes before it; without a freeze it is dropped and restarted every two minutes.
+The newest 20 are kept. A pause long enough to stop the worker too, such as a sleeping PC, isn't saved. Each save
+logs "freeze profile saved". `T3CODE_FREEZE_PROFILES=0` turns it off. Drop this patch once the freezes are fixed.
+
+- `apps/server/src/observability/FreezeProfiler.ts`: the heartbeat, the worker and its layer.
+- `apps/server/src/server.ts`: merges the layer with `EventLoopMonitor`'s.
+- Test: `apps/server/src/observability/FreezeProfiler.fork.test.ts` blocks its own main thread and reads the saved
+  profile back.
+
 ### Storage cleanup reads git 2.56's message for a broken worktree (`fork:`)
 
 Git 2.56 reports a linked worktree whose `.git` file points at a missing repository as "gitfile does not point to a
