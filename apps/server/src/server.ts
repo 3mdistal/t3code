@@ -127,6 +127,7 @@ import * as WorktreeSetupTracker from "./project/WorktreeSetupTracker.ts";
 import * as Observability from "./observability/Observability.ts";
 import * as HeapSnapshot from "./observability/HeapSnapshot.ts";
 import * as EventLoopMonitor from "./observability/EventLoopMonitor.ts";
+import * as FreezeProfiler from "./observability/FreezeProfiler.ts"; // fork: see FORK.md.
 import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
 import * as DirectEndpoints from "./environment/DirectEndpoints.ts";
 import * as RemoteOpenTargets from "./environment/RemoteOpenTargets.ts";
@@ -214,6 +215,8 @@ const HTTP_ROUTER_CONFIG = {
 const HTTP_PREEMPTIVE_SHUTDOWN_GRACE_MS = 0;
 const layerResourceAttribution = ResourceAttribution.layer;
 const layerApplicationObservability = EventLoopMonitor.layer.pipe(
+  // fork: saves a CPU profile when the event loop freezes on Windows, see FORK.md.
+  Layer.merge(FreezeProfiler.layer),
   Layer.provideMerge(Observability.layer),
   Layer.provideMerge(layerResourceAttribution),
 );
