@@ -27,7 +27,7 @@ export interface FreezeProfilerOptions {
   readonly keep: number;
 }
 
-export const DEFAULT_OPTIONS: Omit<FreezeProfilerOptions, "dir"> = {
+const DEFAULT_OPTIONS: Omit<FreezeProfilerOptions, "dir"> = {
   freezeMs: 3000,
   rotateMs: 2 * 60_000,
   beatMs: 250,
