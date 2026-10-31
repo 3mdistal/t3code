@@ -2849,6 +2849,11 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
           name: "T3 Code",
           schemes: ["t3code", "t3code-dev"],
         },
+        // fork: the vault's links to one thread (see FORK.md).
+        {
+          name: "T3 Code thread",
+          schemes: ["t3-thread"],
+        },
         {
           name: "Web site URL",
           schemes: ["http", "https"],

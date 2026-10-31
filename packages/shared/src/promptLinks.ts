@@ -203,6 +203,31 @@ export function promptLinkAppPath(
   return thread ? `/${thread[1]}/${thread[2]}${url.search}` : null;
 }
 
+/** fork: the scheme of Alice's vault links to one thread. See FORK.md. */
+export const THREAD_LINK_SCHEME = "t3-thread";
+
+export interface ThreadLink {
+  readonly environmentId: string | null;
+  readonly threadId: string;
+}
+
+const LINKED_ID = "([\\w.:%~+@=-]{1,512})";
+const THREAD_LINK = new RegExp(
+  `^t3-thread://(?:v1/${LINKED_ID}|v2/${LINKED_ID}/${LINKED_ID})/?(?:[?#]\\S*)?$`,
+  "i",
+);
+
+/**
+ * fork: reads `t3-thread://v1/<threadId>` or `t3-thread://v2/<environmentId>/<threadId>`; a
+ * `#fragment` is ignored. IDs are kept raw, as the vault writes them, because some thread IDs
+ * hold a literal `%3A`. See FORK.md.
+ */
+export function readThreadLink(value: string): ThreadLink | null {
+  const match = THREAD_LINK.exec(value.trim());
+  const threadId = match?.[1] ?? match?.[3];
+  return threadId ? { environmentId: match?.[2] ?? null, threadId } : null;
+}
+
 export function promptLinkDeepLink(appPath: string, scheme = "t3code"): string {
   const url = new URL(appPath, "https://app.invalid");
   const host = url.pathname === "/new" ? "new" : `threads${url.pathname}`;

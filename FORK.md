@@ -243,6 +243,28 @@ can't cancel `capturePage()`, so a call still running then overlaps the next scr
   guest.
 - Test: `apps/desktop/src/preview/DesktopBrowserHost.fork.test.ts`.
 
+### Links that open one thread (`fork:`)
+
+Alice's vault and task board link to agents' threads as `t3-thread://v1/<threadId>`, sometimes with a `#fragment`,
+which is ignored, or as `t3-thread://v2/<environmentId>/<threadId>`. The desktop app opens them like upstream's
+`t3code://threads/<environmentId>/<threadId>`: from a launch, a second instance or macOS's open-url, focusing the
+window and opening the thread once the renderer is ready. IDs are read raw, as the vault writes them, because some
+thread IDs hold a literal `%3A`. A v1 link has no environment, so the renderer takes the one whose thread list has
+the thread, preferring this machine's. A thread no list has yet (an archived one, say) waits up to 5 s for the lists
+to load, then falls back to this machine's environment, or the only connected one; the thread page shows it there
+or, like a deleted thread's page, goes to the new-thread screen. A v2 link opens only while its environment is
+connected, and otherwise shows "Could not open the link". Installed Windows and macOS builds register the scheme:
+Windows at startup with `setAsDefaultProtocolClient`, macOS through the app's `Info.plist` as well. Linux and
+development builds don't, and the phone app doesn't read these links; it does read upstream's `t3code://` form.
+
+- `packages/shared/src/promptLinks.ts`: `readThreadLink` and `THREAD_LINK_SCHEME`.
+- `apps/desktop/src/app/DesktopClerk.ts`: hands thread links to the renderer and registers the scheme.
+- `apps/web/src/components/desktop/DesktopWebLinkCoordinator.tsx` and `threadLinkTarget.ts`: pick the thread and
+  open it.
+- `scripts/build-desktop-artifact.ts`: the macOS `t3-thread` URL type.
+- Tests: `packages/shared/src/promptLinks.fork.test.ts`, `apps/desktop/src/app/DesktopClerk.fork.test.ts` and
+  `apps/web/src/components/desktop/threadLinkTarget.fork.test.ts`.
+
 ### macOS signing without upstream's App ID (`fork:`)
 
 Upstream's passkey entitlements need a provisioning profile for upstream's App ID, which the fork can't get.
