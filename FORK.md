@@ -286,6 +286,52 @@ development builds don't, and the phone app doesn't read these links; it does re
 - Tests: `packages/shared/src/promptLinks.fork.test.ts`, `apps/desktop/src/app/DesktopClerk.fork.test.ts` and
   `apps/web/src/components/desktop/threadLinkTarget.fork.test.ts`.
 
+### A delegated thread settles as soon as its task ends (`fork:`)
+
+T3 runs every Codex thread in one shared `codex app-server`, and each loaded thread starts its own MCP helpers. On
+Windows enough of them stall Codex (openai/codex#42740). A delegated child, such as a review or a collector, stays
+loaded after its task ends until upstream unloads it after 30 idle minutes, so a burst of them still piles up; one
+overloaded Codex on Oct 19. Until now a scheduled script on the PC settled finished children every two minutes.
+
+The settlement worker now does it, whatever the sidebar's auto-settle settings are. Once every task that ran in a
+child thread has ended, the child still holds a live provider session, and nothing in it is running, the worker
+sends the child the same `thread.auto-settle` command. Settling detaches the child's sessions, which unloads a Codex
+thread and ends a Claude child's process. Nothing running means:
+
+- no run that hasn't finished, queued ones included, since settling cancels queued notifications and wakes;
+- no pending runtime request or waiting link request;
+- no open command, dynamic tool or subagent item outside a rolled-back run;
+- no pending provider effect, a restart continuation included;
+- none of its own tasks unfinished or still owing it a wake;
+- no guest message, and the thread isn't snoozed, pinned or kept active.
+
+A message Alice wrote after the task ended leaves the thread to ordinary auto-settle. The worker checks a child
+when its run or its task ends, and on every sweep, at most 40 a sweep, oldest first. A follow-up reopens a released
+child like any settled thread.
+
+A child starts in its parent's checkout unless it was given its own worktree, and upstream runs the project's
+settle script in a settled thread's worktree. A delegated child skips that script while another thread in the same
+checkout is unsettled; its terminals still close. That holds for every settle of a delegated child, manual ones too.
+
+There's no setting: switching to stock T3 is the rollback, and stock T3 reads the data unchanged. A task in a
+linked environment runs as an ordinary thread there, so that machine doesn't release it early; upstream's idle
+unload still does. A child with a long-lived dynamic tool open, such as a monitor, is held until it closes. Drop
+this patch if upstream starts releasing finished delegated threads itself.
+
+- `apps/server/src/orchestration-v2/DelegatedChildRelease.ts` (fork only): the guards, the release, and the
+  shared-checkout check.
+- `apps/server/src/orchestration-v2/ProjectionStore.ts`: `getReleasableDelegatedChildren`, on upstream's recovery
+  and waiting-link indexes.
+- `apps/server/src/orchestration-v2/ThreadSettlementService.ts`: the sweep releases children before it reads the
+  settings, a finished task also enqueues its child, and `cleanUpSettledThread` skips the script in a shared
+  checkout.
+- Tests: `apps/server/src/orchestration-v2/DelegatedChildRelease.fork.test.ts` pins the query against SQLite, the
+  guards, and the worker with auto-settle off. Upstream's `ThreadSettlementService.test.ts` and
+  `ProviderTurnControlService.test.ts` gain a stub for the new read and otherwise pass unchanged. Upstream already
+  covers the rest: settling detaches the session (`ProviderSessionManager.test.ts`), Codex unsubscribes on unload
+  (`CodexAdapterV2.test.ts`), and a stale auto-settle is refused while a message reopens a settled thread
+  (`runtimeLayer.test.ts`).
+
 ### macOS signing without upstream's App ID (`fork:`)
 
 Upstream's passkey entitlements need a provisioning profile for upstream's App ID, which the fork can't get.
