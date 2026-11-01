@@ -19,6 +19,7 @@ import {
   type OrchestrationV2Run,
   type OrchestrationV2Subagent,
 } from "@t3tools/contracts";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -38,7 +39,11 @@ import * as ServerActivation from "../serverActivation.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
-import { isReleasableDelegatedChild, makeDelegatedChildRelease } from "./DelegatedChildRelease.ts";
+import {
+  checkoutKey,
+  isReleasableDelegatedChild,
+  makeDelegatedChildRelease,
+} from "./DelegatedChildRelease.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProjectStore from "./ProjectStore.ts";
@@ -221,8 +226,8 @@ const createRun = Effect.fn(function* (
 const createItem = Effect.fn(function* (
   threadId: ThreadId,
   runId: RunId,
-  type: "command_execution" | "dynamic_tool" | "link_request",
-  status: "running" | "waiting" | "completed",
+  type: "command_execution" | "dynamic_tool" | "subagent" | "link_request",
+  status: "pending" | "running" | "waiting" | "completed",
 ) {
   const common = {
     id: TurnItemId.make(`item:${runId}:${type}`),
@@ -241,7 +246,7 @@ const createItem = Effect.fn(function* (
     updatedAt: old,
   };
   yield* apply({
-    id: EventId.make(`event:item:${runId}:${type}`),
+    id: EventId.make(`event:item:${runId}:${type}:${status}`),
     type: "turn-item.updated",
     threadId,
     occurredAt: old,
@@ -250,7 +255,19 @@ const createItem = Effect.fn(function* (
         ? { ...common, type, toolName: "monitor", input: null, output: null }
         : type === "link_request"
           ? { ...common, type, reason: "Run the suite there.", linkStatus: "pending" }
-          : { ...common, type, input: "npm run dev" },
+          : type === "subagent"
+            ? {
+                ...common,
+                type,
+                subagentId: NodeId.make(`node:nested:${runId}`),
+                origin: "provider_native",
+                driver,
+                providerInstanceId,
+                childThreadId: null,
+                prompt: "Look into it",
+                result: null,
+              }
+            : { ...common, type, input: "npm run dev" },
   });
 });
 
@@ -466,6 +483,22 @@ describe("getReleasableDelegatedChildren", () => {
       yield* createItem(command, RunId.make(`run:${command}:1`), "command_execution", "running");
       const monitor = yield* finishedChild("open-dynamic-tool");
       yield* createItem(monitor, RunId.make(`run:${monitor}:1`), "dynamic_tool", "running");
+      const nativeSubagent = yield* finishedChild("open-subagent");
+      yield* createItem(
+        nativeSubagent,
+        RunId.make(`run:${nativeSubagent}:1`),
+        "subagent",
+        "running",
+      );
+      const pendingCommand = yield* finishedChild("pending-command");
+      yield* createItem(
+        pendingCommand,
+        RunId.make(`run:${pendingCommand}:1`),
+        "command_execution",
+        "pending",
+      );
+      const waitingTool = yield* finishedChild("waiting-dynamic-tool");
+      yield* createItem(waitingTool, RunId.make(`run:${waitingTool}:1`), "dynamic_tool", "waiting");
       const link = yield* finishedChild("waiting-link-request");
       yield* createItem(link, RunId.make(`run:${link}:1`), "link_request", "waiting");
       yield* insertEffect(
@@ -506,7 +539,17 @@ describe("getReleasableDelegatedChildren", () => {
         (yield* store.getReleasableDelegatedChildren(quiet)).map((child) => child.threadId),
         [quiet],
       );
+      assert.strictEqual(
+        DateTime.formatIso(found.find((child) => child.threadId === quiet)!.snapshotAt),
+        DateTime.formatIso(old),
+      );
       assert.deepStrictEqual(yield* store.getReleasableDelegatedChildren(command), []);
+      // Once its command finishes, the child is found.
+      yield* createItem(command, RunId.make(`run:${command}:1`), "command_execution", "completed");
+      assert.deepStrictEqual(
+        (yield* store.getReleasableDelegatedChildren(command)).map((child) => child.threadId),
+        [command],
+      );
     }).pipe(Effect.provide(layerSql)),
   );
 });
@@ -585,35 +628,48 @@ describe("isReleasableDelegatedChild", () => {
       }),
     );
     assert.isFalse(releasable({ activityRunStatus: "running" }));
+    // A wake queued after the projection read shows up as the latest run.
+    assert.isFalse(releasable({ status: "queued" }));
+    assert.isFalse(releasable({ status: "running" }));
+    assert.isTrue(releasable({ status: "idle", latestRunId: null }));
     assert.isFalse(releasable({ settledOverride: "active" }));
   });
+});
+
+/** The release over the real projection, or over `projections` when given; records its commands. */
+const makeRelease = Effect.fn(function* (
+  projections?: Layer.Layer<ProjectionStore.ProjectionStoreV2>,
+) {
+  const commands = yield* Ref.make<ReadonlyArray<AutoSettleCommand>>([]);
+  const dependencies = Layer.mergeAll(
+    Layer.mock(Orchestrator.OrchestratorV2)({
+      dispatch: (command) =>
+        command.type === "thread.auto-settle"
+          ? Ref.update(commands, (all) => [...all, command]).pipe(
+              Effect.as({ sequence: 1, storedEvents: [] }),
+            )
+          : Effect.die(new Error(`Unexpected command: ${command.type}`)),
+    }),
+    Layer.succeed(Crypto.Crypto, testCrypto),
+  );
+  const release = yield* makeDelegatedChildRelease().pipe(
+    Effect.provide(
+      projections === undefined ? dependencies : Layer.merge(dependencies, projections),
+    ),
+  );
+  return { release, commands };
 });
 
 describe("makeDelegatedChildRelease", () => {
   it.effect("settles each releasable child once, with the snapshot it read", () =>
     Effect.gen(function* () {
-      const commands = yield* Ref.make<ReadonlyArray<AutoSettleCommand>>([]);
       const ready = yield* finishedChild("release-ready");
       const takenOver = yield* finishedChild("release-taken-over");
       yield* writeMessage(takenOver, "user", DateTime.subtract(now, { minutes: 5 }));
       const busy = yield* finishedChild("release-busy");
       yield* createItem(busy, RunId.make(`run:${busy}:1`), "command_execution", "running");
 
-      const release = yield* makeDelegatedChildRelease().pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            Layer.mock(Orchestrator.OrchestratorV2)({
-              dispatch: (command) =>
-                command.type === "thread.auto-settle"
-                  ? Ref.update(commands, (all) => [...all, command]).pipe(
-                      Effect.as({ sequence: 1, storedEvents: [] }),
-                    )
-                  : Effect.die(new Error(`Unexpected command: ${command.type}`)),
-            }),
-            Layer.succeed(Crypto.Crypto, testCrypto),
-          ),
-        ),
-      );
+      const { release, commands } = yield* makeRelease();
       yield* release.releaseFinishedChildren();
 
       const sent = yield* Ref.get(commands);
@@ -625,6 +681,118 @@ describe("makeDelegatedChildRelease", () => {
       assert.match(sent[0]!.commandId, /^server:release-delegated:/);
     }).pipe(Effect.provide(layerSql)),
   );
+
+  it.effect("leaves a child that changed after the projection read", () =>
+    Effect.gen(function* () {
+      const store = yield* ProjectionStore.ProjectionStoreV2;
+      // A wake queued between the two reads moves no thread timestamp, only the latest run.
+      const woken = yield* finishedChild("woken-between-reads");
+      const touched = yield* finishedChild("touched-between-reads");
+      const { release, commands } = yield* makeRelease(
+        Layer.mock(ProjectionStore.ProjectionStoreV2)({
+          getReleasableDelegatedChildren: store.getReleasableDelegatedChildren,
+          getSettlementCandidates: (threadId) =>
+            Effect.gen(function* () {
+              if (threadId === woken) yield* createRun(woken, "queued", 2);
+              const candidates = yield* store.getSettlementCandidates(threadId);
+              return threadId === touched
+                ? candidates.map((thread) => ({ ...thread, updatedAt: now }))
+                : candidates;
+            }).pipe(Effect.provideService(ProjectionStore.ProjectionStoreV2, store)),
+        }),
+      );
+      yield* release.releaseFinishedChildren();
+      assert.deepStrictEqual(yield* Ref.get(commands), []);
+    }).pipe(Effect.provide(layerSql)),
+  );
+
+  it.effect("reaches a ready child behind forty held ones", () =>
+    Effect.gen(function* () {
+      for (let index = 0; index < 40; index++) {
+        const held = yield* finishedChild(`held-${String(index).padStart(2, "0")}`);
+        yield* writeMessage(held, "user", DateTime.subtract(now, { minutes: 30 }));
+      }
+      // Touched last, so it sorts after the held ones.
+      const ready = yield* finishedChild("ready-behind-held");
+      yield* writeMessage(ready, "agent", DateTime.subtract(now, { minutes: 20 }));
+      const { release, commands } = yield* makeRelease();
+      yield* release.releaseFinishedChildren();
+      assert.deepStrictEqual(
+        (yield* Ref.get(commands)).map((command) => command.threadId),
+        [ready],
+      );
+    }).pipe(Effect.provide(layerSql)),
+  );
+
+  it.effect("keeps a child out of its parent's checkout teardown", () =>
+    Effect.gen(function* () {
+      yield* createThread("parent", {
+        worktreePath: "/worktrees/parent",
+        settledOverride: "settled",
+        settledAt: now,
+        lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: parentId },
+      });
+      const { release } = yield* makeRelease();
+      const thread = (overrides: Partial<OrchestrationV2AppThread>) =>
+        appThread(ThreadId.make("thread:release:checkout"), overrides);
+      const shares = (overrides: Partial<OrchestrationV2AppThread>) =>
+        release.childSharesCheckout(thread(overrides));
+
+      // The parent has settled; the checkout is still the parent's.
+      assert.isTrue(yield* shares({ worktreePath: "/worktrees/parent" }));
+      assert.isFalse(yield* shares({ worktreePath: "/worktrees/isolated" }));
+      assert.isFalse(yield* shares({ worktreePath: null }));
+      assert.isFalse(
+        yield* shares({
+          worktreePath: "/worktrees/parent",
+          lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: parentId },
+        }),
+      );
+      // Without the parent's record it leaves the checkout alone.
+      const orphan = ThreadId.make("thread:release:missing-parent");
+      assert.isTrue(
+        yield* shares({
+          worktreePath: "/worktrees/parent",
+          lineage: {
+            parentThreadId: orphan,
+            relationshipToParent: "subagent",
+            rootThreadId: orphan,
+          },
+        }),
+      );
+    }).pipe(Effect.provide(layerSql)),
+  );
+
+  it.effect("finds the parent's checkout on Windows whatever its case and slashes", () =>
+    Effect.gen(function* () {
+      yield* createThread("parent", {
+        worktreePath: "c:\\repo\\checkout",
+        lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: parentId },
+      });
+      const { release } = yield* makeRelease().pipe(
+        Effect.provideService(HostProcess.Platform, "win32"),
+      );
+      const child = appThread(ThreadId.make("thread:release:windows-checkout"), {
+        worktreePath: "C:/Repo/Checkout/",
+      });
+      assert.isTrue(yield* release.childSharesCheckout(child));
+    }).pipe(Effect.provide(layerSql)),
+  );
+
+  it("compares checkouts the way their platform does", () => {
+    assert.strictEqual(
+      checkoutKey("C:/Repo/Checkout", "win32"),
+      checkoutKey("c:\\repo\\checkout\\", "win32"),
+    );
+    assert.notStrictEqual(
+      checkoutKey("/repo/Checkout", "linux"),
+      checkoutKey("/repo/checkout", "linux"),
+    );
+    assert.strictEqual(
+      checkoutKey("/repo/checkout/", "linux"),
+      checkoutKey("/repo/checkout", "linux"),
+    );
+  });
 });
 
 describe("ThreadSettlementServiceV2 with delegated children", () => {
@@ -678,7 +846,11 @@ describe("ThreadSettlementServiceV2 with delegated children", () => {
         // Only the child's own sweep finds it, so a release proves that sweep ran.
         getReleasableDelegatedChildren: (threadId) =>
           Queue.offer(releaseReads, threadId).pipe(
-            Effect.as(threadId === child ? [{ threadId: child, taskCompletedAt: finished }] : []),
+            Effect.as(
+              threadId === child
+                ? [{ threadId: child, taskCompletedAt: finished, snapshotAt: old }]
+                : [],
+            ),
           ),
         getSettlementCandidates: (threadId) =>
           Effect.succeed(threadId === child ? [childCandidate] : []),
@@ -688,14 +860,6 @@ describe("ThreadSettlementServiceV2 with delegated children", () => {
             ? Effect.succeed(thread)
             : Effect.die(new Error(`Unexpected read: ${threadId}`));
         },
-        getThreadWorktreePaths: () =>
-          Effect.succeed(
-            threads.flatMap((thread) =>
-              thread.worktreePath === null || thread.archivedAt !== null
-                ? []
-                : [{ threadId: thread.id, worktreePath: thread.worktreePath }],
-            ),
-          ),
       }),
       Layer.mock(Orchestrator.OrchestratorV2)({
         streamDomainEvents: Stream.fromPubSub(domainEvents),
@@ -793,7 +957,7 @@ describe("ThreadSettlementServiceV2 with delegated children", () => {
     ),
   );
 
-  it.effect("skips the settle script in a checkout another thread still uses", () =>
+  it.effect("skips the settle script in its parent's checkout, settled or not", () =>
     Effect.scoped(
       Effect.gen(function* () {
         const settledChild = appThread(child, {
@@ -803,6 +967,8 @@ describe("ThreadSettlementServiceV2 with delegated children", () => {
         });
         const parent = appThread(parentId, {
           worktreePath: "/worktrees/parent",
+          settledOverride: "settled",
+          settledAt: now,
           lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: parentId },
         });
         const isolated = appThread(ThreadId.make("thread:release:isolated"), {

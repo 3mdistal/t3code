@@ -227,6 +227,8 @@ export interface ProjectionReleasableDelegatedChild {
   readonly threadId: ThreadId;
   /** When the latest task run in this thread ended. */
   readonly taskCompletedAt: DateTime.Utc;
+  /** The thread's `updatedAt` when this read found it finished. */
+  readonly snapshotAt: DateTime.Utc;
 }
 
 const ProjectionCheckpointContext = Schema.Struct({
@@ -6370,13 +6372,19 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         .pipe(Effect.mapError((cause) => new ProjectionStoreSetupError({ cause })));
 
     // fork: finished delegated children that still hold a provider session. See FORK.md.
-    // The settlement worker applies the shell's own guards to each row afterwards.
+    // The settlement worker applies the shell's own guards to each row afterwards. There's no
+    // limit: a live session bounds the rows, and a cap here would let held children hide the rest.
     const getReleasableDelegatedChildren: ProjectionStoreV2Shape["getReleasableDelegatedChildren"] =
       (threadId) =>
-        sql<{ readonly thread_id: string; readonly task_completed_at: string }>`
+        sql<{
+          readonly thread_id: string;
+          readonly task_completed_at: string;
+          readonly snapshot_at: string;
+        }>`
           WITH children AS MATERIALIZED (
             -- Only a live provider session is worth releasing, and there are few of those.
-            SELECT t.thread_id, t.updated_at
+            SELECT t.thread_id, t.updated_at,
+              json_extract(t.payload_json, '$.updatedAt') AS snapshot_at
             FROM orchestration_v2_projection_threads t
             WHERE t.thread_id IN (
                 SELECT binding.thread_id
@@ -6402,7 +6410,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                     OR task.completed_at IS NULL)
               )
           )
-          SELECT c.thread_id,
+          SELECT c.thread_id, c.snapshot_at,
             (SELECT max(task.completed_at) FROM orchestration_v2_projection_subagents task
              WHERE task.child_thread_id = c.thread_id AND task.origin = 'app_owned'
             ) AS task_completed_at
@@ -6453,12 +6461,12 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                     ELSE 0 END)
             )
           ORDER BY c.updated_at ASC, c.thread_id ASC
-          LIMIT 40
         `.pipe(
           Effect.map((rows) =>
             rows.map((row) => ({
               threadId: ThreadId.make(row.thread_id),
               taskCompletedAt: DateTime.makeUnsafe(row.task_completed_at),
+              snapshotAt: DateTime.makeUnsafe(row.snapshot_at),
             })),
           ),
           Effect.mapError((cause) => new ProjectionStoreSetupError({ cause })),
