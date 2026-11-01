@@ -382,8 +382,10 @@ Users read about it in the Memory and CPU limits section of `docs/user/remote-ac
   Work launched from a thread whose latest message is her "launch anyway" starts too. Idle sessions close on
   every pass over the limits, before anything waits. Below the critical line, the newest running turn is
   interrupted every 30 s, and its thread queues a resume note. A held thread the Task Priorities board ranks
-  starts first, best rank first, and a helper thread takes the rank of the nearest ranked thread above it
-  (`lineage.parentThreadId`, up to 10 levels). The rest start oldest first. Either way they start 90 s apart,
+  starts first, best rank first. A thread without a rank, such as a task's helper or a fork of its thread, takes
+  the rank of the nearest ranked thread above it (`lineage.parentThreadId`, up to 10 levels; a deleted thread
+  ends the walk). A thread another thread launched at the top level doesn't inherit, since the waiting list
+  doesn't record who launched it. The rest start oldest first. Either way they start 90 s apart,
   or one every pass while the reading would stay at its release lines once each session released in the
   last two minutes, and the next one, grows by 2 GiB (`releaseDue`). Without a reading or a release line,
   the 90 s spacing holds. On Oct 29, 18 threads waited on the PC with 30 to 50 GB free, because new work
@@ -418,8 +420,8 @@ Users read about it in the Memory and CPU limits section of `docs/user/remote-ac
   - `off.json`: `memgate off` writes `{ at, until }` in epoch ms. It switches the limits off for at most a day.
   - `inbox/`: one record per subagent launch the hook refused. Its thread resumes with a note listing them.
   - `priority.json`: teenylilconfig's task wake writes `{ version: 1, at, ranks }` from the board every 10 minutes,
-    each live ranked task's thread ID with its rank (1 is the top). One more than a day old, more than a minute
-    ahead, or malformed counts as no ranks (`priorityRanks`).
+    each ranked task's thread ID with its rank (1 is the top). One more than a day old, more than a minute
+    ahead, over 1 MiB, or malformed counts as no ranks (`priorityRanks`).
 - Stock compatibility: holds, notices and resume notes reuse `run.updated`, `turn-item.updated` and system
   notifications. Stock T3 drops `resourceLimits` the next time it saves settings.
 - Known gaps:
