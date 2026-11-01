@@ -15,7 +15,9 @@ import {
   newestInterruptible,
   nextState,
   offUntil,
+  priorityRanks,
   releaseDue,
+  releaseOrder,
   SESSION_GIB,
   TIMING,
 } from "./policy.ts";
@@ -323,5 +325,63 @@ describe("heldLaunchesNote", () => {
     expect(note.summary).toBe("The memory limits held 8 launches");
     expect(note.text).toContain("; and 3 more");
     expect(note.text.length).toBeLessThan(5 * 200 + 300);
+  });
+});
+
+describe("priorityRanks", () => {
+  const at = 10 * 3_600_000;
+
+  it("reads the board's positive ranks from a fresh file", () => {
+    const ranks = priorityRanks(
+      { version: 1, at, source: "task-wake", ranks: { "thread:a": 2, "mcp:b": 1, "thread:c": 0 } },
+      at + 60_000,
+    );
+    expect([...ranks]).toEqual([
+      ["thread:a", 2],
+      ["mcp:b", 1],
+    ]);
+  });
+
+  it("treats a day-old, future, malformed or missing file as no ranks", () => {
+    const ranks = { "thread:a": 1 };
+    expect(priorityRanks({ version: 1, at, ranks }, at + TIMING.priorityStaleMs + 1).size).toBe(0);
+    expect(priorityRanks({ version: 1, at, ranks }, at - TIMING.priorityAheadMs - 1).size).toBe(0);
+    expect(priorityRanks({ version: 2, at, ranks }, at).size).toBe(0);
+    expect(priorityRanks({ version: 1, at: String(at), ranks }, at).size).toBe(0);
+    expect(priorityRanks({ version: 1, at, ranks: [1, 2] }, at).size).toBe(0);
+    expect(priorityRanks(null, at).size).toBe(0);
+  });
+
+  it("drops ranks that aren't positive finite numbers", () => {
+    const ranks = priorityRanks(
+      {
+        version: 1,
+        at,
+        ranks: { a: "1", b: -3, c: Number.POSITIVE_INFINITY, d: null, e: 1.5 },
+      },
+      at,
+    );
+    expect([...ranks]).toEqual([["e", 1.5]]);
+  });
+});
+
+describe("releaseOrder", () => {
+  it("puts ranked threads first, best rank first, and keeps arrival order otherwise", () => {
+    const ranks = new Map([
+      ["d", 3],
+      ["b", 1],
+      ["e", 3],
+    ]);
+    expect(releaseOrder(["a", "b", "c", "d", "e"], (id) => ranks.get(id) ?? null)).toEqual([
+      "b",
+      "d",
+      "e",
+      "a",
+      "c",
+    ]);
+  });
+
+  it("leaves the order alone when nothing is ranked", () => {
+    expect(releaseOrder(["a", "b", "c"], () => null)).toEqual(["a", "b", "c"]);
   });
 });
