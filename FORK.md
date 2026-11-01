@@ -229,32 +229,37 @@ thread and ends a Claude child's process. Nothing running means:
 - none of its own tasks unfinished or still owing it a wake;
 - no guest message, and the thread isn't snoozed, pinned or kept active.
 
-A message Alice wrote after the task ended leaves the thread to ordinary auto-settle. The worker checks a child
-when its run or its task ends, and on every sweep, at most 40 a sweep, oldest first. A follow-up reopens a released
-child like any settled thread.
+A message that resumed the thread after the task ended leaves it to ordinary auto-settle: Alice's own, or since
+upstream v0.1.12 one an agent sends with `t3_thread_send`, which upstream counts as resuming too (#33995). The fork
+used to count only Alice's. The command carries the thread's `updatedAt` from the worker's first read, so the
+orchestrator refuses it if anything happened on the thread since, such as a wake being queued. The worker checks a
+child when its run or its task ends, and on every sweep. It settles at most 40 a sweep, oldest first, counting only
+children that pass every check, so children held by a snooze or by Alice can't crowd out the rest. A follow-up reopens
+a released child like any settled thread.
 
-A child starts in its parent's checkout unless it was given its own worktree, and upstream runs the project's
-settle script in a settled thread's worktree. A delegated child skips that script while another thread in the same
-checkout is unsettled; its terminals still close. That holds for every settle of a delegated child, manual ones too.
+A child starts in its parent's checkout unless it was given its own worktree. The fork used to keep such a child
+from running the project's settle script there; upstream v0.1.11 does the same for every subagent in its parent's
+worktree (#19665), so the fork dropped its own check. A delegated child's path is its parent's, copied as is.
+The same upstream change settles a subagent only with its parent, so its settlement read skips a child whose
+parent is live; the release reads its child with an option that lifts that one filter.
 
 There's no setting: switching to stock T3 is the rollback, and stock T3 reads the data unchanged. A task in a
 linked environment runs as an ordinary thread there, so that machine doesn't release it early; upstream's idle
 unload still does. A child with a long-lived dynamic tool open, such as a monitor, is held until it closes. Drop
 this patch if upstream starts releasing finished delegated threads itself.
 
-- `apps/server/src/orchestration-v2/DelegatedChildRelease.ts` (fork only): the guards, the release, and the
-  shared-checkout check.
+- `apps/server/src/orchestration-v2/DelegatedChildRelease.ts` (fork only): the guards and the release.
 - `apps/server/src/orchestration-v2/ProjectionStore.ts`: `getReleasableDelegatedChildren`, on upstream's recovery
   and waiting-link indexes, and `getSettlementCandidates`' `withLiveParent` option.
 - `apps/server/src/orchestration-v2/ThreadSettlementService.ts`: the sweep releases children before it reads the
-  settings, a finished task also enqueues its child, and `cleanUpSettledThread` skips the script in a shared
-  checkout.
+  settings, and a finished task also enqueues its child.
 - Tests: `apps/server/src/orchestration-v2/DelegatedChildRelease.fork.test.ts` pins the query against SQLite, the
-  guards, and the worker with auto-settle off. Upstream's `ThreadSettlementService.test.ts` and
-  `ProviderTurnControlService.test.ts` gain a stub for the new read and otherwise pass unchanged. Upstream already
-  covers the rest: settling detaches the session (`ProviderSessionManager.test.ts`), Codex unsubscribes on unload
-  (`CodexAdapterV2.test.ts`), and a stale auto-settle is refused while a message reopens a settled thread
-  (`runtimeLayer.test.ts`).
+  guards, a wake queued between the worker's two reads, held children ahead of a ready one, and the worker with
+  auto-settle off. Upstream's `ThreadSettlementService.test.ts` and `ProviderTurnControlService.test.ts` gain a
+  stub for the new read and otherwise pass unchanged. Upstream already covers the rest: settling detaches the
+  session (`ProviderSessionManager.test.ts`), Codex unsubscribes on unload (`CodexAdapterV2.test.ts`), a subagent
+  in its parent's worktree skips the settle script (`ThreadSettlementService.test.ts`), and a stale auto-settle is
+  refused while a message reopens a settled thread (`runtimeLayer.test.ts`).
 
 ### macOS signing without upstream's App ID (`fork:`)
 

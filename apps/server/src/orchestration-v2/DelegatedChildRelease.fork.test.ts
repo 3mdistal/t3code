@@ -219,8 +219,8 @@ const createRun = Effect.fn(function* (
 const createItem = Effect.fn(function* (
   threadId: ThreadId,
   runId: RunId,
-  type: "command_execution" | "dynamic_tool" | "link_request",
-  status: "running" | "waiting" | "completed",
+  type: "command_execution" | "dynamic_tool" | "subagent" | "link_request",
+  status: "pending" | "running" | "waiting" | "completed",
 ) {
   const common = {
     id: TurnItemId.make(`item:${runId}:${type}`),
@@ -239,7 +239,7 @@ const createItem = Effect.fn(function* (
     updatedAt: old,
   };
   yield* apply({
-    id: EventId.make(`event:item:${runId}:${type}`),
+    id: EventId.make(`event:item:${runId}:${type}:${status}`),
     type: "turn-item.updated",
     threadId,
     occurredAt: old,
@@ -248,7 +248,19 @@ const createItem = Effect.fn(function* (
         ? { ...common, type, toolName: "monitor", input: null, output: null }
         : type === "link_request"
           ? { ...common, type, reason: "Run the suite there.", linkStatus: "pending" }
-          : { ...common, type, input: "npm run dev" },
+          : type === "subagent"
+            ? {
+                ...common,
+                type,
+                subagentId: NodeId.make(`node:nested:${runId}`),
+                origin: "provider_native",
+                driver,
+                providerInstanceId,
+                childThreadId: null,
+                prompt: "Look into it",
+                result: null,
+              }
+            : { ...common, type, input: "npm run dev" },
   });
 });
 
@@ -274,6 +286,7 @@ const writeMessage = Effect.fn(function* (
   threadId: ThreadId,
   createdBy: "user" | "agent",
   at: DateTime.Utc,
+  creationSource: "web" | "mcp" = "web",
 ) {
   yield* apply({
     id: EventId.make(`event:${threadId}:message:${createdBy}`),
@@ -282,7 +295,7 @@ const writeMessage = Effect.fn(function* (
     occurredAt: at,
     payload: {
       createdBy,
-      creationSource: "web",
+      creationSource,
       id: MessageId.make(`message:${threadId}:${createdBy}`),
       threadId,
       runId: null,
@@ -464,6 +477,22 @@ describe("getReleasableDelegatedChildren", () => {
       yield* createItem(command, RunId.make(`run:${command}:1`), "command_execution", "running");
       const monitor = yield* finishedChild("open-dynamic-tool");
       yield* createItem(monitor, RunId.make(`run:${monitor}:1`), "dynamic_tool", "running");
+      const nativeSubagent = yield* finishedChild("open-subagent");
+      yield* createItem(
+        nativeSubagent,
+        RunId.make(`run:${nativeSubagent}:1`),
+        "subagent",
+        "running",
+      );
+      const pendingCommand = yield* finishedChild("pending-command");
+      yield* createItem(
+        pendingCommand,
+        RunId.make(`run:${pendingCommand}:1`),
+        "command_execution",
+        "pending",
+      );
+      const waitingTool = yield* finishedChild("waiting-dynamic-tool");
+      yield* createItem(waitingTool, RunId.make(`run:${waitingTool}:1`), "dynamic_tool", "waiting");
       const link = yield* finishedChild("waiting-link-request");
       yield* createItem(link, RunId.make(`run:${link}:1`), "link_request", "waiting");
       yield* insertEffect(
@@ -504,13 +533,23 @@ describe("getReleasableDelegatedChildren", () => {
         (yield* store.getReleasableDelegatedChildren(quiet)).map((child) => child.threadId),
         [quiet],
       );
+      assert.strictEqual(
+        DateTime.formatIso(found.find((child) => child.threadId === quiet)!.snapshotAt),
+        DateTime.formatIso(old),
+      );
       assert.deepStrictEqual(yield* store.getReleasableDelegatedChildren(command), []);
+      // Once its command finishes, the child is found.
+      yield* createItem(command, RunId.make(`run:${command}:1`), "command_execution", "completed");
+      assert.deepStrictEqual(
+        (yield* store.getReleasableDelegatedChildren(command)).map((child) => child.threadId),
+        [command],
+      );
     }).pipe(Effect.provide(layerSql)),
   );
 });
 
 describe("isReleasableDelegatedChild", () => {
-  it.effect("leaves a child Alice wrote to after its task ended", () =>
+  it.effect("leaves a child resumed after its task ended", () =>
     Effect.gen(function* () {
       const store = yield* ProjectionStore.ProjectionStoreV2;
       const nowMs = DateTime.toEpochMillis(now);
@@ -520,17 +559,23 @@ describe("isReleasableDelegatedChild", () => {
         return thread!;
       });
 
-      // Half an hour after the task ended, so neither reads as a turn about to start.
+      // Half an hour after the task ended, so none reads as a turn about to start.
       const agentFollowUp = yield* finishedChild("agent-follow-up");
       yield* writeMessage(agentFollowUp, "agent", DateTime.subtract(now, { minutes: 30 }));
       const wroteBefore = yield* finishedChild("user-wrote-before");
       yield* writeMessage(wroteBefore, "user", old);
       const wroteAfter = yield* finishedChild("user-wrote-after");
       yield* writeMessage(wroteAfter, "user", DateTime.subtract(now, { minutes: 30 }));
+      // An agent's t3_thread_send resumes a thread as Alice's message does.
+      const agentSentAfter = yield* finishedChild("agent-sent-after");
+      yield* writeMessage(agentSentAfter, "agent", DateTime.subtract(now, { minutes: 30 }), "mcp");
 
       assert.isTrue(isReleasableDelegatedChild(yield* candidate(agentFollowUp), finishedMs, nowMs));
       assert.isTrue(isReleasableDelegatedChild(yield* candidate(wroteBefore), finishedMs, nowMs));
       assert.isFalse(isReleasableDelegatedChild(yield* candidate(wroteAfter), finishedMs, nowMs));
+      assert.isFalse(
+        isReleasableDelegatedChild(yield* candidate(agentSentAfter), finishedMs, nowMs),
+      );
     }).pipe(Effect.provide(layerSql)),
   );
 
@@ -567,7 +612,7 @@ describe("isReleasableDelegatedChild", () => {
       pendingRuntimeRequest: null,
       pendingBackgroundTasks: [],
       pendingGuestMessageCount: 0,
-      latestUserAuthoredMessageAt: null,
+      latestResumingMessageAt: null,
     };
     const releasable = (overrides: Partial<ProjectionStore.ProjectionSettlementCandidate>) =>
       isReleasableDelegatedChild(
@@ -588,35 +633,48 @@ describe("isReleasableDelegatedChild", () => {
       }),
     );
     assert.isFalse(releasable({ activityRunStatus: "running" }));
+    // A wake queued after the projection read shows up as the latest run.
+    assert.isFalse(releasable({ status: "queued" }));
+    assert.isFalse(releasable({ status: "running" }));
+    assert.isTrue(releasable({ status: "idle", latestRunId: null }));
     assert.isFalse(releasable({ settledOverride: "active" }));
   });
+});
+
+/** The release over the real projection, or over `projections` when given; records its commands. */
+const makeRelease = Effect.fn(function* (
+  projections?: Layer.Layer<ProjectionStore.ProjectionStoreV2>,
+) {
+  const commands = yield* Ref.make<ReadonlyArray<AutoSettleCommand>>([]);
+  const dependencies = Layer.mergeAll(
+    Layer.mock(Orchestrator.OrchestratorV2)({
+      dispatch: (command) =>
+        command.type === "thread.auto-settle"
+          ? Ref.update(commands, (all) => [...all, command]).pipe(
+              Effect.as({ sequence: 1, storedEvents: [] }),
+            )
+          : Effect.die(new Error(`Unexpected command: ${command.type}`)),
+    }),
+    Layer.succeed(SecureRandom.SecureRandom, testRandom),
+  );
+  const release = yield* makeDelegatedChildRelease().pipe(
+    Effect.provide(
+      projections === undefined ? dependencies : Layer.merge(dependencies, projections),
+    ),
+  );
+  return { release, commands };
 });
 
 describe("makeDelegatedChildRelease", () => {
   it.effect("settles each releasable child once, with the snapshot it read", () =>
     Effect.gen(function* () {
-      const commands = yield* Ref.make<ReadonlyArray<AutoSettleCommand>>([]);
       const ready = yield* finishedChild("release-ready");
       const takenOver = yield* finishedChild("release-taken-over");
       yield* writeMessage(takenOver, "user", DateTime.subtract(now, { minutes: 5 }));
       const busy = yield* finishedChild("release-busy");
       yield* createItem(busy, RunId.make(`run:${busy}:1`), "command_execution", "running");
 
-      const release = yield* makeDelegatedChildRelease().pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            Layer.mock(Orchestrator.OrchestratorV2)({
-              dispatch: (command) =>
-                command.type === "thread.auto-settle"
-                  ? Ref.update(commands, (all) => [...all, command]).pipe(
-                      Effect.as({ sequence: 1, storedEvents: [] }),
-                    )
-                  : Effect.die(new Error(`Unexpected command: ${command.type}`)),
-            }),
-            Layer.succeed(SecureRandom.SecureRandom, testRandom),
-          ),
-        ),
-      );
+      const { release, commands } = yield* makeRelease();
       yield* release.releaseFinishedChildren();
 
       const sent = yield* Ref.get(commands);
@@ -626,6 +684,48 @@ describe("makeDelegatedChildRelease", () => {
       );
       assert.strictEqual(DateTime.formatIso(sent[0]!.snapshotAt), DateTime.formatIso(old));
       assert.match(sent[0]!.commandId, /^server:release-delegated:/);
+    }).pipe(Effect.provide(layerSql)),
+  );
+
+  it.effect("leaves a child that changed after the projection read", () =>
+    Effect.gen(function* () {
+      const store = yield* ProjectionStore.ProjectionStoreV2;
+      // A wake queued between the two reads moves no thread timestamp, only the latest run.
+      const woken = yield* finishedChild("woken-between-reads");
+      const touched = yield* finishedChild("touched-between-reads");
+      const { release, commands } = yield* makeRelease(
+        Layer.mock(ProjectionStore.ProjectionStoreV2)({
+          getReleasableDelegatedChildren: store.getReleasableDelegatedChildren,
+          getSettlementCandidates: (threadId) =>
+            Effect.gen(function* () {
+              if (threadId === woken) yield* createRun(woken, "queued", 2);
+              const candidates = yield* store.getSettlementCandidates(threadId);
+              return threadId === touched
+                ? candidates.map((thread) => ({ ...thread, updatedAt: now }))
+                : candidates;
+            }).pipe(Effect.provideService(ProjectionStore.ProjectionStoreV2, store)),
+        }),
+      );
+      yield* release.releaseFinishedChildren();
+      assert.deepStrictEqual(yield* Ref.get(commands), []);
+    }).pipe(Effect.provide(layerSql)),
+  );
+
+  it.effect("reaches a ready child behind forty held ones", () =>
+    Effect.gen(function* () {
+      for (let index = 0; index < 40; index++) {
+        const held = yield* finishedChild(`held-${String(index).padStart(2, "0")}`);
+        yield* writeMessage(held, "user", DateTime.subtract(now, { minutes: 30 }));
+      }
+      // Touched last, so it sorts after the held ones.
+      const ready = yield* finishedChild("ready-behind-held");
+      yield* writeMessage(ready, "agent", DateTime.subtract(now, { minutes: 20 }));
+      const { release, commands } = yield* makeRelease();
+      yield* release.releaseFinishedChildren();
+      assert.deepStrictEqual(
+        (yield* Ref.get(commands)).map((command) => command.threadId),
+        [ready],
+      );
     }).pipe(Effect.provide(layerSql)),
   );
 });
@@ -665,14 +765,12 @@ describe("ThreadSettlementServiceV2 with delegated children", () => {
     pendingRuntimeRequest: null,
     pendingBackgroundTasks: [],
     pendingGuestMessageCount: 0,
-    latestUserAuthoredMessageAt: null,
+    latestResumingMessageAt: null,
   };
 
   const makeWorker = Effect.fn(function* (threads: ReadonlyArray<OrchestrationV2AppThread>) {
     const commands = yield* Queue.unbounded<AutoSettleCommand>();
     const releaseReads = yield* Queue.unbounded<ThreadId | undefined>();
-    const scriptRuns =
-      yield* Queue.unbounded<ProjectSetupScriptRunner.ProjectSetupScriptRunnerInput>();
     const domainEvents = yield* PubSub.unbounded<OrchestrationV2DomainEvent>();
     const settingsChanges = yield* PubSub.unbounded<typeof offSettings>();
     const merges = yield* PubSub.unbounded<PullRequestService.PullRequestMergeEvent>();
@@ -682,7 +780,11 @@ describe("ThreadSettlementServiceV2 with delegated children", () => {
         // Only the child's own sweep finds it, so a release proves that sweep ran.
         getReleasableDelegatedChildren: (threadId) =>
           Queue.offer(releaseReads, threadId).pipe(
-            Effect.as(threadId === child ? [{ threadId: child, taskCompletedAt: finished }] : []),
+            Effect.as(
+              threadId === child
+                ? [{ threadId: child, taskCompletedAt: finished, snapshotAt: old }]
+                : [],
+            ),
           ),
         getSettlementCandidates: (threadId) =>
           Effect.succeed(threadId === child ? [childCandidate] : []),
@@ -692,14 +794,6 @@ describe("ThreadSettlementServiceV2 with delegated children", () => {
             ? Effect.succeed(thread)
             : Effect.die(new Error(`Unexpected read: ${threadId}`));
         },
-        getThreadWorktreePaths: () =>
-          Effect.succeed(
-            threads.flatMap((thread) =>
-              thread.worktreePath === null || thread.archivedAt !== null
-                ? []
-                : [{ threadId: thread.id, worktreePath: thread.worktreePath }],
-            ),
-          ),
       }),
       Layer.mock(Orchestrator.OrchestratorV2)({
         streamDomainEvents: Stream.fromPubSub(domainEvents),
@@ -710,8 +804,7 @@ describe("ThreadSettlementServiceV2 with delegated children", () => {
       }),
       Layer.mock(TerminalManager.TerminalManager)({ closeIdle: () => Effect.void }),
       Layer.mock(ProjectSetupScriptRunner.ProjectSetupScriptRunner)({
-        runForThread: (input) =>
-          Queue.offer(scriptRuns, input).pipe(Effect.as({ status: "no-script" } as const)),
+        runForThread: () => Effect.succeed({ status: "no-script" } as const),
       }),
       Layer.mock(GitManager.GitManager)({}),
       Layer.mock(PullRequestService.PullRequestService)({
@@ -742,7 +835,6 @@ describe("ThreadSettlementServiceV2 with delegated children", () => {
     return {
       commands,
       releaseReads,
-      scriptRuns,
       publish: (event: OrchestrationV2DomainEvent) => PubSub.publish(domainEvents, event),
       layer: Layer.effect(
         ThreadSettlementService.ThreadSettlementServiceV2,
@@ -793,49 +885,6 @@ describe("ThreadSettlementServiceV2 with delegated children", () => {
           });
           const command = yield* Queue.take(worker.commands);
           assert.strictEqual(command.threadId, child);
-        }).pipe(Effect.provide(worker.layer));
-      }),
-    ),
-  );
-
-  it.effect("skips the settle script in a checkout another thread still uses", () =>
-    Effect.scoped(
-      Effect.gen(function* () {
-        const settledChild = appThread(child, {
-          worktreePath: "/worktrees/parent",
-          settledOverride: "settled",
-          settledAt: now,
-        });
-        const parent = appThread(parentId, {
-          worktreePath: "/worktrees/parent",
-          lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: parentId },
-        });
-        const isolated = appThread(ThreadId.make("thread:release:isolated"), {
-          worktreePath: "/worktrees/isolated",
-          settledOverride: "settled",
-          settledAt: now,
-        });
-        const worker = yield* makeWorker([settledChild, parent, isolated]);
-        const settled = (thread: OrchestrationV2AppThread): OrchestrationV2DomainEvent => ({
-          type: "thread.settled",
-          id: EventId.make(`event:settled:${thread.id}`),
-          threadId: thread.id,
-          occurredAt: now,
-          payload: thread,
-        });
-        yield* Effect.gen(function* () {
-          const service = yield* ThreadSettlementService.ThreadSettlementServiceV2;
-          yield* service.start();
-          assert.strictEqual(yield* Queue.take(worker.releaseReads), undefined);
-          yield* service.drain;
-          yield* worker.publish(settled(settledChild));
-          yield* worker.publish(settled(isolated));
-          // Events run in order, so the isolated child's script is the first one.
-          const run = yield* Queue.take(worker.scriptRuns);
-          assert.strictEqual(run.threadId, isolated.id);
-          assert.strictEqual(run.worktreePath, "/worktrees/isolated");
-          yield* service.drain;
-          assert.strictEqual(yield* Queue.size(worker.scriptRuns), 0);
         }).pipe(Effect.provide(worker.layer));
       }),
     ),
