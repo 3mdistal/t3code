@@ -726,8 +726,6 @@ export const make = Effect.gen(function* () {
         );
         if (parent?.worktreePath === worktreePath) return;
       }
-      // fork: a delegated child doesn't tear down a checkout another thread still uses. See FORK.md.
-      if (yield* delegatedChildren.childSharesCheckout(thread)) return;
       const run = yield* projectScripts.runForThread({
         threadId,
         projectId: thread.projectId,
