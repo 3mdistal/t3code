@@ -126,7 +126,7 @@ const make = Effect.fn("makeResourceLimits")(function* () {
     const now = yield* Clock.currentTimeMillis;
     const current = yield* Ref.get(snapshot);
     const state = liveState(current, now);
-    // While anything waits, new work queues behind it, so release order stays oldest first.
+    // While anything waits, new work queues behind it, so the governor picks what starts next.
     if (current.limits === null || isOff(current, now)) return ADMITTED;
     if (state === "ok" && current.waiting.length === 0) return ADMITTED;
     const launcher = input.message.senderThreadId ?? input.thread.lineage.parentThreadId;

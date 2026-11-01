@@ -33,6 +33,9 @@ export const TIMING = {
   snoozeMs: 24 * 3_600_000,
   // `memgate off` switches the limits off for 2 h by default; no switch outlasts a day.
   maxOffMs: 24 * 3_600_000,
+  // Task wake rewrites the ranks file every 10 minutes; one older than a day is left over, so it counts as none.
+  priorityStaleMs: 24 * 3_600_000,
+  priorityAheadMs: 60_000,
 } as const;
 
 // CPU has no release line of its own; it releases this many points under the pause line.
@@ -259,7 +262,7 @@ export function waitingReason(input: {
 }): string {
   const { state, reading, limits, cpuAverage, machine, at } = input;
   const then =
-    "Held work starts on its own, one thread at a time, oldest first. Choose Resume to start it now.";
+    "Held work starts on its own, one thread at a time: board tasks by rank, then the rest oldest first. Choose Resume to start it now.";
   if (state === "ok" || reading === null) {
     return `Held at ${clock(at)} behind other work waiting for ${machine}'s limits. ${then}`;
   }
@@ -305,6 +308,47 @@ export function heldLaunchesNote(launches: ReadonlyArray<string>, at: number): R
     summary: `The memory limits held ${one ? "a launch" : `${launches.length} launches`}`,
     text: `Continue where you stopped. The memory limits held ${one ? "this launch" : "these launches"} at ${clock(at)}: ${list}. Start ${one ? "it" : "them"} now if you still need to.`,
   };
+}
+
+// The ranks file comes from a file any local process can write, so its size is bounded.
+const MAX_RANKS = 5_000;
+
+/**
+ * Thread ranks from the file teenylilconfig's task wake writes from Alice's Task Priorities board:
+ * `{ version: 1, at, ranks: { [threadId]: rank } }`, with rank 1 the top. A file more than a day old or more than a
+ * minute ahead counts as none, and so does a malformed one. Only positive finite ranks count.
+ */
+export function priorityRanks(file: unknown, now: number): ReadonlyMap<string, number> {
+  const ranked = new Map<string, number>();
+  if (typeof file !== "object" || file === null) return ranked;
+  const { version, at, ranks } = file as {
+    readonly version?: unknown;
+    readonly at?: unknown;
+    readonly ranks?: unknown;
+  };
+  if (version !== 1 || typeof at !== "number" || !Number.isFinite(at)) return ranked;
+  if (now - at > TIMING.priorityStaleMs || at - now > TIMING.priorityAheadMs) return ranked;
+  if (typeof ranks !== "object" || ranks === null || Array.isArray(ranks)) return ranked;
+  for (const [threadId, rank] of Object.entries(ranks).slice(0, MAX_RANKS)) {
+    if (typeof rank === "number" && Number.isFinite(rank) && rank > 0) ranked.set(threadId, rank);
+  }
+  return ranked;
+}
+
+/**
+ * The order held threads start in: ranked ones first, best rank first, then the rest. Ties keep the order they
+ * came in, which is oldest first.
+ */
+export function releaseOrder<T>(
+  items: ReadonlyArray<T>,
+  rankOf: (item: T) => number | null,
+): Array<T> {
+  return items
+    .map((item, index) => ({ item, index, rank: rankOf(item) ?? Number.POSITIVE_INFINITY }))
+    .toSorted((left, right) =>
+      left.rank === right.rank ? left.index - right.index : left.rank < right.rank ? -1 : 1,
+    )
+    .map(({ item }) => item);
 }
 
 /**
