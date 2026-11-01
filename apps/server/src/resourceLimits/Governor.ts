@@ -93,6 +93,8 @@ const encodeJson = Schema.encodeEffect(Json);
 const MAX_INTERRUPTED_RUN_IDS = 50;
 // A helper thread takes the rank of the nearest thread above it that has one, this many levels up at most.
 const MAX_RANK_HOPS = 10;
+// Any local process can write the ranks file, so a larger one is skipped unread.
+const MAX_PRIORITY_BYTES = 1024 * 1024;
 
 const waitsOnAlice = (shell: OrchestrationV2ThreadShell) =>
   shell.pendingRuntimeRequest !== null && shell.pendingRuntimeRequest.blocking !== false;
@@ -277,24 +279,45 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
         })
       : Effect.succeed(true);
 
-  // The board's best-ranked task goes first. A thread without a rank of its own, such as a task's helper, takes
-  // the rank of the nearest thread above it that has one.
+  const readPriority = (now: number) =>
+    fs.stat(files.priority).pipe(
+      Effect.flatMap((info) =>
+        Number(info.size) > MAX_PRIORITY_BYTES ? Effect.succeed(null) : readJson(files.priority),
+      ),
+      Effect.orElseSucceed((): unknown => null),
+      Effect.map((file) => priorityRanks(file, now)),
+    );
+
+  // The board's best-ranked task goes first. A thread without a rank of its own, such as a task's helper or a
+  // fork of its thread, takes the rank of the nearest thread above it that has one. A deleted thread ends the walk.
   const byRank = Effect.fn("ResourceLimitsGovernor.byRank")(function* (
     ready: ReadonlyArray<Inspected>,
     now: number,
   ) {
     if (ready.length < 2) return ready;
-    const ranks = priorityRanks(yield* readJson(files.priority), now);
+    const ranks = yield* readPriority(now);
     if (ranks.size === 0) return ready;
+    // Each thread above is read once a pass, however many helpers share it.
+    const shells = new Map<ThreadId, OrchestrationV2ThreadShell | null>();
+    const shellOf = (threadId: ThreadId) =>
+      shells.has(threadId)
+        ? Effect.succeed(shells.get(threadId) ?? null)
+        : projections.getThreadShell(threadId).pipe(
+            Effect.orElseSucceed(() => null),
+            Effect.tap((shell) => Effect.sync(() => shells.set(threadId, shell))),
+          );
     const rankOf = new Map<ThreadId, number | null>();
     for (const item of ready) {
       let shell = item.shell;
       let rank: number | null = null;
-      for (let hop = 0; shell !== null && hop <= MAX_RANK_HOPS; hop++) {
+      const seen = new Set<ThreadId>();
+      for (let hop = 0; hop <= MAX_RANK_HOPS; hop++) {
+        if (shell === null || shell.deletedAt !== null || seen.has(shell.id)) break;
+        seen.add(shell.id);
         rank = ranks.get(shell.id) ?? null;
         const parent = shell.lineage.parentThreadId;
         if (rank !== null || parent == null) break;
-        shell = yield* projections.getThreadShell(parent).pipe(Effect.orElseSucceed(() => null));
+        shell = yield* shellOf(parent);
       }
       rankOf.set(item.entry.threadId, rank);
     }
