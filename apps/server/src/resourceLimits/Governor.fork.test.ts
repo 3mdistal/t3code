@@ -15,7 +15,9 @@ import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAda
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Path from "effect/Path";
 import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
@@ -399,6 +401,94 @@ it.effect("R3: a restart keeps counting the sessions still growing", () =>
     yield* TestClock.adjust("15 seconds");
     yield* second.pass(yield* twoRoom);
     assert.deepEqual(yield* started, [true, true, false]);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+/** Writes the board's ranks where task wake does, stamped now unless `at` says otherwise. */
+const writeRanks = (contents: Record<string, unknown> | string, at?: number) =>
+  Effect.gen(function* () {
+    const config = yield* ServerConfig.ServerConfig;
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const now = yield* Clock.currentTimeMillis;
+    const dir = path.join(config.stateDir, "resource-limits");
+    const text =
+      typeof contents === "string"
+        ? contents
+        : JSON.stringify({ version: 1, at: at ?? now, source: "task-wake", ranks: contents });
+    yield* fs.makeDirectory(dir, { recursive: true });
+    yield* fs.writeFileString(path.join(dir, "priority.json"), text);
+  });
+
+/** Four agent threads held a second apart; the last is a helper the third one started. */
+const heldWithHelper = (name: string) =>
+  Effect.gen(function* () {
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const threads = ["a", "b", "c", "helper"].map((thread) =>
+      ThreadId.make(`thread:${name}:${thread}`),
+    ) as [ThreadId, ThreadId, ThreadId, ThreadId];
+    const [, , parent, helper] = threads;
+    const governor = yield* makeGovernor.pipe(
+      Effect.provideService(ProjectionStore.ProjectionStoreV2, {
+        ...projections,
+        getThreadShell: (threadId) =>
+          projections
+            .getThreadShell(threadId)
+            .pipe(
+              Effect.map((shell) =>
+                shell !== null && threadId === helper
+                  ? { ...shell, lineage: { ...shell.lineage, parentThreadId: parent } }
+                  : shell,
+              ),
+            ),
+      }),
+    );
+    yield* Effect.forEach(threads, createThread);
+    yield* governor.pass(yield* tight);
+    for (const threadId of threads) {
+      yield* send(threadId, "agent work", agent);
+      yield* TestClock.adjust("1 second");
+    }
+    const started = Effect.forEach(threads, (threadId) =>
+      runs(threadId).pipe(Effect.map((all) => all.join() === "starting")),
+    );
+    return { governor, threads, started };
+  });
+
+it.effect(
+  "R6: the board's best-ranked task starts first, its helpers next, the rest oldest first",
+  () =>
+    Effect.gen(function* () {
+      const {
+        governor,
+        threads: [, b, c],
+        started,
+      } = yield* heldWithHelper("r6");
+      yield* writeRanks({ [b]: 5, [c]: 2, "thread:r6:not-waiting": 1 });
+
+      yield* governor.pass(yield* recovered);
+      assert.deepEqual(yield* started, [false, false, true, false]);
+      yield* TestClock.adjust(TIMING.releaseSpacingMs + 15_000);
+      yield* governor.pass(yield* recovered);
+      assert.deepEqual(yield* started, [false, false, true, true]);
+      yield* TestClock.adjust(TIMING.releaseSpacingMs + 15_000);
+      yield* governor.pass(yield* recovered);
+      assert.deepEqual(yield* started, [false, true, true, true]);
+    }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("R6: an unreadable or day-old ranks file leaves the line oldest first", () =>
+  Effect.gen(function* () {
+    const { governor, threads, started } = yield* heldWithHelper("r6-stale");
+    yield* writeRanks("{ not json");
+
+    yield* governor.pass(yield* recovered);
+    assert.deepEqual(yield* started, [true, false, false, false]);
+    yield* TestClock.adjust(TIMING.releaseSpacingMs + 15_000);
+    const now = yield* Clock.currentTimeMillis;
+    yield* writeRanks({ [threads[2]]: 1 }, now - TIMING.priorityStaleMs - 1);
+    yield* governor.pass(yield* recovered);
+    assert.deepEqual(yield* started, [true, true, false, false]);
   }).pipe(Effect.provide(layerTest)),
 );
 
