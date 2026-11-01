@@ -363,6 +363,11 @@ describe("priorityRanks", () => {
     );
     expect([...ranks]).toEqual([["e", 1.5]]);
   });
+
+  it("skips thread IDs longer than any T3 makes", () => {
+    const ranks = priorityRanks({ version: 1, at, ranks: { ["x".repeat(513)]: 1, ok: 2 } }, at);
+    expect([...ranks]).toEqual([["ok", 2]]);
+  });
 });
 
 describe("releaseOrder", () => {
