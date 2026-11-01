@@ -604,7 +604,7 @@ export const make = Effect.gen(function* () {
       if (thread.settledOverride !== "settled") return;
       const settledAtMs = toMillis(thread.settledAt);
       if (settledAtMs === null || settleActionRunAt.get(threadId) === settledAtMs) return;
-      // fork: a delegated child doesn't tear down a checkout another thread still uses. See FORK.md.
+      // fork: a delegated child doesn't tear down its parent's checkout. See FORK.md.
       if (yield* delegatedChildren.childSharesCheckout(thread)) return;
       const run = yield* projectScripts.runForThread({
         threadId,
