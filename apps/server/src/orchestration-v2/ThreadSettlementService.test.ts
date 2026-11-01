@@ -704,6 +704,8 @@ const makeHarness = Effect.fn("makeThreadSettlementHarness")(function* (options:
               ),
           ),
         ),
+      // fork: no delegated children here; see FORK.md and DelegatedChildRelease.fork.test.ts.
+      getReleasableDelegatedChildren: () => Effect.succeed([]),
       getThread: (threadId) => {
         if (options.projections) return options.projections.getThread(threadId);
         const thread = options.currentThreads?.find((candidate) => candidate.id === threadId);

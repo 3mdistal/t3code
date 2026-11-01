@@ -34,6 +34,7 @@ import { forkParked } from "../serverActivation.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as ProjectStore from "./ProjectStore.ts";
+import { makeDelegatedChildRelease } from "./DelegatedChildRelease.ts"; // fork: see FORK.md
 import { sourceControlDefinitions } from "../sourceControl/sourceControlDefinitions.ts";
 import { makeNoPullRequestRechecks } from "./noPullRequestRechecks.ts";
 import * as Orchestrator from "./Orchestrator.ts";
@@ -342,6 +343,7 @@ export const make = Effect.gen(function* () {
   // Repeated thread.settled retains settledAt; run the action only once per settlement.
   const settleActionRunAt = new Map<ThreadId, number>();
   const noPullRequestRechecks = makeNoPullRequestRechecks();
+  const delegatedChildren = yield* makeDelegatedChildRelease(); // fork: see FORK.md
 
   const sweep = Effect.fn("ThreadSettlementServiceV2.sweep")(function* (
     mergedPullRequest: PullRequestService.PullRequestMergeEvent | null,
@@ -349,6 +351,8 @@ export const make = Effect.gen(function* () {
   ) {
     // A thread that is not a candidate now (still running) must not keep a merged PR's quiet entry.
     if (mergedPullRequest !== null) yield* pauseQuietReads();
+    // fork: a finished delegated child is released whatever the settings. See FORK.md.
+    yield* delegatedChildren.releaseFinishedChildren(threadId);
     const settings = yield* settingsService.getSettings;
     const automaticSettlementEnabled = autoSettlementConfigured(settings);
     const threads = yield* projections.getSettlementCandidates(threadId);
@@ -722,6 +726,8 @@ export const make = Effect.gen(function* () {
         );
         if (parent?.worktreePath === worktreePath) return;
       }
+      // fork: a delegated child doesn't tear down a checkout another thread still uses. See FORK.md.
+      if (yield* delegatedChildren.childSharesCheckout(thread)) return;
       const run = yield* projectScripts.runForThread({
         threadId,
         projectId: thread.projectId,
@@ -761,10 +767,14 @@ export const make = Effect.gen(function* () {
       case "run.background-work-cancelled":
         return enqueueThread(event.threadId);
       // Sweep only when the work can have ended: progress updates cannot settle anything.
-      case "subagent.updated":
-        return isOrchestrationV2WorkActive(event.payload.status)
-          ? Effect.void
-          : enqueueThread(event.threadId);
+      case "subagent.updated": {
+        if (isOrchestrationV2WorkActive(event.payload.status)) return Effect.void;
+        // fork: the task can end after its child's last run event, so look at the child too. See FORK.md.
+        const childThreadId = event.payload.childThreadId;
+        return childThreadId === null
+          ? enqueueThread(event.threadId)
+          : Effect.andThen(enqueueThread(event.threadId), enqueueThread(childThreadId));
+      }
       case "provider-thread.updated":
         return backgroundWorkHoldsCompletion(event.payload.pendingBackgroundTasks ?? [])
           ? Effect.void
