@@ -310,13 +310,15 @@ export function heldLaunchesNote(launches: ReadonlyArray<string>, at: number): R
   };
 }
 
-// The ranks file comes from a file any local process can write, so its size is bounded.
+// Any local process can write the ranks file, so what it can hand the governor is bounded.
 const MAX_RANKS = 5_000;
+const MAX_THREAD_ID_LENGTH = 512;
 
 /**
  * Thread ranks from the file teenylilconfig's task wake writes from Alice's Task Priorities board:
  * `{ version: 1, at, ranks: { [threadId]: rank } }`, with rank 1 the top. A file more than a day old or more than a
- * minute ahead counts as none, and so does a malformed one. Only positive finite ranks count.
+ * minute ahead counts as none, and so does a malformed one. Only positive finite ranks count, for thread IDs up to
+ * 512 characters, and at most 5,000 are read.
  */
 export function priorityRanks(file: unknown, now: number): ReadonlyMap<string, number> {
   const ranked = new Map<string, number>();
@@ -330,6 +332,7 @@ export function priorityRanks(file: unknown, now: number): ReadonlyMap<string, n
   if (now - at > TIMING.priorityStaleMs || at - now > TIMING.priorityAheadMs) return ranked;
   if (typeof ranks !== "object" || ranks === null || Array.isArray(ranks)) return ranked;
   for (const [threadId, rank] of Object.entries(ranks).slice(0, MAX_RANKS)) {
+    if (threadId.length > MAX_THREAD_ID_LENGTH) continue;
     if (typeof rank === "number" && Number.isFinite(rank) && rank > 0) ranked.set(threadId, rank);
   }
   return ranked;
