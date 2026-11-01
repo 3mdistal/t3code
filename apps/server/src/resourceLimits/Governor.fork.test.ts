@@ -420,30 +420,38 @@ const writeRanks = (contents: Record<string, unknown> | string, at?: number) =>
     yield* fs.writeFileString(path.join(dir, "priority.json"), text);
   });
 
-/** Four agent threads held a second apart; the last is a helper the third one started. */
-const heldWithHelper = (name: string) =>
+/**
+ * Agent work held in each of `held`, a second apart, by a governor that sees `parents` as each thread's parent.
+ * `others` are threads that exist without held work.
+ */
+const holdThreads = (
+  name: string,
+  held: ReadonlyArray<string>,
+  parents: Readonly<Record<string, string>> = {},
+  others: ReadonlyArray<string> = [],
+) =>
   Effect.gen(function* () {
     const projections = yield* ProjectionStore.ProjectionStoreV2;
-    const threads = ["a", "b", "c", "helper"].map((thread) =>
-      ThreadId.make(`thread:${name}:${thread}`),
-    ) as [ThreadId, ThreadId, ThreadId, ThreadId];
-    const [, , parent, helper] = threads;
+    const id = (thread: string) => ThreadId.make(`thread:${name}:${thread}`);
+    const parentOf = new Map(
+      Object.entries(parents).map(([child, parent]) => [id(child), id(parent)]),
+    );
     const governor = yield* makeGovernor.pipe(
       Effect.provideService(ProjectionStore.ProjectionStoreV2, {
         ...projections,
         getThreadShell: (threadId) =>
-          projections
-            .getThreadShell(threadId)
-            .pipe(
-              Effect.map((shell) =>
-                shell !== null && threadId === helper
-                  ? { ...shell, lineage: { ...shell.lineage, parentThreadId: parent } }
-                  : shell,
-              ),
-            ),
+          projections.getThreadShell(threadId).pipe(
+            Effect.map((shell) => {
+              const parent = parentOf.get(threadId);
+              return shell !== null && parent !== undefined
+                ? { ...shell, lineage: { ...shell.lineage, parentThreadId: parent } }
+                : shell;
+            }),
+          ),
       }),
     );
-    yield* Effect.forEach(threads, createThread);
+    const threads = held.map(id);
+    yield* Effect.forEach([...threads, ...others.map(id)], createThread);
     yield* governor.pass(yield* tight);
     for (const threadId of threads) {
       yield* send(threadId, "agent work", agent);
@@ -452,42 +460,89 @@ const heldWithHelper = (name: string) =>
     const started = Effect.forEach(threads, (threadId) =>
       runs(threadId).pipe(Effect.map((all) => all.join() === "starting")),
     );
-    return { governor, threads, started };
+    // Past the 90 s spacing and the growth allowance, so the next pass releases one more.
+    const nextRelease = Effect.gen(function* () {
+      yield* TestClock.adjust(TIMING.releaseSpacingMs + 15_000);
+      yield* governor.pass(yield* recovered);
+    });
+    return { governor, id, started, nextRelease };
   });
+
+// The board's tasks a, b and c, and a helper c launched.
+const withHelper = ["a", "b", "c", "helper"];
 
 it.effect(
   "R6: the board's best-ranked task starts first, its helpers next, the rest oldest first",
   () =>
     Effect.gen(function* () {
-      const {
-        governor,
-        threads: [, b, c],
-        started,
-      } = yield* heldWithHelper("r6");
-      yield* writeRanks({ [b]: 5, [c]: 2, "thread:r6:not-waiting": 1 });
+      const { governor, id, started, nextRelease } = yield* holdThreads("r6", withHelper, {
+        helper: "c",
+      });
+      yield* writeRanks({ [id("b")]: 5, [id("c")]: 2, [id("not-waiting")]: 1 });
 
       yield* governor.pass(yield* recovered);
       assert.deepEqual(yield* started, [false, false, true, false]);
-      yield* TestClock.adjust(TIMING.releaseSpacingMs + 15_000);
-      yield* governor.pass(yield* recovered);
+      yield* nextRelease;
       assert.deepEqual(yield* started, [false, false, true, true]);
-      yield* TestClock.adjust(TIMING.releaseSpacingMs + 15_000);
-      yield* governor.pass(yield* recovered);
+      yield* nextRelease;
       assert.deepEqual(yield* started, [false, true, true, true]);
     }).pipe(Effect.provide(layerTest)),
 );
 
-it.effect("R6: an unreadable or day-old ranks file leaves the line oldest first", () =>
+it.effect("R6: each release reads the latest ranks, and an oversized file counts as none", () =>
   Effect.gen(function* () {
-    const { governor, threads, started } = yield* heldWithHelper("r6-stale");
-    yield* writeRanks("{ not json");
+    const { governor, id, started, nextRelease } = yield* holdThreads("r6-change", withHelper, {
+      helper: "c",
+    });
+    yield* writeRanks({ [id("b")]: 5 });
+    yield* governor.pass(yield* recovered);
+    assert.deepEqual(yield* started, [false, true, false, false]);
+
+    yield* writeRanks({ [id("a")]: 1 });
+    yield* nextRelease;
+    assert.deepEqual(yield* started, [true, true, false, false]);
+
+    const at = (yield* Clock.currentTimeMillis) + TIMING.releaseSpacingMs + 15_000;
+    const ranks = { [id("helper")]: 1 };
+    yield* writeRanks(
+      JSON.stringify({ version: 1, at, source: "task-wake", ranks, pad: "x".repeat(1024 * 1024) }),
+    );
+    yield* nextRelease;
+    assert.deepEqual(yield* started, [true, true, true, false]);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("R6: a rank passes down at most 10 levels of helpers", () =>
+  Effect.gen(function* () {
+    // x0's parent is x1, and so on up to x10, which has the rank; y0 sits one level below x0.
+    const chain = Array.from({ length: 10 }, (_, level) => [`x${level}`, `x${level + 1}`]);
+    const { governor, id, started, nextRelease } = yield* holdThreads(
+      "r6-deep",
+      ["old", "x0", "y0"],
+      { ...Object.fromEntries(chain), y0: "x0" },
+      chain.map(([, parent]) => parent!),
+    );
+    yield* writeRanks({ [id("x10")]: 1 });
 
     yield* governor.pass(yield* recovered);
-    assert.deepEqual(yield* started, [true, false, false, false]);
-    yield* TestClock.adjust(TIMING.releaseSpacingMs + 15_000);
-    const now = yield* Clock.currentTimeMillis;
-    yield* writeRanks({ [threads[2]]: 1 }, now - TIMING.priorityStaleMs - 1);
+    assert.deepEqual(yield* started, [false, true, false]);
+    yield* nextRelease;
+    assert.deepEqual(yield* started, [true, true, false]);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("R6: an unreadable or day-old ranks file leaves the line oldest first", () =>
+  Effect.gen(function* () {
+    const { governor, id, started, nextRelease } = yield* holdThreads("r6-stale", withHelper, {
+      helper: "c",
+    });
+    yield* writeRanks("{ not json");
     yield* governor.pass(yield* recovered);
+    assert.deepEqual(yield* started, [true, false, false, false]);
+
+    const day = TIMING.priorityStaleMs + TIMING.releaseSpacingMs + 15_001;
+    yield* writeRanks({ [id("c")]: 1 }, (yield* Clock.currentTimeMillis) - day);
+    yield* nextRelease;
     assert.deepEqual(yield* started, [true, true, false, false]);
   }).pipe(Effect.provide(layerTest)),
 );
