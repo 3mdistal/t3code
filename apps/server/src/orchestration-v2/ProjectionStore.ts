@@ -222,6 +222,13 @@ export type ProjectionSettlementCandidate = Pick<
     readonly latestUserAuthoredMessageAt: DateTime.Utc | null;
   };
 
+// fork: a delegated child the settlement worker may release. See FORK.md.
+export interface ProjectionReleasableDelegatedChild {
+  readonly threadId: ThreadId;
+  /** When the latest task run in this thread ended. */
+  readonly taskCompletedAt: DateTime.Utc;
+}
+
 const ProjectionCheckpointContext = Schema.Struct({
   runs: Schema.Array(
     OrchestrationV2RunJsonSchema.mapFields(({ id, ordinal, status }) => ({ id, ordinal, status })),
@@ -514,6 +521,10 @@ export interface ProjectionStoreV2Shape {
   readonly getSettlementCandidates: (
     threadId?: ThreadId,
   ) => Effect.Effect<ReadonlyArray<ProjectionSettlementCandidate>, ProjectionStoreV2Error>;
+  // fork: delegated children whose tasks all ended with nothing left running. See FORK.md.
+  readonly getReleasableDelegatedChildren: (
+    threadId?: ThreadId,
+  ) => Effect.Effect<ReadonlyArray<ProjectionReleasableDelegatedChild>, ProjectionStoreV2Error>;
   readonly getThreadsWithPullRequests: (
     threadId?: ThreadId,
   ) => Effect.Effect<ReadonlyArray<ProjectionThreadPullRequests>, ProjectionStoreV2Error>;
@@ -6358,6 +6369,101 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         )
         .pipe(Effect.mapError((cause) => new ProjectionStoreSetupError({ cause })));
 
+    // fork: finished delegated children that still hold a provider session. See FORK.md.
+    // The settlement worker applies the shell's own guards to each row afterwards.
+    const getReleasableDelegatedChildren: ProjectionStoreV2Shape["getReleasableDelegatedChildren"] =
+      (threadId) =>
+        sql<{ readonly thread_id: string; readonly task_completed_at: string }>`
+          WITH children AS MATERIALIZED (
+            -- Only a live provider session is worth releasing, and there are few of those.
+            SELECT t.thread_id, t.updated_at
+            FROM orchestration_v2_projection_threads t
+            WHERE t.thread_id IN (
+                SELECT binding.thread_id
+                FROM orchestration_v2_projection_provider_session_bindings binding
+                JOIN orchestration_v2_projection_provider_sessions session
+                  ON session.provider_session_id = binding.provider_session_id
+                WHERE session.status NOT IN ('stopped', 'error')
+              )${threadId === undefined ? sql`` : sql` AND t.thread_id = ${threadId}`}
+              AND t.deleted_at IS NULL
+              AND json_extract(t.payload_json, '$.archivedAt') IS NULL
+              AND json_extract(t.payload_json, '$.settledOverride') IS NULL
+              AND json_extract(t.payload_json, '$.pinnedAt') IS NULL
+              AND json_extract(t.payload_json, '$.autoSettleDisabledAt') IS NULL
+              -- A task runs here, and every task that ever ran here has ended.
+              AND EXISTS (
+                SELECT 1 FROM orchestration_v2_projection_subagents task
+                WHERE task.child_thread_id = t.thread_id AND task.origin = 'app_owned'
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM orchestration_v2_projection_subagents task
+                WHERE task.child_thread_id = t.thread_id AND task.origin = 'app_owned'
+                  AND (task.status NOT IN ('completed', 'failed', 'cancelled', 'interrupted')
+                    OR task.completed_at IS NULL)
+              )
+          )
+          SELECT c.thread_id,
+            (SELECT max(task.completed_at) FROM orchestration_v2_projection_subagents task
+             WHERE task.child_thread_id = c.thread_id AND task.origin = 'app_owned'
+            ) AS task_completed_at
+          FROM children c
+          -- Settling cancels queued notifications and wakes, held ones included.
+          WHERE NOT EXISTS (
+              SELECT 1 FROM orchestration_v2_projection_runs run
+              WHERE run.thread_id = c.thread_id
+                AND run.status NOT IN ('completed', 'interrupted', 'failed', 'cancelled', 'rolled_back')
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM orchestration_v2_projection_runtime_requests request
+              WHERE request.thread_id = c.thread_id AND request.status = 'pending'
+            )
+            -- Settling stops background terminals, and an open tool call may still answer.
+            -- A rolled-back run's items never close, so they don't count.
+            AND NOT EXISTS (
+              SELECT 1 FROM orchestration_v2_projection_turn_items item
+                INDEXED BY orchestration_v2_projection_turn_items_recovery_idx
+              WHERE item.thread_id = c.thread_id
+                AND item.type IN ('command_execution', 'dynamic_tool', 'subagent')
+                AND item.status IN ('pending', 'running', 'waiting')
+                AND NOT EXISTS (
+                  SELECT 1 FROM orchestration_v2_projection_runs rolled_back
+                  WHERE rolled_back.run_id = item.run_id AND rolled_back.status = 'rolled_back'
+                )
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM orchestration_v2_projection_turn_items link
+                INDEXED BY orchestration_v2_projection_turn_items_waiting_link_idx
+              WHERE link.thread_id = c.thread_id
+                AND link.type = 'link_request' AND link.status = 'waiting'
+            )
+            -- Provider work in flight, including a restart continuation.
+            AND NOT EXISTS (
+              SELECT 1 FROM orchestration_v2_effect_outbox effect
+              WHERE effect.status IN ('pending', 'running')
+                AND effect.thread_id = c.thread_id
+                AND effect.effect_type LIKE 'provider-%'
+            )
+            -- Its own tasks: unfinished, or finished but still owing this thread its wake.
+            AND NOT EXISTS (
+              SELECT 1 FROM orchestration_v2_projection_subagents own
+              WHERE own.thread_id = c.thread_id
+                AND (own.status NOT IN ('completed', 'failed', 'cancelled', 'interrupted')
+                  OR CASE WHEN json_valid(own.payload_json)
+                    THEN json_extract(own.payload_json, '$.completionDelivery.state') IN ('pending', 'claimed')
+                    ELSE 0 END)
+            )
+          ORDER BY c.updated_at ASC, c.thread_id ASC
+          LIMIT 40
+        `.pipe(
+          Effect.map((rows) =>
+            rows.map((row) => ({
+              threadId: ThreadId.make(row.thread_id),
+              taskCompletedAt: DateTime.makeUnsafe(row.task_completed_at),
+            })),
+          ),
+          Effect.mapError((cause) => new ProjectionStoreSetupError({ cause })),
+        );
+
     const getOpenRemoteDelegatedTasks: ProjectionStoreV2Shape["getOpenRemoteDelegatedTasks"] = sql<{
       readonly thread_id: string;
       readonly subagent_id: string;
@@ -7010,6 +7116,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       findGuestShareThreadId: readOnReader(findGuestShareThreadId),
       getThread: readOnReader(getThread),
       getSettlementCandidates: readOnReader(getSettlementCandidates),
+      getReleasableDelegatedChildren: readOnReader(getReleasableDelegatedChildren), // fork: see FORK.md
       getThreadsWithPullRequests: readOnReader(getThreadsWithPullRequests),
       getThreadWorktreePaths: readOnReader(getThreadWorktreePaths),
       getOpenRemoteDelegatedTasks: getOpenRemoteDelegatedTasks.pipe(NodeSqliteClient.readOnly),
