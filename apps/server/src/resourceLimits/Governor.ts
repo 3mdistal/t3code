@@ -41,7 +41,9 @@ import {
   newestInterruptible,
   nextState,
   offUntil,
+  priorityRanks,
   releaseDue,
+  releaseOrder,
   type ResumeNote,
   type RunningTurn,
   TIMING,
@@ -89,6 +91,8 @@ const Json = Schema.fromJsonString(Schema.Unknown, { space: 2 });
 const decodeJson = Schema.decodeUnknownOption(Json);
 const encodeJson = Schema.encodeEffect(Json);
 const MAX_INTERRUPTED_RUN_IDS = 50;
+// A helper thread takes the rank of the nearest thread above it that has one, this many levels up at most.
+const MAX_RANK_HOPS = 10;
 
 const waitsOnAlice = (shell: OrchestrationV2ThreadShell) =>
   shell.pendingRuntimeRequest !== null && shell.pendingRuntimeRequest.blocking !== false;
@@ -115,6 +119,8 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
     state: path.join(dir, "state.json"),
     off: path.join(dir, "off.json"),
     inbox: path.join(dir, "inbox"),
+    // The Task Priorities board's ranks, which teenylilconfig's task wake writes; see FORK.md.
+    priority: path.join(dir, "priority.json"),
   };
 
   const memory = yield* Ref.make<Memory>({
@@ -270,6 +276,30 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
           reason: "user",
         })
       : Effect.succeed(true);
+
+  // The board's best-ranked task goes first. A thread without a rank of its own, such as a task's helper, takes
+  // the rank of the nearest thread above it that has one.
+  const byRank = Effect.fn("ResourceLimitsGovernor.byRank")(function* (
+    ready: ReadonlyArray<Inspected>,
+    now: number,
+  ) {
+    if (ready.length < 2) return ready;
+    const ranks = priorityRanks(yield* readJson(files.priority), now);
+    if (ranks.size === 0) return ready;
+    const rankOf = new Map<ThreadId, number | null>();
+    for (const item of ready) {
+      let shell = item.shell;
+      let rank: number | null = null;
+      for (let hop = 0; shell !== null && hop <= MAX_RANK_HOPS; hop++) {
+        rank = ranks.get(shell.id) ?? null;
+        const parent = shell.lineage.parentThreadId;
+        if (rank !== null || parent == null) break;
+        shell = yield* projections.getThreadShell(parent).pipe(Effect.orElseSucceed(() => null));
+      }
+      rankOf.set(item.entry.threadId, rank);
+    }
+    return releaseOrder(ready, (item) => rankOf.get(item.entry.threadId) ?? null);
+  });
 
   const sessionsFor = Effect.fn("ResourceLimitsGovernor.sessionsFor")(function* (
     shells: ReadonlyArray<OrchestrationV2ThreadShell>,
@@ -481,7 +511,8 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
       }
     }
 
-    // Release oldest first, spaced out, once the reading this pass took is back under the limits.
+    // Release the best-ranked board task first and the rest oldest first, spaced out, once the reading this pass
+    // took is back under the limits.
     let lastReleaseAt = remembered.lastReleaseAt;
     const growingSince = remembered.growingSince.filter((at) => now - at < TIMING.sessionGrowthMs);
     const released = new Set<ThreadId>();
@@ -493,7 +524,7 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
         (item) => !dropped.has(item.entry.threadId) && item.held && !item.blocked,
       );
       // Switched off, everything waiting goes at once.
-      for (const item of off ? ready : ready.slice(0, 1)) {
+      for (const item of off ? ready : (yield* byRank(ready, now)).slice(0, 1)) {
         yield* unsnooze({ ...item, entry: changed.get(item.entry.threadId) ?? item.entry }, now);
         yield* dispatch({
           type: "queue.resume",
