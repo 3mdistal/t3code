@@ -161,6 +161,7 @@ import {
   noEligibleMemberCause,
   planQueuedRunRepin,
 } from "./ProviderPoolDispatch.ts"; // fork: see FORK.md.
+import { pauseOrder } from "../resourceLimits/policy.ts"; // fork: limits, see FORK.md.
 import { makeLimitsAdmission } from "../resourceLimits/OrchestratorAdmission.ts"; // fork: limits, see FORK.md.
 import * as ProviderContinuationRequests from "@t3tools/provider-core/server/ProviderContinuationRequests";
 import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
@@ -5737,10 +5738,15 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       projection = yield* getProjectionWithPendingEvents(command.threadId, events);
     }
     const userMessages = projection.messages.filter((message) => message.role === "user");
+    // fork: limits, see FORK.md. A typed order starts no model, so it asks for no title and doesn't use up the first.
     const onlyMaintenanceHistory =
-      userMessages.length > 0 && userMessages.every(isNativeMaintenanceCommand);
+      userMessages.length > 0 &&
+      userMessages.every(
+        (message) => isNativeMaintenanceCommand(message) || pauseOrder(message) !== null,
+      );
     if (
       !isNativeMaintenanceCommand(command) &&
+      pauseOrder(command) === null &&
       ((command.titleSeed !== undefined &&
         (yield* projectionStore
           .getMessageCount(command.threadId)
