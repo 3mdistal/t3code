@@ -362,10 +362,10 @@ app now installs the update itself:
 2. It starts a detached script, waits until the script is running, and quits. The script waits for the app to
    exit, swaps the two bundles, removes the folder with the old one in it, and reopens the app. The swap is one
    step (`renamex_np` with `RENAME_SWAP`, which `osascript` reaches through JavaScript's ObjC bridge), so the
-   installed path is never empty, even if the script is killed or the Mac loses power. If that call fails, two
-   moves do the swap, with the signals that would stop the script between them ignored, and a new app that can't
-   move in puts the old one back. If the app hasn't quit after two minutes, it leaves everything as it was. It
-   logs to `mac-update-install.log` in the app's log folder.
+   installed path is never empty, even if the script is killed or the Mac loses power. If the swap fails, as on a
+   volume that can't do it, nothing moves: the old app reopens, and the sidebar says the update didn't apply. If
+   the app hasn't quit after two minutes, it leaves everything as it was. It logs to `mac-update-install.log` in
+   the app's log folder.
 3. If anything fails before the quit, such as unpacking, a check, or reading the installed app's signature,
    nothing quits, and upstream's recovery reports the failed install as before.
 
@@ -386,8 +386,8 @@ are signed with a Developer ID.
   build must be in place, signed, swapped in one step, and still running 15 seconds after it reopens, with no
   staging folder left. First the last release without this patch tries the same update and must stay as it was.
 - Tests: `apps/desktop/src/updates/MacAdHocUpdate.fork.test.ts` covers the signature check and the bundle path, and
-  runs the install script against temporary folders: a normal swap, an app that doesn't quit, and a new app that
-  can't move in.
+  runs the install script against temporary folders, with a stand-in for macOS's swap: a normal swap, an app that
+  doesn't quit, and a refused swap. Off macOS it also runs the script's own swap, which must move nothing.
 
 ### Update notes show the newest patches (`fork:`)
 
