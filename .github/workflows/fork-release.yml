@@ -10,11 +10,21 @@ on:
   push:
     branches: [fork/main]
   workflow_dispatch:
+  # Adds macOS to the latest release when its own run found no macOS runner.
+  # fork/main is the default branch, so this runs on its newest commit.
+  schedule:
+    - cron: "40 */2 * * *"
 
 # Queued, never cancelled: a cancelled publish can leave a half-uploaded release.
+# GitHub keeps one pending run per group and cancels the older one, so the
+# schedule waits in a group of its own and can't drop a push's pending release.
 concurrency:
-  group: fork-release
+  group: fork-release${{ github.event_name == 'schedule' && '-mac' || '' }}
   cancel-in-progress: false
+
+# The install note for a release with a macOS build.
+env:
+  MAC_NOTE: '- **macOS (Apple silicon):** open the `.dmg` and drag the app to Applications. If macOS says the app is damaged, run `xattr -dr com.apple.quarantine "/Applications/T3 Code (Beta).app"`. After that, the app installs its own updates.'
 
 permissions:
   # release-desktop.yml's Windows job lists this run's artifacts to wait for the
@@ -32,6 +42,7 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       base: ${{ steps.version.outputs.base }}
       released: ${{ steps.version.outputs.released }}
+      mode: ${{ steps.mode.outputs.mode }}
       notes: ${{ steps.version.outputs.notes }}
       clerk_publishable_key: ${{ steps.public_config.outputs.clerk_publishable_key }}
       clerk_jwt_template: ${{ steps.public_config.outputs.clerk_jwt_template }}
@@ -78,6 +89,28 @@ jobs:
             echo NOTES_EOF
           } >> "$GITHUB_OUTPUT"
 
+      # `release` publishes a new release. `mac` builds only macOS and adds it to
+      # this commit's release, which published without it. A scheduled run never
+      # publishes: it would rerun a release that failed every two hours.
+      - id: mode
+        name: Decide what to build
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          RELEASED: ${{ steps.version.outputs.released }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ "$RELEASED" == false ]]; then
+            mode=release
+            if [[ "$EVENT" == schedule ]]; then mode=none; fi
+          else
+            assets="$(gh release view "v${VERSION}" --repo "$GITHUB_REPOSITORY" --json assets -q '.assets[].name')"
+            if grep -qx latest-mac.yml <<<"$assets"; then mode=none; else mode=mac; fi
+          fi
+          echo "mode=$mode" | tee -a "$GITHUB_OUTPUT"
+
       # .env.example holds the public T3 Connect identifiers that official
       # builds bake in.
       - id: public_config
@@ -99,7 +132,7 @@ jobs:
   ci:
     name: CI
     needs: version
-    if: needs.version.outputs.released == 'false'
+    if: needs.version.outputs.mode == 'release'
     # A called workflow gets no more than this, and GitHub won't start the run if
     # one of fork-ci.yml's jobs asks for more. Upstream's CI asks for id-token for
     # a task cache that only switches on in pingdotgg/t3code.
@@ -112,7 +145,7 @@ jobs:
   bundle:
     name: Build JS bundle
     needs: version
-    if: needs.version.outputs.released == 'false'
+    if: needs.version.outputs.mode == 'release' || needs.version.outputs.mode == 'mac'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
@@ -167,6 +200,7 @@ jobs:
   desktop:
     name: Desktop
     needs: [version, bundle]
+    if: needs.version.outputs.mode == 'release'
     strategy:
       fail-fast: false
       matrix:
@@ -214,8 +248,8 @@ jobs:
 
   # GitHub sometimes has no macOS arm64 runner free and gives up on a job that
   # waits about 15 minutes for one, so macOS builds on its own and a release
-  # publishes without it. GitHub's capacity notice covers all of its macOS arm64
-  # runners, so another macOS label wouldn't help.
+  # publishes without it; add-mac adds it later. GitHub's capacity notice covers
+  # all of its macOS arm64 runners, so another macOS label wouldn't help.
   desktop-mac:
     name: Desktop (macOS arm64)
     needs: [version, bundle]
@@ -313,9 +347,10 @@ jobs:
         run: |
           set -euo pipefail
           if [[ "$MAC_RESULT" == success ]]; then
-            mac_note='- **macOS (Apple silicon):** open the `.dmg` and drag the app to Applications. If macOS says the app is damaged, run `xattr -dr com.apple.quarantine "/Applications/T3 Code (Beta).app"`. After that, the app installs its own updates.'
+            mac_note="$MAC_NOTE"
           else
-            mac_note='- **macOS:** this release has no macOS build, because its build did not finish. The next release that builds it includes macOS.'
+            # add-mac swaps this line for MAC_NOTE, and finds it by its `- **macOS:**` start.
+            mac_note='- **macOS:** this release has no macOS build yet, because its build did not finish. While it is the latest release, this workflow tries again every two hours and adds macOS here.'
             echo "::warning::Publishing without macOS: its build ended as ${MAC_RESULT}."
           fi
           # Install steps come first, under their own heading, so the desktop update popover, which
@@ -337,3 +372,60 @@ jobs:
             --title "T3 Code ${VERSION}" \
             --notes-file notes.md \
             --latest
+
+  # Adds a late macOS build to the release that published without it: its
+  # installers, CLI archive, checksum and update manifest, and the install note.
+  add-mac:
+    name: Add macOS to the release
+    needs: [version, desktop-mac]
+    if: needs.version.outputs.mode == 'mac'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Download macOS artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: "{desktop,cli}-mac-*"
+          merge-multiple: true
+          path: mac-assets
+
+      - name: Add macOS to the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: v${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          cd mac-assets
+          rm -f builder-debug.yml
+          shopt -s nullglob
+          archives=(t3-*-darwin-*.tar.gz)
+          dmgs=(T3-Code-*-arm64.dmg)
+          zips=(T3-Code-*-arm64.zip)
+          ls -l
+          if [[ ! -f latest-mac.yml || ${#archives[@]} -eq 0 || ${#dmgs[@]} -eq 0 || ${#zips[@]} -eq 0 ]]; then
+            echo "The macOS build needs a dmg, a zip, a CLI archive and latest-mac.yml." >&2
+            exit 1
+          fi
+
+          # SHA256SUMS keeps the other platforms' lines and gains the macOS archive's.
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern SHA256SUMS --dir "$RUNNER_TEMP/published"
+          published="$RUNNER_TEMP/published/SHA256SUMS"
+          [[ -s "$published" ]] || { echo "${TAG}'s SHA256SUMS didn't download." >&2; exit 1; }
+          { grep -v -- '-darwin-' "$published" || true; sha256sum "${archives[@]}"; } > SHA256SUMS
+          cat SHA256SUMS
+
+          # The manifest goes up last, so a Mac that finds it can already download the zip it names.
+          files=()
+          for asset in *; do [[ "$asset" == latest-mac.yml ]] || files+=("$asset"); done
+          gh release upload "$TAG" "${files[@]}" --repo "$GITHUB_REPOSITORY" --clobber
+          gh release upload "$TAG" latest-mac.yml --repo "$GITHUB_REPOSITORY" --clobber
+
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json body -q .body > "$RUNNER_TEMP/body.md"
+          while IFS= read -r line; do
+            if [[ "$line" == '- **macOS:**'* ]]; then printf '%s\n' "$MAC_NOTE"; else printf '%s\n' "$line"; fi
+          done < "$RUNNER_TEMP/body.md" > "$RUNNER_TEMP/notes.md"
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes-file "$RUNNER_TEMP/notes.md"
+          echo "Added macOS to ${TAG}."
