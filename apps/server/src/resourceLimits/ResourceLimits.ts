@@ -221,9 +221,12 @@ const make = Effect.fn("makeResourceLimits")(function* () {
       const left = yield* refreshPause;
       return { supported: true, saved: left === null, wasPaused };
     }
-    // Asking again keeps the start, so what Alice has typed since still counts as written during the pause.
+    // Asking to pause again keeps the start, so what Alice has typed since still counts as written during the
+    // pause. Asking to stop again starts over, so it also stops what she has started since.
     const pause =
-      saved?.mode === order ? saved : { mode: order, at: yield* Clock.currentTimeMillis };
+      order === "finish" && saved?.mode === "finish"
+        ? saved
+        : { mode: order, at: yield* Clock.currentTimeMillis };
     const written = yield* writeJson(pauseFile, { version: 1, ...pause });
     if (written) yield* Ref.update(snapshot, (latest) => ({ ...latest, pause }));
     return { supported: true, saved: written, wasPaused };

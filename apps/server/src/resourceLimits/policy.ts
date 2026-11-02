@@ -212,7 +212,10 @@ export function pauseOrder(
   return Object.hasOwn(PAUSE_ORDERS, words) ? (PAUSE_ORDERS[words] ?? null) : null;
 }
 
-/** Whether a message Alice typed came after the pause began. Those still start; what she queued before it waits. */
+/**
+ * Whether a message Alice typed came after the pause began. Those still start: at once in an idle thread, with its
+ * older queue waiting again afterwards, or behind that older queue when a turn is still running.
+ */
 export const writtenDuringPause = (
   message: Provenance,
   writtenAt: number,
@@ -231,7 +234,7 @@ export function hasPhrase(text: string, phrase = LAUNCH_ANYWAY_PHRASE): boolean 
 
 /**
  * The newest message that started or joined a turn in a thread: role "user", in a run that isn't
- * still waiting in the queue. Anyone may have written it.
+ * still waiting in the queue or cancelled from it, as a typed order is. Anyone may have written it.
  */
 export function latestUserMessage<
   M extends Pick<OrchestrationV2ConversationMessage, "role" | "runId" | "createdAt">,
@@ -239,9 +242,13 @@ export function latestUserMessage<
   messages: ReadonlyArray<M>,
   runs: ReadonlyArray<{ readonly id: string; readonly status: string }>,
 ): M | undefined {
-  const queued = new Set(runs.filter((run) => run.status === "queued").map((run) => run.id));
+  const notTurns = new Set(
+    runs
+      .filter((run) => run.status === "queued" || run.status === "cancelled")
+      .map((run) => run.id),
+  );
   return messages
-    .filter((message) => message.role === "user" && !(message.runId && queued.has(message.runId)))
+    .filter((message) => message.role === "user" && !(message.runId && notTurns.has(message.runId)))
     .toSorted(
       (left, right) =>
         DateTime.toEpochMillis(left.createdAt) - DateTime.toEpochMillis(right.createdAt),

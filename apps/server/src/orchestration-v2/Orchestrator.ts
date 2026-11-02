@@ -193,6 +193,7 @@ import {
   noEligibleMemberCause,
   planQueuedRunRepin,
 } from "./ProviderPoolDispatch.ts"; // fork: see FORK.md.
+import { pauseOrder } from "../resourceLimits/policy.ts"; // fork: limits, see FORK.md.
 import { makeLimitsAdmission } from "../resourceLimits/OrchestratorAdmission.ts"; // fork: limits, see FORK.md.
 import * as ProviderContinuationRequests from "@t3tools/provider-core/server/ProviderContinuationRequests";
 import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
@@ -7660,12 +7661,21 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       projection = applyToProjection(projection, event);
     }
     const userMessages = projection.messages.filter((message) => message.role === "user");
+    // fork: limits, see FORK.md. A typed order starts no model, so it asks for no title and doesn't use up the first.
+    const typedOrders = new Set<unknown>(
+      userMessages.flatMap((message) => (pauseOrder(message) === null ? [] : [message.id])),
+    );
+    const startsNoModel = (message: Parameters<typeof isNativeMaintenanceCommand>[0]) =>
+      isNativeMaintenanceCommand(message) ||
+      ("createdBy" in message &&
+        pauseOrder(message as Parameters<typeof pauseOrder>[0]) !== null) ||
+      ("messageId" in message && typedOrders.has(message.messageId));
     // The recent runs of a compacted thread can hold only a `/compact` while an older prompt
     // exists, so when every loaded prompt is one, every user message is checked.
     const onlyMaintenanceHistory = [
       ...userMessages,
       ...projection.turnItems.flatMap((item) => (item.type === "user_message" ? [item] : [])),
-    ].every(isNativeMaintenanceCommand)
+    ].every(startsNoModel) // fork: limits, see FORK.md.
       ? projectionStore
           .getThreadRecords(command.threadId, ["messages"], { messageRoles: ["user"] })
           .pipe(
@@ -7674,7 +7684,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               ProjectionStoreThreadNotFoundError: () => Effect.succeed({ messages: [] }),
             }),
             Effect.map(({ messages }) => [...messages, ...userMessages]),
-            Effect.map((all) => all.length > 0 && all.every(isNativeMaintenanceCommand)),
+            Effect.map((all) => all.length > 0 && all.every(startsNoModel)),
             mapDispatchError(command),
           )
       : Effect.succeed(false);
@@ -7687,6 +7697,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       !hasTitleSetBeforeFirstMessage(projection.thread, command.titleSeed);
     if (
       !isNativeMaintenanceCommand(command) &&
+      pauseOrder(command) === null && // fork: limits, see FORK.md.
       (seedsUntitledThread || (command.createdBy === "user" && (yield* onlyMaintenanceHistory)))
     ) {
       const now = yield* DateTime.now;
