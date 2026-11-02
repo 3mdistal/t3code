@@ -4,6 +4,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   effectiveLimits,
+  orphanedProcesses,
   GiB,
   hasPhrase,
   heldLaunchesNote,
@@ -218,6 +219,57 @@ describe("isAlicesMessage", () => {
     expect(isAlicesMessage({ ...typed, senderThreadId: ThreadId.make("thread:other") })).toBe(
       false,
     );
+  });
+});
+
+describe("orphanedProcesses", () => {
+  const ROOT = 1;
+  const row = (pid: number, parentPid: number, createdAt = pid) => ({ pid, parentPid, createdAt });
+  const provider = row(10, ROOT);
+  const keptServer = row(11, 10);
+  const shell = row(12, 10);
+  const command = row(13, 12);
+  const commandChild = row(14, 13);
+  const before = [row(ROOT, 0), provider, keptServer, shell, command, commandChild];
+  const without = (...pids: number[]) => before.filter((one) => !pids.includes(one.pid));
+
+  it("finds what a dead shell left running, and not what's under it, which ends with it", () => {
+    expect(orphanedProcesses(before, without(12), ROOT)).toEqual([13]);
+  });
+
+  it("finds nothing when no parent died", () => {
+    expect(orphanedProcesses(before, before, ROOT)).toEqual([]);
+  });
+
+  it("doesn't count a process that ended along with its parent", () => {
+    expect(orphanedProcesses(before, without(12, 13, 14), ROOT)).toEqual([]);
+  });
+
+  it("leaves a process outside this server alone", () => {
+    const outside = [row(20, 99), row(21, 20)];
+    expect(orphanedProcesses([...before, ...outside], [row(21, 20)], ROOT)).toEqual([]);
+  });
+
+  it("doesn't take a process whose id has been reused for one that survived", () => {
+    const reused = without(12, 14).map((one) =>
+      one.pid === 13 ? { ...one, createdAt: 500 } : one,
+    );
+    expect(orphanedProcesses(before, reused, ROOT)).toEqual([]);
+  });
+
+  it("takes a parent whose id has been reused as dead", () => {
+    const reused = before.map((one) => (one.pid === 12 ? { ...one, createdAt: 500 } : one));
+    expect(orphanedProcesses(before, reused, ROOT)).toEqual([13]);
+  });
+
+  it("doesn't treat a newer process holding a dead parent's id as the parent", () => {
+    const stale = [row(ROOT, 0), row(30, ROOT, 50), row(31, 30, 40)];
+    expect(orphanedProcesses(stale, [row(ROOT, 0), row(31, 30, 40)], ROOT)).toEqual([]);
+  });
+
+  it("survives a loop in the readings", () => {
+    const loop = [row(40, 41), row(41, 40)];
+    expect(orphanedProcesses(loop, [row(41, 40)], ROOT)).toEqual([]);
   });
 });
 
