@@ -68,9 +68,23 @@ function exited(child: NodeChildProcess.ChildProcess): Promise<number | null> {
   });
 }
 
-async function withApps(
-  run: (paths: { target: string; staging: string; staged: string; log: string }) => Promise<void>,
-) {
+interface Paths {
+  readonly target: string;
+  readonly staging: string;
+  readonly staged: string;
+  readonly log: string;
+  /** Stands in for renamex_np's swap: exchanges its two arguments and prints "swapped". */
+  readonly swapper: string;
+  /** Prints "failed", as osascript does when the swap is refused. */
+  readonly failingSwapper: string;
+}
+
+function writeScript(path: string, body: string): string {
+  NodeFS.writeFileSync(path, `#!/bin/sh\n${body}\n`, { mode: 0o755 });
+  return path;
+}
+
+async function withApps(run: (paths: Paths) => Promise<void>) {
   const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-mac-update-"));
   try {
     const target = NodePath.join(root, "T3 Code (Beta).app");
@@ -78,7 +92,17 @@ async function withApps(
     const staged = NodePath.join(staging, "T3 Code (Beta).app");
     makeApp(target, "old");
     makeApp(staged, "new");
-    await run({ target, staging, staged, log: NodePath.join(root, "install.log") });
+    await run({
+      target,
+      staging,
+      staged,
+      log: NodePath.join(root, "install.log"),
+      swapper: writeScript(
+        NodePath.join(root, "swap"),
+        'mv "$2" "$2.swap" && mv "$1" "$2" && mv "$2.swap" "$1" && echo swapped',
+      ),
+      failingSwapper: writeScript(NodePath.join(root, "refuse"), "echo failed; exit 1"),
+    });
   } finally {
     NodeFS.rmSync(root, { recursive: true, force: true });
   }
@@ -88,7 +112,7 @@ const buildOf = (app: string) => NodeFS.readFileSync(NodePath.join(app, "build")
 
 describePosix("fork ad hoc Mac install script", () => {
   it("waits for the app to quit, then swaps the bundles", async () => {
-    await withApps(async ({ target, staging, staged, log }) => {
+    await withApps(async ({ target, staging, staged, log, swapper }) => {
       const app = NodeChildProcess.spawn("sleep", ["0.5"]);
       const script = spawnInstallScript({
         pid: app.pid ?? 0,
@@ -97,18 +121,18 @@ describePosix("fork ad hoc Mac install script", () => {
         staging,
         relaunch: false,
         logFile: log,
+        swapCommand: swapper,
       });
       expect(await exited(script)).toBe(0);
       expect(app.exitCode).toBe(0);
       expect(buildOf(target)).toBe("new");
       expect(NodeFS.existsSync(staging)).toBe(false);
-      // macOS exchanges the bundles in one step; elsewhere the script falls back to two moves.
-      expect(NodeFS.readFileSync(log, "utf8")).toMatch(/(swapped|moved) the new app into place/);
+      expect(NodeFS.readFileSync(log, "utf8")).toContain("swapped the new app into place");
     });
   });
 
   it("leaves the app as it was when it doesn't quit in time", async () => {
-    await withApps(async ({ target, staging, staged, log }) => {
+    await withApps(async ({ target, staging, staged, log, swapper }) => {
       const app = NodeChildProcess.spawn("sleep", ["30"]);
       try {
         const script = spawnInstallScript({
@@ -119,6 +143,7 @@ describePosix("fork ad hoc Mac install script", () => {
           relaunch: false,
           logFile: log,
           waitTenths: 2,
+          swapCommand: swapper,
         });
         expect(await exited(script)).toBe(1);
         expect(buildOf(target)).toBe("old");
@@ -130,21 +155,45 @@ describePosix("fork ad hoc Mac install script", () => {
     });
   });
 
-  it("restores the old app when the new one can't move in", async () => {
-    await withApps(async ({ target, staging, log }) => {
+  it("moves nothing when the swap is refused", async () => {
+    await withApps(async ({ target, staging, staged, log, failingSwapper }) => {
       const app = NodeChildProcess.spawn("true");
       await exited(app);
       const script = spawnInstallScript({
         pid: app.pid ?? 0,
         target,
-        staged: NodePath.join(staging, "missing.app"),
+        staged,
         staging,
         relaunch: false,
         logFile: log,
+        swapCommand: failingSwapper,
       });
       expect(await exited(script)).toBe(1);
       expect(buildOf(target)).toBe("old");
       expect(NodeFS.existsSync(staging)).toBe(false);
+      expect(NodeFS.readFileSync(log, "utf8")).toContain("leaving the installed one as it was");
     });
   });
+
+  // Off macOS there is no osascript, so the script's own swap fails like a refused one.
+  it.skipIf(HostProcess.Platform.defaultValue() === "darwin")(
+    "moves nothing without macOS's swap",
+    async () => {
+      await withApps(async ({ target, staging, staged, log }) => {
+        const app = NodeChildProcess.spawn("true");
+        await exited(app);
+        const script = spawnInstallScript({
+          pid: app.pid ?? 0,
+          target,
+          staged,
+          staging,
+          relaunch: false,
+          logFile: log,
+        });
+        expect(await exited(script)).toBe(1);
+        expect(buildOf(target)).toBe("old");
+        expect(NodeFS.existsSync(staging)).toBe(false);
+      });
+    },
+  );
 });
