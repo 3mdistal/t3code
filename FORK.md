@@ -385,6 +385,18 @@ are signed with a Developer ID.
   runs the install script against temporary folders: a normal swap, an app that doesn't quit, and a new app that
   can't move in.
 
+### Update notes show the newest patches (`fork:`)
+
+The update popover shows a release's last eight list items. Fork releases listed the install steps after the
+patches with a blank line between them, which GitHub renders as one loose list. Each item then came wrapped in a
+paragraph, which split it from its bullet and left a lone "-" between items, and the install steps took up the
+popover.
+
+- `.github/workflows/fork-release.yml`: the notes put the install steps first, under their own heading, then the
+  patches.
+- `apps/desktop/src/updates/releaseNotes.ts`: a list item's opening paragraph stays on its bullet.
+- Tests: `apps/desktop/src/updates/releaseNotes.fork.test.ts`.
+
 ### Fork CI, release and sync (`fork:`)
 
 - Only the fork's own workflows run here: `fork-ci.yml`, `fork-release.yml`, `fork-windows-tests.yml`,

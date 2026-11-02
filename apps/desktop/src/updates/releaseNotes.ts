@@ -58,7 +58,8 @@ function stripMarkup(input: string): string {
   return decodeHtmlEntities(
     input
       .replace(/<br\s*\/?>/gi, "\n")
-      .replace(/<li\b[^>]*>/gi, "\n- ")
+      // fork: a loose list wraps each item in <p>, which split it from its bullet (FORK.md).
+      .replace(/<li\b[^>]*>\s*(?:<p\b[^>]*>)?/gi, "\n- ")
       .replace(/<h([1-6])\b[^>]*>/gi, (_, level: string) => `\n${"#".repeat(Number(level))} `)
       .replace(/<\/(?:p|div|li|h[1-6]|ul|ol|blockquote)>/gi, "\n")
       .replace(/<[^>]*>/g, "")
