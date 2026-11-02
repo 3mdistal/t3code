@@ -413,13 +413,17 @@ every new build, and the sidebar's "restart and install" did nothing. On a bundl
 app now installs the update itself:
 
 1. It unpacks the zip electron-updater already downloaded and checked against `latest-mac.yml` into a hidden folder
-   beside the installed app, so the final move stays on one volume. The folder must hold one app, with the
-   installed app's bundle ID, the version that was downloaded, and a valid signature.
-2. It starts a detached script and quits. The script waits for the app to exit, moves the installed app into that
-   folder, moves the new one into its place, removes the folder, and reopens the app. If the new app can't move
-   in, it puts the old one back. If the app hasn't quit after two minutes, it leaves everything as it was. It logs
-   to `mac-update-install.log` in the app's log folder.
-3. If unpacking or a check fails, nothing quits, and upstream's recovery reports the failed install as before.
+   beside the installed app, so the swap stays on one volume. The folder must hold one app, with the installed
+   app's bundle ID, the version being installed, a valid signature, and no quarantine flag.
+2. It starts a detached script, waits until the script is running, and quits. The script waits for the app to
+   exit, swaps the two bundles, removes the folder with the old one in it, and reopens the app. The swap is one
+   step (`renamex_np` with `RENAME_SWAP`, which `osascript` reaches through JavaScript's ObjC bridge), so the
+   installed path is never empty, even if the script is killed or the Mac loses power. If that call fails, two
+   moves do the swap, with the signals that would stop the script between them ignored, and a new app that can't
+   move in puts the old one back. If the app hasn't quit after two minutes, it leaves everything as it was. It
+   logs to `mac-update-install.log` in the app's log folder.
+3. If anything fails before the quit, such as unpacking, a check, or reading the installed app's signature,
+   nothing quits, and upstream's recovery reports the failed install as before.
 
 A build with a Developer ID signature still goes through Squirrel.Mac, as do Windows and Linux. The app downloads
 the zip itself, so nothing quarantines the new build, and the `xattr` step is only for the first install from a
@@ -429,14 +433,14 @@ are signed with a Developer ID.
 - `apps/desktop/src/updates/MacAdHocUpdate.ts` (fork only): the signature check, the staging and its checks, and
   the install script.
 - `apps/desktop/src/electron/ElectronUpdater.ts`: `quitAndInstall` tries it before Squirrel.Mac, and takes the app's
-  log folder.
+  log folder and the version being installed.
 - `apps/desktop/src/updates/DesktopUpdates.ts`: keeps the downloaded zip once the update is offerable, and passes
-  the log folder.
+  the log folder and the downloaded version.
 - `.github/workflows/fork-mac-update-check.yml` and `scripts/fork/smoke-mac-update.ts`: on pull requests that touch
   the updater, a GitHub macOS runner packages one bundle as two versions, installs the older one in
   `/Applications`, and updates it to the newer one through the app's own update calls, from a local feed. The new
-  build must be in place, signed, and running, with no staging folder left. First the last release without this
-  patch tries the same update and must stay as it was.
+  build must be in place, signed, swapped in one step, and still running 15 seconds after it reopens, with no
+  staging folder left. First the last release without this patch tries the same update and must stay as it was.
 - Tests: `apps/desktop/src/updates/MacAdHocUpdate.fork.test.ts` covers the signature check and the bundle path, and
   runs the install script against temporary folders: a normal swap, an app that doesn't quit, and a new app that
   can't move in.

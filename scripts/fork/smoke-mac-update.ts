@@ -20,6 +20,8 @@ const STEP_TIMEOUT_MS = 180_000;
 const INSTALL_TIMEOUT_MS = 180_000;
 const CONTROL_WAIT_MS = 60_000;
 const POLL_MS = 1_000;
+// A build that opens and then crashes on startup must not pass.
+const REOPENED_WAIT_MS = 15_000;
 
 const { values } = NodeUtil.parseArgs({
   options: {
@@ -188,7 +190,7 @@ try {
     let version = installedVersion;
     let processes: string[] = [];
     for (let waited = 0; waited < INSTALL_TIMEOUT_MS; waited += POLL_MS) {
-      // Between the script's two moves there is no app in place to read.
+      // If the script falls back to two moves, there is no app in place between them.
       try {
         version = plistValue(appPath, "CFBundleShortVersionString");
       } catch {
@@ -202,6 +204,21 @@ try {
       throw new Error(`Applications still holds ${version}, not ${expectedVersion}.`);
     }
     if (processes.length === 0) throw new Error("The new build never reopened.");
+    step = "watching the reopened build keep running";
+    const reopened = processes.map((line) => line.trim().split(/\s+/)[0]);
+    await NodeTimersPromises.setTimeout(REOPENED_WAIT_MS);
+    const survivors = runningFrom(appPath).map((line) => line.trim().split(/\s+/)[0]);
+    if (!reopened.some((pid) => survivors.includes(pid))) {
+      throw new Error(`The reopened build quit within ${REOPENED_WAIT_MS / 1000} s.`);
+    }
+    const installLog = NodeFS.readFileSync(
+      NodePath.join(home, "t3", "userdata", "logs", "mac-update-install.log"),
+      "utf8",
+    );
+    // The one-step exchange is what keeps the installed path from ever being empty.
+    if (!installLog.includes("swapped the new app into place")) {
+      throw new Error("The install script fell back to two moves instead of swapping the bundles.");
+    }
     NodeChildProcess.execFileSync("/usr/bin/codesign", ["--verify", "--deep", "--strict", appPath]);
     const leftovers = NodeFS.readdirSync(NodePath.dirname(appPath)).filter((entry) =>
       entry.startsWith(`.${NodePath.basename(appPath)}.update-`),
