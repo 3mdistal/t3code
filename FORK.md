@@ -589,10 +589,13 @@ Users read about it in the Memory and CPU limits section of `docs/user/remote-ac
     console. A pull request watch keeps running, and a delegated child's task is held through its own thread.
   - On Windows, interrupting a Codex turn ends a foreground command's shell and leaves what the shell started running,
     with no parent left to find it by. T3's own Stop button does the same, and this fork leaves that alone. Stop now
-    reads the process table before it acts on a new turn (`ProcessTree.ts`, about half a second), then every 2 seconds
-    for 14 seconds ends anything under this server whose parent has died since (`orphanedProcesses`). A shell that
-    hasn't died isn't touched, so a thread Alice has started keeps its commands, and the servers a provider keeps stay
-    up. It also ends what any other process under T3 left behind in those seconds. Other platforms don't read.
+    reads the process table once before it acts on what's new (`ProcessTree.ts`, about half a second), then every 2
+    seconds for 14 seconds ends anything under a `codex.exe` under this server whose parent has died since
+    (`orphanedProcesses`, in its own loop so it can't hold up the switch). Who started what is judged inside one reading,
+    because a dead process's ID can be reused between two. It holds a handle on a process and checks its start time just
+    before ending it, so a reused ID can't be hit. A shell that hasn't died isn't touched, so the servers a provider keeps
+    stay up, and while Alice has a turn of her own running, whatever is newer than the pause is left alone, because all
+    of her turn's processes are. Other providers and T3's terminals aren't looked at. Other platforms don't read.
   - Claude reports an interrupted tool call as the user rejecting it, and agents read that as a no. So the notes say
     nobody refused anything, and that whatever was running has to be started again.
   - A child T3 interrupted to hold is still working: `delegatedTaskProgress` counts a held queued run as active when
@@ -645,8 +648,12 @@ Users read about it in the Memory and CPU limits section of `docs/user/remote-ac
   - Pause all holds what T3 runs. A steer into a turn that's still finishing joins that turn, and an agent CLI started
     outside T3 is only held at the hook, for its subagents.
   - An agent restarts its interrupted work by choice, from the note. T3 doesn't replay a tool call.
-  - Ending what an interrupted Codex command left running takes up to about 5 seconds, so quitting T3 sooner than that
-    can leave it behind. Whether a Codex command outlives an interrupt on macOS hasn't been checked.
+  - Ending what an interrupted Codex command left running took up to about 6 seconds in replay, which nothing enforces,
+    so quitting T3 sooner than that can leave it behind. Whether a Codex command outlives an interrupt on macOS hasn't
+    been checked.
+  - A command that starts in the half second between Stop now's reading and its interrupt isn't in the reading, so it
+    survives. So does one newer than the pause while Alice has a turn running, even if it isn't hers. A Codex shell that
+    ends by itself in those 14 seconds, in a thread Stop now isn't stopping, loses what it left running.
   - The interrupt and the note are separate dispatches, so a child that finalizes between them could give its parent
     a false "[interrupted]". A Codex turn waiting on Alice keeps its question and may keep a background command, since
     only an interrupt ends those.
