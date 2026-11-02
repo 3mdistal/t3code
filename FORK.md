@@ -41,6 +41,7 @@ Every path that downloads T3 Code reads this fork's releases, so no fork build i
   SSH installs.
 - `apps/web/src/components/desktopUpdate.logic.ts`: `DEFAULT_DESKTOP_RELEASE_REPOSITORY` drives the release notes
   and history links.
+- `apps/web/src/lib/bootError.ts`: `DOWNLOAD_URL`, the reinstall link on the screen T3 shows when it can't start.
 - `scripts/install.sh` and `scripts/install.ps1`: the one-line installers.
 - The desktop updater needs no patch. `scripts/build-desktop-artifact.ts` writes the update feed for the
   repository the release workflow runs in.
@@ -57,14 +58,19 @@ off. `t3 triage` prints why and exits 1. Upstream v0.1.4 also added Triage to th
 which start an agent on the same playbook through `apps/server/src/triage/`. The server doesn't advertise the
 `triage` capability, so the palettes leave it out. It also refuses `server.prepareTriage`, for a client that
 offers it anyway: the error's cause carries the reason, but clients show the error's own message, "Could not write
-the triage session files." The web app's boot error screen still suggests triage; see Known limitations.
+the triage session files." The screen T3 shows when it can't start used to suggest `npx t3 triage`, upstream's npm
+package, where triage is on, and to link to upstream's issue form. Neither is there now. The error details and
+their copy button stay, for reporting by hand.
 
 - `apps/server/src/triage/triageOff.ts`: `TRIAGE_ENABLED`, the reason, and the refusal.
 - `apps/server/src/cli/triage.ts`, `apps/server/src/ws.ts` and `apps/server/src/environment/ServerEnvironment.ts`
   read it.
-- Tests: `apps/server/src/triage/triageOff.fork.test.ts` and
-  `apps/server/src/environment/ServerEnvironment.fork.test.ts`. Upstream's `TriageService.test.ts` passes
-  unchanged, since only the request handler refuses.
+- `apps/web/src/lib/bootError.ts` and its styles in `apps/web/index.html`: the startup failure screen. Upstream's
+  tests of `resolveTriageCommand` went with it.
+- Tests: `apps/server/src/triage/triageOff.fork.test.ts`,
+  `apps/server/src/environment/ServerEnvironment.fork.test.ts` and
+  `apps/web/src/lib/bootError.fork.browser.test.ts`. Upstream's `TriageService.test.ts` passes unchanged, since
+  only the request handler refuses.
 
 ### `t3 thread start --option` (`fork:`)
 
@@ -618,10 +624,6 @@ could run; `node scripts/fork/ci-workflows.ts` fixes that. If `fork/main` gained
   restarted server may try that account again.
 - A pooled Claude account reads earlier turns with `t3_thread_read`, which Claude's read-only mode doesn't
   pre-approve.
-- When the web app can't start, its error screen (`apps/web/src/lib/bootError.ts`) still suggests running triage.
-  The desktop app names its own `t3`, which refuses, but elsewhere it falls back to `npx t3 triage`, upstream's npm
-  package, where triage is on. The same screen links to upstream's issue form and to t3.codes's download page,
-  which installs stock T3.
 - Upstream's fallback model checks the usage of the account a saved default names, not its pool. With a
   fallback model set, a new thread whose default is a pooled account goes to the fallback once that one
   account is out of usage, even while the pool's other accounts have room.
