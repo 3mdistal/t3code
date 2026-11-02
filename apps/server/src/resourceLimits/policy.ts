@@ -99,6 +99,30 @@ export const orphanedProcesses = (
   });
 };
 
+/**
+ * These processes and what's under them in one reading, them first. A process older than the one it names as parent
+ * isn't its child: its real parent died, and this one reused the ID.
+ */
+export const withDescendants = (
+  roots: ReadonlyArray<ProcessRow>,
+  table: ReadonlyArray<ProcessRow>,
+): ReadonlyArray<ProcessRow> => {
+  const found = new Map(roots.map((row) => [row.pid, row]));
+  // A Map's loop reaches what's added during it.
+  for (const parent of found.values()) {
+    for (const row of table) {
+      if (
+        row.parentPid === parent.pid &&
+        row.createdAt >= parent.createdAt &&
+        !found.has(row.pid)
+      ) {
+        found.set(row.pid, row);
+      }
+    }
+  }
+  return [...found.values()];
+};
+
 /** Linux keeps upstream's cap, so the fork's limits run on Windows and macOS only. */
 export const limitsSupported = (platform: NodeJS.Platform) =>
   platform === "win32" || platform === "darwin";
@@ -452,6 +476,20 @@ export const stoppedWorkNote = (at: number): ResumeNote => ({
   summary: "T3 stopped this thread's background work when all agents were stopped",
   text: `T3 stopped your background work at ${clock(at)} because all agents were stopped. They've been resumed now. Start again what you still need, then continue where you stopped.`,
 });
+
+/** Whether Stop now's note about a thread's background work is still in its queue, unread. */
+export const stoppedWorkNoteQueued = (
+  messages: ReadonlyArray<{ readonly id: string; readonly runId?: string | null | undefined }>,
+  runs: ReadonlyArray<{ readonly id: string; readonly status: string }>,
+) => {
+  const queued = new Set(runs.filter((run) => run.status === "queued").map((run) => run.id));
+  return messages.some(
+    (message) =>
+      message.id.startsWith("limits:stopped-work:") &&
+      message.runId != null &&
+      queued.has(message.runId),
+  );
+};
 
 /** The threads of a thread's delegated tasks. */
 export const delegatedThreadIds = (

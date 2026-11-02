@@ -590,10 +590,13 @@ Users read about it in the Memory and CPU limits section of `docs/user/remote-ac
     reads the process table once before it acts on what's new (`ProcessTree.ts`, about half a second), then every 2
     seconds for 14 seconds ends anything under a `codex.exe` under this server whose parent has died since
     (`orphanedProcesses`, in its own loop so it can't hold up the switch). Who started what is judged inside one reading,
-    because a dead process's ID can be reused between two. It holds a handle on a process and checks its start time just
-    before ending it, so a reused ID can't be hit. A shell that hasn't died isn't touched, so the servers a provider keeps
-    stay up, and while Alice has a turn of her own running, whatever is newer than the pause is left alone, because all
-    of her turn's processes are. Other providers and T3's terminals aren't looked at. Other platforms don't read.
+    because a dead process's ID can be reused between two, and a process older than the parent it names isn't that
+    parent's child (`withDescendants`). It ends each process on its own: it holds a handle, checks the start time and
+    kills through that handle, so a reused ID can't be hit. `taskkill /T` isn't safe here, because it follows parent IDs
+    with no check of start times, so it can reach a long-running process whose parent died and whose ID an orphan now
+    holds. A shell that hasn't died isn't touched, so the servers a provider keeps stay up, and while Alice has a turn of
+    her own running, whatever is newer than the pause is left alone, because the table can't say whose a new process is.
+    Other providers and T3's terminals aren't looked at. Other platforms don't read.
   - Claude reports an interrupted tool call as the user rejecting it, and agents read that as a no. So the notes say
     nobody refused anything, and that whatever was running has to be started again.
   - A child T3 interrupted to hold is still working: `delegatedTaskProgress` counts a held queued run as active when
@@ -650,8 +653,9 @@ Users read about it in the Memory and CPU limits section of `docs/user/remote-ac
     so quitting T3 sooner than that can leave it behind. Whether a Codex command outlives an interrupt on macOS hasn't
     been checked.
   - A command that starts in the half second between Stop now's reading and its interrupt isn't in the reading, so it
-    survives. So does one newer than the pause while Alice has a turn running, even if it isn't hers. A Codex shell that
-    ends by itself in those 14 seconds, in a thread Stop now isn't stopping, loses what it left running.
+    survives. So does what an orphan starts in the moment before it's ended, and a command newer than the pause while
+    Alice has a turn running, even if it isn't hers. A Codex shell that ends by itself in those 14 seconds, in a thread
+    Stop now isn't stopping (one waiting on her, or one she steered during the pause), loses what it left running.
   - The interrupt and the note are separate dispatches, so a child that finalizes between them could give its parent
     a false "[interrupted]". A Codex turn waiting on Alice keeps its question and may keep a background command, since
     only an interrupt ends those.
