@@ -697,9 +697,22 @@ Every push to `fork/main` runs **Fork release**. It:
    `latest-mac.yml`, `latest-linux.yml`), the blockmaps, the CLI archives, and `SHA256SUMS`.
 
 Nothing is published unless CI and the Linux and Windows builds pass. macOS can be missing: GitHub sometimes has no
-macOS arm64 runner free, and cancels a job that waits about 15 minutes for one. The release then publishes without
-macOS, says so in its notes and as a warning on the run, and the next release includes macOS again. Until then a
-Mac's update check finds no `latest-mac.yml`. Re-running the macOS job doesn't add it to a published release.
+macOS arm64 runner free, and cancels a job that waits about 15 minutes for one. On Nov 2 that happened to four
+releases in a row in the afternoon. The release then publishes without macOS, says so in its notes and as a warning
+on the run, and a Mac's update check finds no `latest-mac.yml`. Re-running the macOS job doesn't add it to a
+published release, but the workflow catches up on its own:
+
+- Every two hours (at :40) a scheduled run looks at `fork/main`'s newest commit. If that commit's release has no
+  `latest-mac.yml`, it builds the JS bundle and macOS only, then `add-mac` uploads the installers, the CLI archive,
+  the macOS line of `SHA256SUMS` and, last, `latest-mac.yml`, and swaps the release note's macOS line for the
+  install steps. Otherwise it stops after picking the version. A scheduled run never publishes a new release, so a
+  commit whose release failed isn't retried every two hours.
+- Scheduled runs queue in their own concurrency group, `fork-release-mac`. GitHub keeps one pending run per group
+  and cancels the older one, so a scheduled run can't drop a push's pending release.
+- To try sooner, run the workflow by hand (`gh workflow run fork-release.yml --ref fork/main`). On an already
+  released commit it does the same macOS catch-up, and on an unreleased one it publishes as a push would.
+- Only the newest commit's release is caught up. Once a newer release publishes, an older one without macOS stays
+  that way.
 
 If publishing fails partway, delete the half-made release with `gh release delete vX.Y.Z-alice.N --cleanup-tag --yes`
 and re-run the workflow.
