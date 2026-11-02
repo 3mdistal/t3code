@@ -599,17 +599,20 @@ Users read about it in the Memory and CPU limits section of `docs/user/remote-ac
     line.
   - While paused, every run start waits in its thread's queue: agents, delegated children, schedules, queued
     messages, usage-limit resumes and restart continuations. The off switch and "launch anyway" don't pass it. A
-    message Alice types after the pause began still starts, but what she queued before it waits. Resume and Send now
-    still start a thread by hand, and agents have no tool for those.
+    message Alice types after the pause began still starts: at once in an idle thread, with its older queue waiting
+    again afterwards, or, when a turn is still running, behind what's already queued there, which then goes first. A
+    thread she hasn't typed in keeps waiting. Resume and Send now still start a thread by hand, and agents have no tool
+    for those.
   - Resuming goes through the normal line: one thread at a time, board rank first, under the memory limits.
   - Set it from any thread by typing `pause all`, `stop all` or `resume all` as the whole message. Only a message
-    Alice types herself counts. The model never sees it: `pauseOrderMessage` sets the switch, and `dispatchMessage`
+    Alice types herself counts. The model never sees it, and it asks for no thread title: `pauseOrderMessage` sets the switch, and `dispatchMessage`
     queues the run with its notice, then cancels it at once, so the notice stays in the transcript and the message
     leaves it, as a cancelled queued message does. The words stop, on their own, would be too easy to mean for one
     thread, so the kill switch is `stop all`.
   - Other processes set it by writing `pause.json`, so a change is read every second (`followPause`). Stop now keeps
     interrupting for its first 30 seconds, to catch any turn that was just starting; a turn running after that got
-    there through Alice. `ResourceLimits` reads the file when it's built, before anything can dispatch, so a restart
+    there through Alice. Asking for Stop now again renews its time, so it sweeps again and also stops what she started
+    since. Asking to pause again keeps its time. `ResourceLimits` reads the file when it's built, before anything can dispatch, so a restart
     while paused starts nothing.
   - `followPause` also saves the waiting list to `state.json` when it changes, because a pass saves only every 15
     seconds and "Stop now, then shut down" would otherwise lose the threads it just held.
@@ -633,10 +636,13 @@ Users read about it in the Memory and CPU limits section of `docs/user/remote-ac
 - Known gaps:
   - Forks and merge-backs aren't held, during a pause either.
   - Each machine has its own switch. An order typed in a thread pauses the machine that thread runs on, and Linux,
-    which has no fork limits, treats the words as an ordinary message.
+    which has no fork limits, treats the words as an ordinary message, though one gets no generated title.
   - Pause all holds what T3 runs. A steer into a turn that's still finishing joins that turn, and an agent CLI started
     outside T3 is only held at the hook, for its subagents.
   - An agent restarts its interrupted work by choice, from the note. T3 doesn't replay a tool call.
+  - The interrupt and the note are separate dispatches, so a child that finalizes between them could give its parent
+    a false "[interrupted]". A Codex turn waiting on Alice keeps its question and may keep a background command, since
+    only an interrupt ends those.
   - A crash less than a second after a run is held can lose its place in the line. **Resume** still starts it. A
     refused launch whose session has already closed stays unmatched (`resource-limits.inbox-unmatched`), with no note.
   - Mobile has no Load balancing settings, so limits are edited from web or desktop. Mobile's Resume starts held
