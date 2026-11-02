@@ -783,6 +783,7 @@ export const make = Effect.gen(function* () {
             isSilent: true,
             isForceRunAfter: true,
             logDir: environment.logDir,
+            ...(downloadedVersion !== null ? { expectedVersion: downloadedVersion } : {}),
           });
           return { accepted: true, completed: false, failed: false };
         }).pipe(
