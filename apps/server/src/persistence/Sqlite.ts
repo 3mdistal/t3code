@@ -3,6 +3,7 @@ import * as Layer from "effect/Layer";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as SqlClient from "effect/sql/SqlClient";
+import * as HostProcess from "@t3tools/shared/HostProcess"; // fork: see FORK.md
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 
 import { runMigrations } from "./Migrations.ts";
@@ -48,6 +49,9 @@ export const layerFromPath = Effect.fn("makeSqlitePersistenceLive")(function* (d
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   yield* fs.makeDirectory(path.dirname(dbPath), { recursive: true });
+  const writerWorker =
+    (yield* HostProcess.isWindows) &&
+    (yield* HostProcess.Environment).T3CODE_SQLITE_WRITER_WORKER?.trim() !== "0";
 
   return Layer.provideMerge(
     layerSetup,
@@ -56,6 +60,8 @@ export const layerFromPath = Effect.fn("makeSqlitePersistenceLive")(function* (d
       readerWorker: true,
       // Run checkpoint fsyncs off the event loop so slow disk flushes cannot stall clients.
       checkpointWorker: true,
+      // fork: run writes off the event loop on Windows, see FORK.md.
+      writerWorker,
       spanAttributes: {
         "db.name": path.basename(dbPath),
         "service.name": "t3code-server",
