@@ -182,6 +182,25 @@ can write that file. Choose **Resume** in a thread's composer to start its work 
 To let one thread's agents launch work anyway, send `launch anyway` in that thread.
 It counts while it's your latest message there.
 
+To hold every agent on a machine yourself, send one of these as the whole message, in
+any thread on that machine. T3 acts on it without starting a turn, and leaves a notice
+in the thread.
+
+- `pause all`: running turns finish, then nothing else starts.
+- `stop all`: every running turn is interrupted at once and background commands end, so
+  the machine goes quiet and is safe to shut down. Turns waiting for your answer keep
+  their question. Pull request watches keep running.
+- `resume all`: held work starts again, one thread at a time. Each interrupted thread
+  gets a note saying what happened, runs again whatever it still needs, and continues
+  from where it stopped.
+
+While paused, work from agents, delegated tasks and scheduled tasks waits in its
+thread's queue, even after a restart, until you resume. A message you type afterwards
+still starts its own thread, and **Resume** still starts one thread by hand. What you
+queued before the pause waits with the rest. The pause has no time limit, and overrides
+`launch anyway` and the limits being switched off. Other tools can set it by writing
+`resource-limits/pause.json` under T3's state folder.
+
 When memory is critically low, T3 also stops the newest running turn every 30 seconds
 until memory recovers. It skips turns waiting for your answer. A stopped thread
 continues later from where it was interrupted.

@@ -11170,6 +11170,32 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               ),
             );
           }),
+          // fork: limits, see FORK.md. On Windows a background command outlives the CLI that started it.
+          stopBackgroundTasks: Effect.fn("ClaudeAdapterV2.stopBackgroundTasks")(function* ({
+            providerThread,
+            taskIds,
+          }) {
+            const liveQuery = yield* Ref.get(queryContext);
+            const nativeThreadId = providerThread.nativeThreadRef?.nativeId;
+            if (
+              liveQuery === null ||
+              liveQuery.stopping ||
+              nativeThreadId == null ||
+              liveQuery.nativeThreadId !== nativeThreadId
+            ) {
+              return;
+            }
+            const roster = rosterForNativeThread(
+              yield* Ref.get(pendingBackgroundTasksByNativeThread),
+              nativeThreadId,
+            );
+            yield* Effect.forEach(
+              taskIds.filter((taskId) => roster.has(taskId)),
+              (taskId) =>
+                liveQuery.query.stopTask(taskId).pipe(Effect.timeout("5 seconds"), Effect.ignore),
+              { concurrency: "unbounded", discard: true },
+            );
+          }),
           awaitBackgroundTasks: Effect.fn("ClaudeAdapterV2.awaitBackgroundTasks")(
             function* ({ providerThread, taskIds, awaited }) {
               const nativeThreadId = providerThread.nativeThreadRef?.nativeId;

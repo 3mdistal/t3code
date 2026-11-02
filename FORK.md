@@ -573,24 +573,77 @@ Users read about it in the Memory and CPU limits section of `docs/user/remote-ac
   - `LoadBalancingSettings.tsx` shows each machine's limits under its row, and hands a lone machine to
     `MachineLimitsSection`. `settingsSearch.ts` adds search terms.
   - `packages/client-runtime/src/load-balancing.ts`: Auto balance skips a machine over its limits.
+  - `ProviderAdapter.ts` and `ClaudeAdapterV2.ts`: the optional `stopBackgroundTasks`, for Stop now.
+  - `subagentProjection.ts`: `delegatedTaskProgress` counts a child held with a resume note as still working.
+- **Pause all** is a manual hold on top of the same path, for when Alice wants every agent on a machine quiet, with
+  memory to spare or not. It holds until she resumes, and has no expiry.
+  - Two modes: `finish` lets running turns end, then everything waits. `stop` also interrupts every running turn at
+    once, each with a resume note like the critical line's, ends the background work of threads whose turn is over,
+    with a note of their own, and closes idle sessions, so the machine is quiet and safe to shut down. Turns waiting
+    on Alice's answer keep their turn and question, and only their background work ends.
+  - On Windows a Claude background command outlives both an interrupt and closing its session, so Stop now ends
+    background commands first, through the adapter's `stopBackgroundTasks` (Claude's `query.stopTask`, for the IDs in
+    its roster). Codex has no such method, because interrupting its turn already ends its background terminals. Both
+    were checked for real on Windows. A pull request watch keeps running, and a delegated child's task is held
+    through its own thread.
+  - Claude reports an interrupted tool call as the user rejecting it, and agents read that as a no. So the notes say
+    nobody refused anything, and that whatever was running has to be started again.
+  - A child T3 interrupted to hold is still working: `delegatedTaskProgress` counts a held queued run as active when
+    its message ID is one of the governor's resume notes (`limits:stopped:`, `limits:stopped-work:`,
+    `limits:interrupted:`). Its parent gets no false "interrupted" result, and hears the real one when the resumed
+    run ends. Cancelling the note reports the interrupted turn. This covers the critical line's interrupts too.
+  - A restart cancels a queued wake from a provider session, since that session is gone. The governor's first pass
+    after a restart turns one that was being held into a note, so the thread still comes back, in its place in the
+    line.
+  - While paused, every run start waits in its thread's queue: agents, delegated children, schedules, queued
+    messages, usage-limit resumes and restart continuations. The off switch and "launch anyway" don't pass it. A
+    message Alice types after the pause began still starts, but what she queued before it waits. Resume and Send now
+    still start a thread by hand, and agents have no tool for those.
+  - Resuming goes through the normal line: one thread at a time, board rank first, under the memory limits.
+  - Set it from any thread by typing `pause all`, `stop all` or `resume all` as the whole message. Only a message
+    Alice types herself counts. The model never sees it: `pauseOrderMessage` sets the switch, and `dispatchMessage`
+    queues the run with its notice, then cancels it at once, so the notice stays in the transcript and the message
+    leaves it, as a cancelled queued message does. The words stop, on their own, would be too easy to mean for one
+    thread, so the kill switch is `stop all`.
+  - Other processes set it by writing `pause.json`, so a change is read every second (`followPause`). Stop now keeps
+    interrupting for its first 30 seconds, to catch any turn that was just starting; a turn running after that got
+    there through Alice. `ResourceLimits` reads the file when it's built, before anything can dispatch, so a restart
+    while paused starts nothing.
+  - `followPause` also saves the waiting list to `state.json` when it changes, because a pass saves only every 15
+    seconds and "Stop now, then shut down" would otherwise lose the threads it just held.
+  - A subagent launch the hook refused can reach the inbox after its turn ended, so the inbox is matched against
+    idle sessions as well as running ones.
 - teenylilconfig's memory gate and task wake share the governor's files under `<stateDir>/resource-limits/`:
   - `state.json`: state, readings, waiting threads, recent release times, and each running session's thread and
     "launch anyway". It's rewritten every pass, so a stale file means T3 isn't guarding.
   - `off.json`: `memgate off` writes `{ at, until }` in epoch ms. It switches the limits off for at most a day.
+  - `pause.json`: `{ version: 1, mode, at }`, where `mode` is `finish` or `stop`. T3, `memgate pause|stop|resume` and
+    task wake's board switch all write it, and removing it resumes. A malformed file counts as no pause. While it's
+    set, `state.json` reads `state: "paused"` (or `critical`), with `pause` set, `off` null and no session marked "launch
+    anyway", so the hook refuses native subagents.
   - `inbox/`: one record per subagent launch the hook refused. Its thread resumes with a note listing them.
   - `priority.json`: teenylilconfig's task wake writes `{ version: 1, at, ranks }` from the board every 10 minutes,
     each ranked task's thread ID with its rank (1 is the top). One more than a day old, more than a minute
     ahead, over 1 MiB, or malformed counts as no ranks (`priorityRanks`).
 - Stock compatibility: holds, notices and resume notes reuse `run.updated`, `turn-item.updated` and system
-  notifications. Stock T3 drops `resourceLimits` the next time it saves settings.
+  notifications. Pause all adds no event type, and stock T3 ignores `pause.json`, treating a typed order as an
+  ordinary message. Stock T3 drops `resourceLimits` the next time it saves settings.
 - Known gaps:
-  - Forks and merge-backs aren't held.
+  - Forks and merge-backs aren't held, during a pause either.
+  - Each machine has its own switch. An order typed in a thread pauses the machine that thread runs on, and Linux,
+    which has no fork limits, treats the words as an ordinary message.
+  - Pause all holds what T3 runs. A steer into a turn that's still finishing joins that turn, and an agent CLI started
+    outside T3 is only held at the hook, for its subagents.
+  - An agent restarts its interrupted work by choice, from the note. T3 doesn't replay a tool call.
+  - A crash less than a second after a run is held can lose its place in the line. **Resume** still starts it. A
+    refused launch whose session has already closed stays unmatched (`resource-limits.inbox-unmatched`), with no note.
   - Mobile has no Load balancing settings, so limits are edited from web or desktop. Mobile's Resume starts held
     work like web's.
   - Upstream refuses to snooze a thread with a queued message of its own. So held agent messages stay in the
     inbox, and only threads holding notifications alone (interrupted turns, refused launches) get snoozed.
 - Tests: `apps/server/src/resourceLimits/*.fork.test.ts`, `packages/shared/src/serverSettings.fork.test.ts`,
-  `packages/client-runtime/src/load-balancing.fork.test.ts`, and `MachineLimits.logic.fork.test.ts`.
+  `packages/client-runtime/src/load-balancing.fork.test.ts`,
+  `packages/provider-core/src/server/subagentProjection.fork.test.ts`, and `MachineLimits.logic.fork.test.ts`.
   `Governor.fork.test.ts` runs the real orchestrator with fake readings and a test clock.
 
 ## Versions
