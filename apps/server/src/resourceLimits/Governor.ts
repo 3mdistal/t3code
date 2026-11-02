@@ -46,7 +46,9 @@ import {
   newestInterruptible,
   nextState,
   offUntil,
+  orphanedProcesses,
   priorityRanks,
+  type ProcessRow,
   releaseDue,
   releaseOrder,
   type ResumeNote,
@@ -57,6 +59,7 @@ import {
   TIMING,
   writtenDuringPause,
 } from "./policy.ts";
+import { ProcessTree } from "./ProcessTree.ts";
 import {
   isOff,
   liveState,
@@ -85,6 +88,16 @@ interface Memory {
     { readonly nativeIds: ReadonlyArray<string> } & SessionInfo
   >;
 }
+
+/** The processes read before Stop now acted, kept until what it orphaned has been looked for. */
+interface NotedProcesses {
+  readonly rows: ReadonlyMap<number, ProcessRow>;
+  readonly noted: ReadonlySet<string>;
+  readonly checkAt: number;
+  readonly until: number;
+}
+
+const NOTHING_NOTED: NotedProcesses = { rows: new Map(), noted: new Set(), checkAt: 0, until: 0 };
 
 interface Inspected {
   readonly entry: WaitingThread;
@@ -122,6 +135,8 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
   const projections = yield* ProjectionStore.ProjectionStoreV2;
   const threads = yield* ThreadManagement.ThreadManagementService;
   const sessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
+  const processTree = yield* ProcessTree;
+  const notedProcesses = yield* Ref.make(NOTHING_NOTED);
   const environment = yield* Effect.serviceOption(ServerEnvironment.ServerEnvironment);
 
   // The memory gate's hook and CLI read and write these; see teenylilconfig docs/memgate.md.
@@ -233,8 +248,45 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
   });
 
   /**
+   * Interrupting a Codex turn on Windows ends the command's shell and leaves what the shell started running, with no
+   * parent left to find it by. So Stop now reads the processes before it acts on anything new, and `endOrphans` compares.
+   */
+  const noteProcesses = Effect.fn("ResourceLimitsGovernor.noteProcesses")(function* (
+    keys: ReadonlyArray<string>,
+    now: number,
+  ) {
+    if (platform !== "win32") return;
+    const { noted } = yield* Ref.get(notedProcesses);
+    if (keys.every((key) => noted.has(key))) return;
+    const rows = yield* processTree.read;
+    if (rows === null) yield* Effect.logWarning("resource-limits.process-reading-failed");
+    yield* Ref.update(notedProcesses, (current) => ({
+      rows: new Map([...current.rows, ...(rows ?? []).map((row) => [row.pid, row] as const)]),
+      noted: new Set([...current.noted, ...keys]),
+      checkAt: now + TIMING.orphanCheckMs,
+      until: now + TIMING.orphanWatchMs,
+    }));
+  });
+
+  /** Ends what Stop now's interrupts left running: anything under this server whose parent died since. */
+  const endOrphans = Effect.gen(function* () {
+    const noted = yield* Ref.get(notedProcesses);
+    const now = yield* Clock.currentTimeMillis;
+    if (noted.rows.size === 0 || now < noted.checkAt) return;
+    const after = yield* processTree.read;
+    const orphans =
+      after === null ? [] : orphanedProcesses([...noted.rows.values()], after, process.pid);
+    yield* Effect.forEach(orphans, processTree.end, { concurrency: 8, discard: true });
+    if (orphans.length > 0) yield* Effect.logWarning("resource-limits.ended-orphans", { orphans });
+    yield* Ref.set(
+      notedProcesses,
+      now >= noted.until ? NOTHING_NOTED : { ...noted, checkAt: now + TIMING.orphanCheckMs },
+    );
+  });
+
+  /**
    * Interrupting a turn or closing its session leaves a Claude background command running on Windows,
-   * so Stop now asks the provider to end them first. Codex ends its own when its turn is interrupted.
+   * so Stop now asks the provider to end them first. Codex ends its console ones when its turn is interrupted.
    */
   const endBackgroundTasks = Effect.fn("ResourceLimitsGovernor.endBackgroundTasks")(function* (
     threadId: ThreadId,
@@ -269,11 +321,18 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
     pause: ResourceLimitsPause,
     now: number,
   ) {
-    const turns = runningTurns(shells, now).filter(interruptible);
+    const turns = yield* Effect.filter(
+      runningTurns(shells, now).filter(interruptible),
+      ({ threadId }) => Effect.map(hersSincePause(threadId, pause), (hers) => !hers),
+      { concurrency: 8 },
+    );
+    yield* noteProcesses(
+      turns.map((turn) => turn.runId),
+      now,
+    );
     yield* Effect.forEach(
       turns,
       Effect.fnUntraced(function* ({ threadId, runId }) {
-        if (yield* hersSincePause(threadId, pause)) return;
         yield* endBackgroundTasks(threadId);
         const interrupted = yield* dispatch({
           type: "run.interrupt",
@@ -321,6 +380,7 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
         const delegated = delegatedThreadIds(subagents);
         if (stoppableWork(shell.pendingBackgroundTasks ?? [], delegated).length === 0) return;
         if (yield* hersSincePause(shell.id, pause)) return;
+        yield* noteProcesses([shell.id], now);
         yield* endBackgroundTasks(shell.id);
         const stopped = yield* dispatch({
           type: "thread.stop",
@@ -385,6 +445,7 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
     if (pause?.mode !== before?.mode || pause?.at !== before?.at) {
       yield* Effect.logInfo("resource-limits.pause-changed", { pause });
     }
+    yield* endOrphans;
     if (pause?.mode !== "stop") return;
     const now = yield* Clock.currentTimeMillis;
     if (now - pause.at < TIMING.stopSweepMs) {
