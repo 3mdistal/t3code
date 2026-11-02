@@ -95,8 +95,9 @@ export class ElectronUpdater extends Context.Service<
     readonly quitAndInstall: (options: {
       readonly isSilent: boolean;
       readonly isForceRunAfter: boolean;
-      /** fork: where an ad hoc-signed Mac build logs installing itself (FORK.md). */
+      /** fork: where an ad hoc-signed Mac build logs installing itself, and what it installs (FORK.md). */
       readonly logDir?: string;
+      readonly expectedVersion?: string;
     }) => Effect.Effect<void, ElectronUpdaterQuitAndInstallError>;
     readonly on: <Args extends ReadonlyArray<unknown>>(
       eventName: string,
@@ -176,6 +177,7 @@ export const make = ElectronUpdater.of({
     isSilent,
     isForceRunAfter,
     logDir,
+    expectedVersion,
   }) {
     return Effect.suspend(() => {
       const channel = autoUpdater.channel;
@@ -193,7 +195,10 @@ export const make = ElectronUpdater.of({
         isPackaged: Electron.app.isPackaged,
         executablePath: process.execPath,
         pid: process.pid,
-        logDir: logDir ?? Electron.app.getPath("logs"),
+        get logDir() {
+          return logDir ?? Electron.app.getPath("logs");
+        },
+        ...(expectedVersion !== undefined ? { expectedVersion } : {}),
         quit: () => Electron.app.quit(),
       }).pipe(
         Effect.mapError(toError),

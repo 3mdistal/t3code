@@ -102,6 +102,8 @@ describePosix("fork ad hoc Mac install script", () => {
       expect(app.exitCode).toBe(0);
       expect(buildOf(target)).toBe("new");
       expect(NodeFS.existsSync(staging)).toBe(false);
+      // macOS exchanges the bundles in one step; elsewhere the script falls back to two moves.
+      expect(NodeFS.readFileSync(log, "utf8")).toMatch(/(swapped|moved) the new app into place/);
     });
   });
 
