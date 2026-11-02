@@ -42,6 +42,10 @@ export const TIMING = {
   // Stop now keeps stopping turns this long, for any that were just starting when it was set. After that a turn
   // that's running got there through Alice, by her answer or her Resume.
   stopSweepMs: 30_000,
+  // A command's shell can take a moment to die after an interrupt, so what it left running is looked for this often,
+  // for this long.
+  orphanCheckMs: 2_000,
+  orphanWatchMs: 14_000,
 } as const;
 
 // CPU has no release line of its own; it releases this many points under the pause line.
@@ -51,6 +55,45 @@ const CPU_RELEASE_MARGIN = 10;
 export const SESSION_GIB = 2;
 
 const LAUNCH_ANYWAY_PHRASE = "launch anyway";
+
+/** One process in a reading of the machine's process table. */
+export interface ProcessRow {
+  readonly pid: number;
+  readonly parentPid: number;
+  readonly createdAt: number;
+}
+
+/**
+ * The processes under `rootPid` whose parent died between two readings, and which are still running. Windows keeps a
+ * dead parent's id and can give it to something new, so a "parent" newer than its child isn't one.
+ */
+export const orphanedProcesses = (
+  before: ReadonlyArray<ProcessRow>,
+  after: ReadonlyArray<ProcessRow>,
+  rootPid: number,
+): ReadonlyArray<number> => {
+  const then = new Map(before.map((row) => [row.pid, row]));
+  const now = new Map(after.map((row) => [row.pid, row]));
+  const alive = (row: ProcessRow) => now.get(row.pid)?.createdAt === row.createdAt;
+  const parentOf = (row: ProcessRow) => {
+    const parent = then.get(row.parentPid);
+    return parent !== undefined && parent.createdAt <= row.createdAt ? parent : undefined;
+  };
+  const underRoot = (row: ProcessRow) => {
+    const seen = new Set<number>();
+    for (let at = parentOf(row); at !== undefined && !seen.has(at.pid); at = parentOf(at)) {
+      if (at.pid === rootPid) return true;
+      seen.add(at.pid);
+    }
+    return false;
+  };
+  return before
+    .filter((row) => {
+      const parent = parentOf(row);
+      return parent !== undefined && alive(row) && !alive(parent) && underRoot(row);
+    })
+    .map((row) => row.pid);
+};
 
 /** Linux keeps upstream's cap, so the fork's limits run on Windows and macOS only. */
 export const limitsSupported = (platform: NodeJS.Platform) =>
