@@ -224,8 +224,14 @@ describe("isAlicesMessage", () => {
 
 describe("orphanedProcesses", () => {
   const ROOT = 1;
-  const row = (pid: number, parentPid: number, createdAt = pid) => ({ pid, parentPid, createdAt });
-  const provider = row(10, ROOT);
+  const row = (pid: number, parentPid: number, createdAt = pid, name = "a.exe") => ({
+    pid,
+    parentPid,
+    createdAt,
+    name,
+  });
+  const provider = row(10, ROOT, 10, "codex.exe");
+  const pids = (rows: ReadonlyArray<{ readonly pid: number }>) => rows.map((found) => found.pid);
   const keptServer = row(11, 10);
   const shell = row(12, 10);
   const command = row(13, 12);
@@ -234,7 +240,7 @@ describe("orphanedProcesses", () => {
   const without = (...pids: number[]) => before.filter((one) => !pids.includes(one.pid));
 
   it("finds what a dead shell left running, and not what's under it, which ends with it", () => {
-    expect(orphanedProcesses(before, without(12), ROOT)).toEqual([13]);
+    expect(pids(orphanedProcesses(before, without(12), ROOT))).toEqual([13]);
   });
 
   it("finds nothing when no parent died", () => {
@@ -259,12 +265,28 @@ describe("orphanedProcesses", () => {
 
   it("takes a parent whose id has been reused as dead", () => {
     const reused = before.map((one) => (one.pid === 12 ? { ...one, createdAt: 500 } : one));
-    expect(orphanedProcesses(before, reused, ROOT)).toEqual([13]);
+    expect(pids(orphanedProcesses(before, reused, ROOT))).toEqual([13]);
   });
 
   it("doesn't treat a newer process holding a dead parent's id as the parent", () => {
     const stale = [row(ROOT, 0), row(30, ROOT, 50), row(31, 30, 40)];
     expect(orphanedProcesses(stale, [row(ROOT, 0), row(31, 30, 40)], ROOT)).toEqual([]);
+  });
+
+  it("touches nothing that isn't under Codex", () => {
+    const terminal = [row(ROOT, 0, 0), row(20, ROOT), row(21, 20), row(22, 21)];
+    expect(
+      orphanedProcesses(terminal, [row(ROOT, 0, 0), row(20, ROOT), row(22, 21)], ROOT),
+    ).toEqual([]);
+  });
+
+  it("finds a command whose Codex died with it, in any case", () => {
+    const codex = [row(ROOT, 0, 0), row(10, ROOT, 10, "CODEX.EXE"), row(11, 10)];
+    expect(pids(orphanedProcesses(codex, [row(ROOT, 0, 0), row(11, 10)], ROOT))).toEqual([11]);
+  });
+
+  it("gives back what the process was, for the check before it's ended", () => {
+    expect(orphanedProcesses(before, without(12), ROOT)).toEqual([row(13, 12)]);
   });
 
   it("survives a loop in the readings", () => {
@@ -312,6 +334,16 @@ describe("launch anyway", () => {
       { id: "run:b", status: "cancelled" },
     ];
     expect(launchAnyway(latestUserMessage([hers, order], runs))).toBe(true);
+  });
+
+  it("counts a message whose run a restart cancelled after it started", () => {
+    const hers = message("a", 1, "run:a", "launch anyway");
+    const later = message("b", 2, "run:b", "something else");
+    const runs = [
+      { id: "run:a", status: "completed" },
+      { id: "run:b", status: "cancelled", startedAt: DateTime.makeUnsafe(3) },
+    ];
+    expect(launchAnyway(latestUserMessage([hers, later], runs))).toBe(false);
   });
 
   it("ignores a queued message, and an agent writing the phrase", () => {
