@@ -389,6 +389,21 @@ popover.
 - `apps/desktop/src/updates/releaseNotes.ts`: a list item's opening paragraph stays on its bullet.
 - Tests: `apps/desktop/src/updates/releaseNotes.fork.test.ts`.
 
+### Pinned threads drag in the boring sidebar (`fork:`)
+
+In the boring sidebar (Settings > Labs), upstream lets a row drag only out to the composer (#26724), because
+project folders draw their rows in a different order from the list that sorting reads. Pinned rows sit above the
+folders in list order, though, so they can reorder among themselves again, and still drag out to the composer. A
+pinned row drops only onto another pinned row, and the order saves through the same write the flat sidebar uses,
+so it holds after a reload and on other machines. Folder rows still only drag out to the composer, and a pinned row
+let go over a folder goes back to its place. The Pinned and Active labels that show during a drag stay hidden here:
+they'd sit over folder rows, which don't move apart to make room.
+
+- `apps/web/src/components/sidebar/boringPinDrag.ts`: `createBoringSidebarSortingStrategy` moves only pinned rows.
+- `apps/web/src/components/Sidebar.tsx`: a pinned row's drag isn't a composer-only drag (`isContextDrag`); uses
+  the strategy in the boring sidebar, keeps drops to pinned rows, and keeps the drag labels hidden there.
+- Tests: `apps/web/src/components/sidebar/boringPinDrag.fork.test.ts`.
+
 ### Fork CI, release and sync (`fork:`)
 
 - Only the fork's own workflows run here: `fork-ci.yml`, `fork-release.yml`, `fork-windows-tests.yml`,

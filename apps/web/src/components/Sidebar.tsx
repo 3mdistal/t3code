@@ -224,6 +224,7 @@ import {
   createSidebarSortingStrategy,
   restrictBelowSidebarLabel,
 } from "./Sidebar.drag";
+import { createBoringSidebarSortingStrategy } from "./sidebar/boringPinDrag"; // fork: see FORK.md.
 import { SidebarPointerSensor } from "./Sidebar.pointer";
 import { createSidebarListMotion } from "./Sidebar.motion";
 import { createSidebarShiftGuard } from "./Sidebar.shiftGuard";
@@ -1780,7 +1781,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
 
   // Folder rows only drag out to the composer; folders own their order, so nothing drops in the list.
   const isContextDrag =
-    projectFolders !== null ||
+    (projectFolders !== null && dragState?.activeSection !== "pinned") || // fork: see FORK.md.
     dragState?.contextDrag === true ||
     dragState?.activeSection === "working";
   const dragTargetSection = isContextDrag ? null : (dragState?.targetSection ?? null);
@@ -2101,17 +2102,20 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
           activeThreads,
           workingShelfEnabled,
         });
-  const sidebarSortingStrategy = createSidebarSortingStrategy({
-    items: sidebarListItems,
-    enabled: !isContextDrag,
-    boundaryLabelHeight: SIDEBAR_DRAG_LABEL_HEIGHT,
-    settledOrder: draggedSettledOrder,
-    ...(draggedActiveOrder === undefined ? {} : { activeOrder: draggedActiveOrder }),
-    settledExpanded: settledShelfExpanded,
-    settledVisibleCount,
-    routeThreadKey: routeRowThreadKey,
-    snoozedThreadCount: snoozedThreads.length,
-  });
+  const sidebarSortingStrategy =
+    projectFolders !== null && !isContextDrag // fork: see FORK.md.
+      ? createBoringSidebarSortingStrategy(sidebarListItems)
+      : createSidebarSortingStrategy({
+          items: sidebarListItems,
+          enabled: !isContextDrag,
+          boundaryLabelHeight: SIDEBAR_DRAG_LABEL_HEIGHT,
+          settledOrder: draggedSettledOrder,
+          ...(draggedActiveOrder === undefined ? {} : { activeOrder: draggedActiveOrder }),
+          settledExpanded: settledShelfExpanded,
+          settledVisibleCount,
+          routeThreadKey: routeRowThreadKey,
+          snoozedThreadCount: snoozedThreads.length,
+        });
   const draggedThreadKey = dragState?.activeKey;
   const draggedFromSection = dragState?.activeSection;
   const dragActivationY = dragState?.activationY;
@@ -2124,6 +2128,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
       (id) => {
         const target = resolveSidebarDropTarget(sidebarListItems, draggedThreadKey, id);
         if (target === null) return false;
+        if (projectFolders !== null && target.section !== "pinned") return false; // fork: see FORK.md.
         return (
           planSidebarThreadDrop({
             activeKey: draggedThreadKey,
@@ -2149,7 +2154,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     );
   })();
   const handleThreadDragEnd = (event: DragEndEvent) => {
-    if (projectFolders !== null) return;
+    // fork: a pinned row reorders in project folders; the check below keeps other drops out. See FORK.md.
     const activeKey = String(event.active.id);
     const activeSection = sectionByThreadKey.get(activeKey);
     const target =
@@ -2158,6 +2163,8 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
         : resolveSidebarDropTarget(sidebarListItems, activeKey, String(event.over.id));
     const activeThread = threadByKey.get(activeKey);
     if (activeSection === undefined || target === null || activeThread === undefined) return;
+    if (projectFolders !== null && (activeSection !== "pinned" || target.section !== "pinned"))
+      return; // fork: see FORK.md.
     const threadRef = scopeThreadRef(activeThread.environmentId, activeThread.id);
     const plan = planSidebarThreadDrop({
       activeKey,
@@ -3684,7 +3691,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                                 key="pinned-header"
                                 marker="pinned-header"
                                 label={gt("Pinned", { $context: "sidebar section" })}
-                                visible={from !== null}
+                                visible={from !== null && projectFolders === null} // fork: see FORK.md.
                                 isDropTarget={dragTargetSection === "pinned"}
                               />,
                             );
@@ -3695,7 +3702,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                                 key="pinned-divider"
                                 marker="pinned-divider"
                                 label={gt("Active", { $context: "sidebar section" })}
-                                visible={from !== null}
+                                visible={from !== null && projectFolders === null} // fork: see FORK.md.
                                 isDropTarget={dragTargetSection === "active"}
                               />,
                             );
