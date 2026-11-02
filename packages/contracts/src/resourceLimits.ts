@@ -32,6 +32,16 @@ export type ResourceLimitsSettings = typeof ResourceLimitsSettings.Type;
 export const ResourceLimitsState = Schema.Literals(["ok", "paused", "critical"]);
 export type ResourceLimitsState = typeof ResourceLimitsState.Type;
 
+/**
+ * The switch that holds every agent on a machine until Alice resumes. "finish" lets running turns end first;
+ * "stop" interrupts them at once. `at` is when the switch was set, in epoch ms.
+ */
+export const ResourceLimitsPause = Schema.Struct({
+  mode: Schema.Literals(["finish", "stop"]),
+  at: NonNegativeInt,
+});
+export type ResourceLimitsPause = typeof ResourceLimitsPause.Type;
+
 export const MemoryPressureLevel = Schema.Literals(["normal", "warn", "critical"]);
 export type MemoryPressureLevel = typeof MemoryPressureLevel.Type;
 
@@ -95,6 +105,8 @@ export const ResourceLimitsStatus = Schema.Struct({
   state: ResourceLimitsState,
   /** Epoch ms until which the limits are switched off, or null. */
   offUntil: Schema.NullOr(NonNegativeInt),
+  /** Set while Alice has paused every agent on this machine; `state` then reads "paused" or worse. */
+  pause: Schema.optionalKey(ResourceLimitsPause),
   waitingThreadCount: NonNegativeInt,
   sampledAt: Schema.NullOr(NonNegativeInt),
   availableBytes: Schema.NullOr(NonNegativeInt),

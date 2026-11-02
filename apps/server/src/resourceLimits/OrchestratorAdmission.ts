@@ -4,12 +4,19 @@ import type {
   OrchestrationV2Run,
   OrchestrationV2ThreadProjection,
 } from "@t3tools/contracts";
+import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import { ProjectionStoreV2 } from "../orchestration-v2/ProjectionStore.ts";
-import { isAlicesMessage, type Provenance } from "./policy.ts";
+import {
+  isAlicesMessage,
+  pauseOrder,
+  pauseOrderNotice,
+  type Provenance,
+  writtenDuringPause,
+} from "./policy.ts";
 import { ResourceLimits } from "./ResourceLimits.ts";
 
 type RunUpdated = Omit<Extract<OrchestrationV2DomainEvent, { readonly type: "run.updated" }>, "id">;
@@ -40,10 +47,25 @@ export const makeLimitsAdmission = Effect.gen(function* () {
   const idAllocator = yield* IdAllocator.IdAllocatorV2;
   const projectionStore = yield* ProjectionStoreV2;
 
-  const admit = (thread: Projection["thread"], message: Provenance) =>
+  const admit = (thread: Projection["thread"], message: Provenance, writtenAt?: number) =>
     resourceLimits
-      .admit({ thread, message })
+      .admit({ thread, message, ...(writtenAt === undefined ? {} : { writtenAt }) })
       .pipe(Effect.map((admission) => (admission.admitted ? undefined : admission.notice)));
+
+  /**
+   * Alice's "pause all", "stop all" or "resume all", typed as a whole message in any thread. It sets the switch
+   * and returns the notice for that thread; the caller starts nothing from it. Undefined for any other message,
+   * and where the machine has no limits, so there the words are an ordinary message.
+   */
+  const pauseOrderMessage = Effect.fn("LimitsAdmission.pauseOrderMessage")(function* (
+    message: Provenance & { readonly text: string; readonly attachments: ReadonlyArray<unknown> },
+  ) {
+    const order = pauseOrder(message);
+    if (order === null) return undefined;
+    const { supported, saved, wasPaused } = yield* resourceLimits.setPause(order);
+    if (!supported) return undefined;
+    return pauseOrderNotice(order, { saved, wasPaused, at: yield* Clock.currentTimeMillis });
+  });
 
   const noticeEvent = (
     run: OrchestrationV2Run,
@@ -126,13 +148,20 @@ export const makeLimitsAdmission = Effect.gen(function* () {
     const { projection, run } = input;
     const message = projection.messages.find((candidate) => candidate.id === run.userMessageId);
     if (input.admitted === true || message === undefined) return undefined;
-    const alicesQueue = projection.runs.some(
-      (candidate) =>
-        candidate.status === "queued" &&
-        isAlicesMessage(projection.messages.find((item) => item.id === candidate.userMessageId)),
-    );
+    const { pause } = yield* resourceLimits.read;
+    const alicesQueue = projection.runs.some((candidate) => {
+      if (candidate.status !== "queued") return false;
+      const queued = projection.messages.find((item) => item.id === candidate.userMessageId);
+      if (pause === null || queued === undefined) return isAlicesMessage(queued);
+      // While every agent is paused, only what she has typed since counts.
+      return writtenDuringPause(queued, DateTime.toEpochMillis(queued.createdAt), pause);
+    });
     if (alicesQueue) return undefined;
-    const notice = yield* admit(projection.thread, message);
+    const notice = yield* admit(
+      projection.thread,
+      message,
+      DateTime.toEpochMillis(message.createdAt),
+    );
     if (notice === undefined) return undefined;
     return yield* hold(run, { ...run, queueHeld: true }, notice, input.ordinal);
   });
@@ -147,7 +176,10 @@ export const makeLimitsAdmission = Effect.gen(function* () {
     const message = yield* projectionStore
       .getRunMessage(projection.thread.id, run.id)
       .pipe(Effect.orElseSucceed(() => undefined));
-    const notice = message === undefined ? undefined : yield* admit(projection.thread, message);
+    const notice =
+      message === undefined
+        ? undefined
+        : yield* admit(projection.thread, message, DateTime.toEpochMillis(message.createdAt));
     if (notice === undefined) return undefined;
     return yield* hold(
       run,
@@ -157,5 +189,5 @@ export const makeLimitsAdmission = Effect.gen(function* () {
     );
   });
 
-  return { newRunNotice, noticeEvent, holdQueuedRun, holdPreparedRun };
+  return { pauseOrderMessage, newRunNotice, noticeEvent, holdQueuedRun, holdPreparedRun };
 });

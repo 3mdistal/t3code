@@ -5790,6 +5790,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       command.dispatchMode,
       command.deliveryIntent,
     );
+    // fork: limits, see FORK.md. "pause all" and the like set the switch, and only leave a notice here.
+    const pauseOrderNotice = yield* limitsAdmission.pauseOrderMessage(command);
+    if (pauseOrderNotice !== undefined) dispatchMode = { type: "queue_after_active" };
     if (dispatchMode.type === "steer_active") {
       const targetRunId = dispatchMode.targetRunId;
       const target = projection.runs.find((run) => run.id === targetRunId);
@@ -6056,15 +6059,17 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       dispatchMode.type === "start_immediately" ||
       dispatchMode.type === "queue_after_active";
     // fork: limits, see FORK.md. With nothing to queue behind, a run the limits hold queues on its own.
-    const heldByLimits = yield* limitsAdmission.newRunNotice({
-      projection,
-      message: command,
-      mode: dispatchMode.type,
-      skip:
-        queueBehindRun !== undefined ||
-        pendingMergeBackTransfers.length > 0 ||
-        pendingForkTransferForThread(projection) !== undefined,
-    });
+    const heldByLimits =
+      pauseOrderNotice ??
+      (yield* limitsAdmission.newRunNotice({
+        projection,
+        message: command,
+        mode: dispatchMode.type,
+        skip:
+          queueBehindRun !== undefined ||
+          pendingMergeBackTransfers.length > 0 ||
+          pendingForkTransferForThread(projection) !== undefined,
+      }));
     const shouldQueue =
       (queueBehindRun !== undefined || heldByLimits !== undefined) && startsOrQueuesRun; // fork: limits, see FORK.md.
     // Client messages resume held queues; server continuations and scheduled tasks do not.
@@ -6075,7 +6080,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       (command.creationSource === "web" || command.creationSource === "mobile") &&
       command.scheduledTaskId === undefined;
     const heldRunsToRelease =
-      sentByUserFromClient && startsOrQueuesRun && !worktreeSetupUnresolved
+      sentByUserFromClient &&
+      startsOrQueuesRun &&
+      !worktreeSetupUnresolved &&
+      pauseOrderNotice === undefined // fork: limits, see FORK.md.
         ? projection.runs.filter((run) => run.status === "queued" && run.queueHeld === true)
         : [];
     const releasedAt = yield* DateTime.now;
@@ -6378,6 +6386,38 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       if (heldByLimits !== undefined) {
         const ordinal = yield* nextTurnItemOrdinal(projection);
         yield* emitEvent(limitsAdmission.noticeEvent(run, heldByLimits, ordinal, now));
+      }
+      // fork: limits, see FORK.md. An order ends here: its run is cancelled, as if unqueued, and its notice stays.
+      if (pauseOrderNotice !== undefined) {
+        const ended = { status: "cancelled", completedAt: now } as const;
+        yield* emitEvent({
+          type: "run.updated",
+          threadId: command.threadId,
+          runId,
+          nodeId: rootNodeId,
+          providerInstanceId: modelSelection.instanceId,
+          occurredAt: now,
+          payload: { ...run, ...ended, queueHeld: false, queuePosition: null },
+        });
+        yield* emitEvent({
+          type: "run-attempt.updated",
+          threadId: command.threadId,
+          runId,
+          nodeId: rootNodeId,
+          providerInstanceId: modelSelection.instanceId,
+          occurredAt: now,
+          payload: { ...attempt, ...ended },
+        });
+        yield* emitEvent({
+          type: "node.updated",
+          threadId: command.threadId,
+          runId,
+          nodeId: rootNodeId,
+          providerInstanceId: modelSelection.instanceId,
+          occurredAt: now,
+          payload: { ...rootNode, ...ended },
+        });
+        return;
       }
       if (goalStopRunId !== undefined) {
         return yield* stopRunForQueuedCommand({
