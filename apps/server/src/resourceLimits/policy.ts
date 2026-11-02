@@ -60,18 +60,22 @@ const LAUNCH_ANYWAY_PHRASE = "launch anyway";
 export interface ProcessRow {
   readonly pid: number;
   readonly parentPid: number;
+  /** Microseconds since 1970, which a JavaScript number holds exactly. */
   readonly createdAt: number;
+  readonly name: string;
 }
 
 /**
- * The processes under `rootPid` whose parent died between two readings, and which are still running. Windows keeps a
- * dead parent's id and can give it to something new, so a "parent" newer than its child isn't one.
+ * What Codex commands under `rootPid` left running: processes whose parent died since a reading, and which are still
+ * alive. Windows keeps a dead parent's id and can give it to something new, so a "parent" newer than its child isn't
+ * one, and who started what is only true within one reading. Other providers' commands die with their turn, so nothing
+ * else under T3 is touched.
  */
 export const orphanedProcesses = (
   before: ReadonlyArray<ProcessRow>,
   after: ReadonlyArray<ProcessRow>,
   rootPid: number,
-): ReadonlyArray<number> => {
+): ReadonlyArray<ProcessRow> => {
   const then = new Map(before.map((row) => [row.pid, row]));
   const now = new Map(after.map((row) => [row.pid, row]));
   const alive = (row: ProcessRow) => now.get(row.pid)?.createdAt === row.createdAt;
@@ -79,20 +83,20 @@ export const orphanedProcesses = (
     const parent = then.get(row.parentPid);
     return parent !== undefined && parent.createdAt <= row.createdAt ? parent : undefined;
   };
-  const underRoot = (row: ProcessRow) => {
+  const underCodex = (row: ProcessRow) => {
     const seen = new Set<number>();
+    let codex = false;
     for (let at = parentOf(row); at !== undefined && !seen.has(at.pid); at = parentOf(at)) {
-      if (at.pid === rootPid) return true;
+      if (at.pid === rootPid) return codex;
+      codex ||= at.name.toLowerCase() === "codex.exe";
       seen.add(at.pid);
     }
     return false;
   };
-  return before
-    .filter((row) => {
-      const parent = parentOf(row);
-      return parent !== undefined && alive(row) && !alive(parent) && underRoot(row);
-    })
-    .map((row) => row.pid);
+  return before.filter((row) => {
+    const parent = parentOf(row);
+    return parent !== undefined && alive(row) && !alive(parent) && underCodex(row);
+  });
 };
 
 /** Linux keeps upstream's cap, so the fork's limits run on Windows and macOS only. */
@@ -277,17 +281,24 @@ export function hasPhrase(text: string, phrase = LAUNCH_ANYWAY_PHRASE): boolean 
 
 /**
  * The newest message that started or joined a turn in a thread: role "user", in a run that isn't
- * still waiting in the queue or cancelled from it, as a typed order is. Anyone may have written it.
+ * still waiting in the queue or cancelled from it, as a typed order is. A run a restart cancelled
+ * had started, so its message counts. Anyone may have written it.
  */
 export function latestUserMessage<
   M extends Pick<OrchestrationV2ConversationMessage, "role" | "runId" | "createdAt">,
 >(
   messages: ReadonlyArray<M>,
-  runs: ReadonlyArray<{ readonly id: string; readonly status: string }>,
+  runs: ReadonlyArray<{
+    readonly id: string;
+    readonly status: string;
+    readonly startedAt?: DateTime.Utc | null;
+  }>,
 ): M | undefined {
   const notTurns = new Set(
     runs
-      .filter((run) => run.status === "queued" || run.status === "cancelled")
+      .filter(
+        (run) => run.status === "queued" || (run.status === "cancelled" && run.startedAt == null),
+      )
       .map((run) => run.id),
   );
   return messages
