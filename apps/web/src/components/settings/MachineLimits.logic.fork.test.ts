@@ -138,6 +138,16 @@ describe("usageLabel", () => {
 describe("limitsStateLabel", () => {
   const until = (epochMs: number) => `at ${epochMs}`;
 
+  it("puts all agents being paused first, whatever else is true", () => {
+    const paused = { state: "paused", offUntil: 5, waitingThreadCount: 2 } as const;
+    expect(limitsStateLabel({ ...paused, pause: { mode: "finish", at: 1 } }, until)).toBe(
+      "All agents paused · 2 threads waiting",
+    );
+    expect(limitsStateLabel({ ...paused, pause: { mode: "stop", at: 1 } }, until)).toBe(
+      "All agents stopped · 2 threads waiting",
+    );
+  });
+
   it("puts a switched-off machine first, whatever its readings say", () => {
     expect(limitsStateLabel({ state: "paused", offUntil: 5, waitingThreadCount: 0 }, until)).toBe(
       "Off until at 5",

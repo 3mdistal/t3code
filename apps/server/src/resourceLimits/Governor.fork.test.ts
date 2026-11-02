@@ -2,18 +2,22 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import {
   CommandId,
+  EventId,
   MessageId,
+  type OrchestrationV2ProviderThread,
   type OrchestrationV2Run,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
-  type ProviderSessionId,
+  ProviderSessionId,
+  ProviderThreadId,
   ScheduledTaskId,
   ThreadId,
 } from "@t3tools/contracts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Clock from "effect/Clock";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -83,8 +87,9 @@ const layerTest = ThreadManagementService.layer.pipe(
 );
 
 /** A governor whose idle-session closing is recorded, with the state admission saw at the time. */
-const makeGovernor = Effect.gen(function* () {
-  const sessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
+const makeGovernorWith = Effect.fnUntraced(function* (
+  sessions: ProviderSessionManager.ProviderSessionManagerV2["Service"],
+) {
   const limits = yield* ResourceLimits.ResourceLimits;
   const closings = yield* Ref.make<ReadonlyArray<string>>([]);
   const governor = yield* Governor.make().pipe(
@@ -101,6 +106,10 @@ const makeGovernor = Effect.gen(function* () {
   );
   return { ...governor, closings: Ref.get(closings) };
 });
+const makeGovernor = Effect.flatMap(
+  ProviderSessionManager.ProviderSessionManagerV2,
+  makeGovernorWith,
+);
 
 const reading = (headroom: number, available: number) =>
   Effect.map(Clock.currentTimeMillis, (sampledAt): HostReading => ({
@@ -610,7 +619,8 @@ it.effect("R5: critical interrupts the newest running turn every 30 s, and it re
       resume.notification?.summary,
       "T3 interrupted this turn to free memory on This machine",
     );
-    assert.include(resume.text, "Continue where you stopped.");
+    assert.include(resume.text, "that was T3 stopping it: nobody said no.");
+    assert.include(resume.text, "continue where you stopped.");
 
     yield* TestClock.adjust(TIMING.interruptSpacingMs - 1_000);
     yield* governor.pass(yield* critical);
@@ -627,4 +637,681 @@ it.effect("R5: critical interrupts the newest running turn every 30 s, and it re
     assert.deepEqual(yield* runs(newest), ["interrupted", "starting"]);
     assert.deepEqual(yield* runs(middle), ["interrupted", "queued:held"]);
   }).pipe(Effect.provide(layerTest)),
+);
+
+const pauseFile = Effect.gen(function* () {
+  const config = yield* ServerConfig.ServerConfig;
+  const path = yield* Path.Path;
+  return path.join(config.stateDir, "resource-limits", "pause.json");
+});
+
+/** Sets the switch the way teenylilconfig's memgate and task wake do: by writing its file. */
+const writePause = (mode: "finish" | "stop") =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const file = yield* pauseFile;
+    const at = yield* Clock.currentTimeMillis;
+    yield* fs.makeDirectory(path.dirname(file), { recursive: true });
+    yield* fs.writeFileString(file, JSON.stringify({ version: 1, mode, at }));
+  });
+
+const removePause = Effect.gen(function* () {
+  const fs = yield* FileSystem.FileSystem;
+  yield* fs.remove(yield* pauseFile);
+});
+
+const publishedState = Effect.gen(function* () {
+  const config = yield* ServerConfig.ServerConfig;
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const text = yield* fs.readFileString(
+    path.join(config.stateDir, "resource-limits", "state.json"),
+  );
+  return JSON.parse(text) as Record<string, unknown>;
+});
+
+it.effect("P1: a pause holds agent, schedule and queue work, with memory to spare", () =>
+  Effect.gen(function* () {
+    const governor = yield* makeGovernor;
+    const [theirs, scheduled, parent, child] = ["theirs", "scheduled", "parent", "child"].map(
+      (name) => ThreadId.make(`thread:p1:${name}`),
+    ) as [ThreadId, ThreadId, ThreadId, ThreadId];
+    yield* Effect.forEach([theirs, scheduled, parent, child], createThread);
+    yield* governor.pass(yield* comfortable);
+
+    yield* TestClock.adjust("1 second");
+    yield* writePause("finish");
+    yield* governor.followPause;
+
+    yield* send(theirs, "agent work", agent);
+    yield* send(scheduled, "daily check", {
+      ...alice,
+      scheduledTaskId: ScheduledTaskId.make("task:daily"),
+    });
+    // Her "launch anyway" lets a thread's work past the memory limits, but not past her own pause.
+    yield* send(parent, "launch anyway", alice);
+    yield* send(child, "launched work", { ...agent, senderThreadId: parent });
+
+    assert.deepEqual(yield* runs(theirs), ["queued:held"]);
+    assert.deepEqual(yield* runs(scheduled), ["queued:held"]);
+    assert.deepEqual(yield* runs(parent), ["starting"]);
+    assert.deepEqual(yield* runs(child), ["queued:held"]);
+    const [notice] = yield* notices(theirs);
+    assert.include(notice, "because all agents were paused");
+    assert.include(notice, "Choose Resume to start it now.");
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("P1: the pause outranks the off switch, and the state file says so", () =>
+  Effect.gen(function* () {
+    const config = yield* ServerConfig.ServerConfig;
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const governor = yield* makeGovernor;
+    const threadId = ThreadId.make("thread:p1:off");
+    yield* createThread(threadId);
+    const dir = path.join(config.stateDir, "resource-limits");
+    const now = yield* Clock.currentTimeMillis;
+    yield* fs.makeDirectory(dir, { recursive: true });
+    yield* fs.writeFileString(
+      path.join(dir, "off.json"),
+      JSON.stringify({ at: now, until: now + 3_600_000 }),
+    );
+
+    yield* governor.pass(yield* comfortable);
+    assert.equal((yield* publishedState).off, now + 3_600_000);
+
+    yield* writePause("finish");
+    yield* governor.pass(yield* comfortable);
+    yield* send(threadId, "agent work", agent);
+    assert.deepEqual(yield* runs(threadId), ["queued:held"]);
+
+    const state = yield* publishedState;
+    assert.equal(state.state, "paused");
+    assert.isNull(state.off);
+    assert.deepEqual(state.pause, { mode: "finish", at: now });
+
+    const limits = yield* ResourceLimits.ResourceLimits;
+    const status = yield* limits.status;
+    assert.equal(status?.state, "paused");
+    assert.deepEqual(status?.pause, { mode: "finish", at: now });
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("P1: a pause with no readings still holds, and a malformed file doesn't", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const governor = yield* makeGovernor;
+    const held = ThreadId.make("thread:p1:held");
+    const free = ThreadId.make("thread:p1:free");
+    yield* Effect.forEach([held, free], createThread);
+
+    yield* writePause("finish");
+    yield* governor.pass(null);
+    yield* send(held, "agent work", agent);
+    assert.deepEqual(yield* runs(held), ["queued:held"]);
+
+    yield* fs.writeFileString(yield* pauseFile, "{ not json");
+    yield* governor.followPause;
+    yield* TestClock.adjust("15 seconds");
+    yield* governor.pass(yield* comfortable);
+    assert.deepEqual(yield* runs(held), ["starting"]);
+    yield* send(free, "agent work", agent);
+    assert.deepEqual(yield* runs(free), ["starting"]);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("P2: Pause all lets a running turn finish, then its queue waits", () =>
+  Effect.gen(function* () {
+    const governor = yield* makeGovernor;
+    const threadId = ThreadId.make("thread:p2:finish");
+    yield* createThread(threadId);
+    yield* send(threadId, "first", alice);
+    yield* send(threadId, "agent follow-up", agent, "queue_after_active");
+
+    yield* TestClock.adjust("1 second");
+    yield* writePause("finish");
+    yield* governor.followPause;
+    yield* governor.pass(yield* comfortable);
+    assert.deepEqual(yield* runs(threadId), ["starting", "queued"]);
+
+    const held = yield* awaitRunUpdate(threadId, (run) => run.queueHeld === true);
+    yield* endRun(threadId);
+    yield* held;
+    assert.deepEqual(yield* runs(threadId), ["interrupted", "queued:held"]);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("P2: what Alice queued before the pause waits, and what she types during it starts", () =>
+  Effect.gen(function* () {
+    const governor = yield* makeGovernor;
+    const before = ThreadId.make("thread:p2:before");
+    const during = ThreadId.make("thread:p2:during");
+    const idle = ThreadId.make("thread:p2:idle");
+    yield* Effect.forEach([before, during, idle], createThread);
+    yield* send(before, "first", alice);
+    yield* send(before, "queued before the pause", alice, "queue_after_active");
+    yield* send(during, "first", alice);
+
+    yield* TestClock.adjust("1 second");
+    yield* writePause("finish");
+    yield* governor.followPause;
+    yield* TestClock.adjust("1 second");
+
+    const heldBefore = yield* awaitRunUpdate(before, (run) => run.queueHeld === true);
+    yield* endRun(before);
+    yield* heldBefore;
+    assert.deepEqual(yield* runs(before), ["interrupted", "queued:held"]);
+
+    yield* send(during, "typed during the pause", alice, "queue_after_active");
+    const startedDuring = yield* awaitRunUpdate(during, (run) => run.status === "starting");
+    yield* endRun(during);
+    yield* startedDuring;
+    assert.deepEqual(yield* runs(during), ["interrupted", "starting"]);
+
+    yield* send(idle, "typed in a quiet thread", alice);
+    assert.deepEqual(yield* runs(idle), ["starting"]);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("P3: Stop now interrupts every running turn at once, and each queues its resume", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const governor = yield* makeGovernor;
+    const threads = ["a", "b", "c"].map((name) => ThreadId.make(`thread:p3:${name}`));
+    yield* Effect.forEach(threads, createThread);
+    yield* Effect.forEach(threads, (threadId) => send(threadId, "work", agent));
+    yield* TestClock.adjust("1 second");
+
+    yield* writePause("stop");
+    yield* governor.followPause;
+    for (const threadId of threads) {
+      assert.deepEqual(yield* runs(threadId), ["interrupted", "queued:held"]);
+      const resume = (yield* orchestrator.getThreadProjection(threadId)).messages.at(-1)!;
+      assert.equal(
+        resume.notification?.summary,
+        "T3 interrupted this turn when all agents were stopped",
+      );
+      assert.include(resume.text, "continue where you stopped.");
+    }
+
+    // Nothing starts again while the switch is on, on any later pass.
+    yield* TestClock.adjust("15 seconds");
+    yield* governor.pass(yield* comfortable);
+    const states = Effect.forEach(threads, (threadId) =>
+      runs(threadId).pipe(Effect.map((all) => all.join())),
+    );
+    const allHeld = threads.map(() => "interrupted,queued:held");
+    assert.deepEqual(yield* states, allHeld);
+
+    // Resuming starts them one at a time, not all at once.
+    yield* removePause;
+    yield* TestClock.adjust(TIMING.releaseSpacingMs);
+    yield* governor.pass(yield* recovered);
+    const after = yield* states;
+    assert.equal(after.filter((state) => state === "interrupted,starting").length, 1);
+    assert.equal(after.filter((state) => state === "interrupted,queued:held").length, 2);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("P3: Stop now leaves a turn Alice starts afterwards alone", () =>
+  Effect.gen(function* () {
+    const governor = yield* makeGovernor;
+    const threadId = ThreadId.make("thread:p3:hers");
+    yield* createThread(threadId);
+    yield* writePause("stop");
+    yield* governor.followPause;
+    yield* TestClock.adjust("1 second");
+
+    yield* send(threadId, "typed after stopping", alice);
+    yield* TestClock.adjust("1 second");
+    yield* governor.followPause;
+    assert.deepEqual(yield* runs(threadId), ["starting"]);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect(
+  "P3: moving from Pause all to Stop now also stops what she started during the pause",
+  () =>
+    Effect.gen(function* () {
+      const governor = yield* makeGovernor;
+      const threadId = ThreadId.make("thread:p3:escalate");
+      yield* createThread(threadId);
+      yield* writePause("finish");
+      yield* governor.followPause;
+      yield* TestClock.adjust("1 second");
+      yield* send(threadId, "typed during the pause", alice);
+      assert.deepEqual(yield* runs(threadId), ["starting"]);
+
+      yield* TestClock.adjust("1 second");
+      yield* writePause("stop");
+      yield* governor.followPause;
+      assert.deepEqual(yield* runs(threadId), ["interrupted", "queued:held"]);
+    }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("P3: past its first moments, Stop now doesn't interrupt anything new", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const governor = yield* makeGovernor;
+    const threadId = ThreadId.make("thread:p3:late");
+    yield* createThread(threadId);
+    yield* writePause("stop");
+    yield* governor.followPause;
+    yield* send(threadId, "agent work", agent);
+    assert.deepEqual(yield* runs(threadId), ["queued:held"]);
+
+    // Her Resume on this one thread holds, because it comes after the sweep has ended.
+    yield* TestClock.adjust(TIMING.stopSweepMs);
+    yield* orchestrator.dispatch({
+      type: "queue.resume",
+      commandId: CommandId.make("resume-one"),
+      threadId,
+    });
+    yield* governor.followPause;
+    assert.deepEqual(yield* runs(threadId), ["starting"]);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("P4: a restart while paused reads the switch before anything can start", () =>
+  Effect.gen(function* () {
+    yield* writePause("stop");
+    const pause = yield* Effect.gen(function* () {
+      const limits = yield* ResourceLimits.ResourceLimits;
+      return (yield* limits.read).pause;
+    }).pipe(Effect.provide(Layer.fresh(layerLimits)));
+    assert.equal(pause?.mode, "stop");
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("P5: Alice's typed orders set the switch, start nothing, and leave a notice", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const limits = yield* ResourceLimits.ResourceLimits;
+    const governor = yield* makeGovernor;
+    const threadId = ThreadId.make("thread:p5:orders");
+    yield* createThread(threadId);
+    yield* governor.pass(yield* comfortable);
+
+    yield* send(threadId, "  Pause   ALL. ", alice);
+    assert.deepEqual(yield* runs(threadId), ["cancelled"]);
+    assert.equal((yield* limits.read).pause?.mode, "finish");
+    assert.equal(JSON.parse(yield* fs.readFileString(yield* pauseFile)).mode, "finish");
+    const paused = yield* notices(threadId);
+    assert.include(paused.at(-1), "All agents paused at");
+    assert.include(paused.at(-1), "resume all");
+
+    yield* TestClock.adjust("1 second");
+    yield* send(threadId, "stop all", alice);
+    assert.deepEqual(yield* runs(threadId), ["cancelled", "cancelled"]);
+    assert.equal((yield* limits.read).pause?.mode, "stop");
+    assert.include((yield* notices(threadId)).at(-1), "All agents stopped at");
+
+    yield* send(threadId, "resume all", alice);
+    assert.deepEqual(yield* runs(threadId), ["cancelled", "cancelled", "cancelled"]);
+    assert.isNull((yield* limits.read).pause);
+    assert.isFalse(yield* fs.exists(yield* pauseFile));
+    assert.include((yield* notices(threadId)).at(-1), "All agents resumed at");
+
+    yield* send(threadId, "RESUME ALL!", alice);
+    assert.equal((yield* notices(threadId)).at(-1), "Nothing was paused.");
+
+    const projection = yield* orchestrator.getThreadProjection(threadId);
+    assert.isTrue(projection.runs.every((run) => run.queuePosition === null));
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("P5: only Alice's whole message is an order", () =>
+  Effect.gen(function* () {
+    const limits = yield* ResourceLimits.ResourceLimits;
+    const governor = yield* makeGovernor;
+    const threads = ["agent", "relayed", "scheduled", "longer"].map((name) =>
+      ThreadId.make(`thread:p5:${name}`),
+    );
+    const [fromAgent, relayed, scheduled, longer] = threads as [
+      ThreadId,
+      ThreadId,
+      ThreadId,
+      ThreadId,
+    ];
+    yield* Effect.forEach(threads, createThread);
+    yield* governor.pass(yield* comfortable);
+
+    yield* send(fromAgent, "stop all", agent);
+    yield* send(relayed, "stop all", { ...alice, senderThreadId: fromAgent });
+    yield* send(scheduled, "pause all", {
+      ...alice,
+      scheduledTaskId: ScheduledTaskId.make("task:pause"),
+    });
+    yield* send(longer, "should we pause all of these?", alice);
+
+    assert.isNull((yield* limits.read).pause);
+    for (const threadId of threads) assert.deepEqual(yield* runs(threadId), ["starting"]);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("P5: an order in a busy thread doesn't touch its turn or release its queue", () =>
+  Effect.gen(function* () {
+    const limits = yield* ResourceLimits.ResourceLimits;
+    const governor = yield* makeGovernor;
+    const busy = ThreadId.make("thread:p5:busy");
+    const heldQueue = ThreadId.make("thread:p5:held-queue");
+    yield* Effect.forEach([busy, heldQueue], createThread);
+    yield* governor.pass(yield* comfortable);
+
+    yield* send(busy, "first", alice);
+    yield* send(busy, "pause all", alice, "queue_after_active");
+    assert.deepEqual(yield* runs(busy), ["starting", "cancelled"]);
+    assert.equal((yield* limits.read).pause?.mode, "finish");
+
+    yield* send(heldQueue, "agent work", agent);
+    assert.deepEqual(yield* runs(heldQueue), ["queued:held"]);
+    yield* send(heldQueue, "stop all", alice);
+    assert.deepEqual(yield* runs(heldQueue), ["queued:held", "cancelled"]);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+const sendProviderWake = (threadId: ThreadId, text: string) =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    yield* orchestrator.dispatch({
+      type: "message.dispatch",
+      commandId: CommandId.make(`wake:${threadId}:${text}`),
+      messageId: MessageId.make(`message:wake:${threadId}:${text}`),
+      threadId,
+      text,
+      notification: { source: { kind: "command" }, outcome: "updated", summary: text },
+      attachments: [],
+      dispatchMode: { type: "queue_after_active" },
+      createdBy: "agent",
+      creationSource: "provider",
+    });
+  });
+
+const cancelQueuedRun = (threadId: ThreadId) =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const queued = (yield* orchestrator.getThreadProjection(threadId)).runs.findLast(
+      (run) => run.status === "queued",
+    )!;
+    yield* orchestrator.dispatch({
+      type: "queued-run.cancel",
+      commandId: CommandId.make(`cancel:${queued.id}`),
+      threadId,
+      runId: queued.id,
+    });
+  });
+
+it.effect("P6: a wake the restart dropped comes back as a note, held like any other", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const governor = yield* makeGovernor;
+    const threadId = ThreadId.make("thread:p6:lost");
+    yield* createThread(threadId);
+    yield* writePause("finish");
+    yield* governor.followPause;
+    yield* sendProviderWake(threadId, "Background command finished");
+    yield* TestClock.adjust("15 seconds");
+    yield* governor.pass(yield* comfortable);
+    assert.deepEqual(yield* runs(threadId), ["queued:held"]);
+
+    // What T3's restart recovery does to it.
+    yield* cancelQueuedRun(threadId);
+    const restarted = yield* makeGovernor;
+    yield* restarted.pass(yield* comfortable);
+    assert.deepEqual(yield* runs(threadId), ["cancelled:held", "queued:held"]);
+    const note = (yield* orchestrator.getThreadProjection(threadId)).messages.at(-1)!;
+    assert.equal(note.notification?.summary, "T3 restarted while this thread was held");
+    assert.include(note.text, "Background command finished");
+
+    // It stays in the line, so resuming starts it.
+    yield* removePause;
+    yield* TestClock.adjust(TIMING.releaseSpacingMs);
+    yield* restarted.pass(yield* recovered);
+    assert.deepEqual(yield* runs(threadId), ["cancelled:held", "starting"]);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("P6: Alice cancelling a held wake herself doesn't bring it back", () =>
+  Effect.gen(function* () {
+    const governor = yield* makeGovernor;
+    const threadId = ThreadId.make("thread:p6:cancelled");
+    yield* createThread(threadId);
+    yield* writePause("finish");
+    yield* governor.followPause;
+    // The governor's first pass has already run by the time she can.
+    yield* TestClock.adjust("15 seconds");
+    yield* governor.pass(yield* comfortable);
+    yield* sendProviderWake(threadId, "Background command finished");
+    yield* TestClock.adjust("15 seconds");
+    yield* governor.pass(yield* comfortable);
+    yield* cancelQueuedRun(threadId);
+    yield* TestClock.adjust("15 seconds");
+    yield* governor.pass(yield* comfortable);
+    assert.deepEqual(yield* runs(threadId), ["cancelled:held"]);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("P6: a held message that isn't a provider wake isn't brought back after a restart", () =>
+  Effect.gen(function* () {
+    const governor = yield* makeGovernor;
+    const threadId = ThreadId.make("thread:p6:agent");
+    yield* createThread(threadId);
+    yield* writePause("finish");
+    yield* governor.followPause;
+    yield* send(threadId, "work", agent);
+    yield* TestClock.adjust("15 seconds");
+    yield* governor.pass(yield* comfortable);
+    yield* cancelQueuedRun(threadId);
+    const restarted = yield* makeGovernor;
+    yield* restarted.pass(yield* comfortable);
+    assert.deepEqual(yield* runs(threadId), ["cancelled:held"]);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+/** A provider thread on a session that records which background tasks it was asked to end. */
+const withBackgroundTasks = (
+  threadId: ThreadId,
+  tasks: ReadonlyArray<{ readonly taskId: string; readonly kind: "command" | "monitor" }>,
+) =>
+  Effect.gen(function* () {
+    const sink = yield* EventSink.EventSinkV2;
+    const now = yield* DateTime.now;
+    const driver = ProviderDriverKind.make("codex");
+    const providerThread: OrchestrationV2ProviderThread = {
+      id: ProviderThreadId.make(`provider-thread:${threadId}`),
+      driver,
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      providerSessionId: ProviderSessionId.make(`provider-session:${threadId}`),
+      appThreadId: threadId,
+      ownerNodeId: null,
+      nativeThreadRef: { driver, nativeId: `native:${threadId}`, strength: "strong" },
+      nativeConversationHeadRef: null,
+      status: "idle",
+      firstRunOrdinal: 1,
+      lastRunOrdinal: 1,
+      handoffIds: [],
+      forkedFrom: null,
+      pendingBackgroundTasks: tasks,
+      contextUsage: null,
+      nativeMetadata: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    yield* sink.write({
+      events: [
+        {
+          id: EventId.make(`background:${threadId}`),
+          type: "provider-thread.updated",
+          threadId,
+          occurredAt: now,
+          payload: providerThread,
+        },
+      ],
+    });
+  });
+
+const recordingStops = Effect.gen(function* () {
+  const sessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
+  const asked = yield* Ref.make<ReadonlyArray<string>>([]);
+  const session = {
+    stopBackgroundTasks: (input: { readonly taskIds: ReadonlyArray<string> }) =>
+      Ref.update(asked, (all) => [...all, ...input.taskIds]),
+  } as unknown as ProviderAdapter.ProviderAdapterV2SessionRuntime;
+  return {
+    asked: Ref.get(asked),
+    sessions: { ...sessions, get: () => Effect.succeedSome(session) },
+  };
+});
+
+it.effect("P7: Stop now ends a running turn's background tasks through its provider", () =>
+  Effect.gen(function* () {
+    const stops = yield* recordingStops;
+    const governor = yield* makeGovernorWith(stops.sessions);
+    const threadId = ThreadId.make("thread:p7:running");
+    yield* createThread(threadId);
+    yield* send(threadId, "work", agent);
+    yield* withBackgroundTasks(threadId, [
+      { taskId: "build", kind: "command" },
+      { taskId: "pull-request-watch:7", kind: "monitor" },
+    ]);
+    yield* TestClock.adjust("1 second");
+
+    yield* writePause("stop");
+    yield* governor.followPause;
+    assert.deepEqual(yield* stops.asked, ["build"]);
+    assert.deepEqual(yield* runs(threadId), ["interrupted", "queued:held"]);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("P7: Stop now ends an idle thread's background tasks, and its note says so", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const stops = yield* recordingStops;
+    const governor = yield* makeGovernorWith(stops.sessions);
+    const threadId = ThreadId.make("thread:p7:idle");
+    yield* createThread(threadId);
+    yield* send(threadId, "work", agent);
+    const { runs: started } = yield* orchestrator.getThreadProjection(threadId);
+    yield* orchestrator.dispatch({
+      type: "run.interrupt",
+      commandId: CommandId.make("settle:p7:idle"),
+      threadId,
+      runId: started[0]!.id,
+    });
+    yield* withBackgroundTasks(threadId, [{ taskId: "build", kind: "command" }]);
+    yield* TestClock.adjust("1 second");
+
+    yield* writePause("stop");
+    yield* governor.followPause;
+    assert.deepEqual(yield* stops.asked, ["build"]);
+    const note = (yield* orchestrator.getThreadProjection(threadId)).messages.at(-1);
+    assert.equal(
+      note?.notification?.summary,
+      "T3 stopped this thread's background work when all agents were stopped",
+    );
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("P7: Pause all leaves background tasks running", () =>
+  Effect.gen(function* () {
+    const stops = yield* recordingStops;
+    const governor = yield* makeGovernorWith(stops.sessions);
+    const threadId = ThreadId.make("thread:p7:finish");
+    yield* createThread(threadId);
+    yield* send(threadId, "work", agent);
+    yield* withBackgroundTasks(threadId, [{ taskId: "build", kind: "command" }]);
+    yield* TestClock.adjust("1 second");
+
+    yield* writePause("finish");
+    yield* governor.followPause;
+    assert.deepEqual(yield* stops.asked, []);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("P7: an interrupted turn's note tells it the rejection wasn't a no", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const governor = yield* makeGovernor;
+    const threadId = ThreadId.make("thread:p7:note");
+    yield* createThread(threadId);
+    yield* send(threadId, "work", agent);
+    yield* TestClock.adjust("1 second");
+
+    yield* writePause("stop");
+    yield* governor.followPause;
+    const note = (yield* orchestrator.getThreadProjection(threadId)).messages.at(-1);
+    assert.include(note?.text, "that was T3 stopping it: nobody said no.");
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("P8: a thread Stop now holds keeps its place through a restart right after", () =>
+  Effect.gen(function* () {
+    const limits = yield* ResourceLimits.ResourceLimits;
+    const governor = yield* makeGovernor;
+    const threadId = ThreadId.make("thread:p8:shutdown");
+    yield* createThread(threadId);
+    yield* send(threadId, "work", agent);
+    yield* governor.pass(yield* comfortable);
+    yield* TestClock.adjust("1 second");
+
+    yield* writePause("stop");
+    yield* governor.followPause;
+    assert.deepEqual(yield* runs(threadId), ["interrupted", "queued:held"]);
+    // No pass has run since, and the next second's check saves the list.
+    yield* governor.followPause;
+
+    yield* limits.update((snapshot) => ({ ...snapshot, waiting: [] }));
+    const restarted = yield* makeGovernor;
+    yield* restarted.restore;
+    assert.deepEqual(
+      (yield* limits.read).waiting.map((entry) => entry.threadId),
+      [threadId],
+    );
+
+    yield* removePause;
+    yield* TestClock.adjust(TIMING.releaseSpacingMs);
+    yield* restarted.pass(yield* recovered);
+    assert.deepEqual(yield* runs(threadId), ["interrupted", "starting"]);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect(
+  "P9: a launch refused during the pause comes back on resume, even after its turn ended",
+  () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const config = yield* ServerConfig.ServerConfig;
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const governor = yield* makeGovernor;
+      const threadId = ThreadId.make("thread:p9:refused");
+      yield* createThread(threadId);
+      yield* send(threadId, "work", agent);
+      const { runs: started } = yield* orchestrator.getThreadProjection(threadId);
+      yield* orchestrator.dispatch({
+        type: "run.interrupt",
+        commandId: CommandId.make("settle:p9"),
+        threadId,
+        runId: started[0]!.id,
+      });
+      yield* withBackgroundTasks(threadId, [{ taskId: "watch", kind: "monitor" }]);
+      yield* writePause("finish");
+      yield* governor.followPause;
+
+      const inbox = path.join(config.stateDir, "resource-limits", "inbox");
+      yield* fs.makeDirectory(inbox, { recursive: true });
+      yield* fs.writeFileString(
+        path.join(inbox, "refused.json"),
+        JSON.stringify({ sessionId: `native:${threadId}`, about: "a reviewer", tool: "Agent" }),
+      );
+      yield* TestClock.adjust("15 seconds");
+      yield* governor.pass(yield* comfortable);
+
+      const note = (yield* orchestrator.getThreadProjection(threadId)).messages.at(-1);
+      assert.include(note?.text, "a reviewer");
+      assert.deepEqual(yield* runs(threadId), ["interrupted", "queued:held"]);
+    }).pipe(Effect.provide(layerTest)),
 );
