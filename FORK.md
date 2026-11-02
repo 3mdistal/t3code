@@ -494,6 +494,20 @@ popover.
 - `apps/desktop/src/updates/releaseNotes.ts`: a list item's opening paragraph stays on its bullet.
 - Tests: `apps/desktop/src/updates/releaseNotes.fork.test.ts`.
 
+### Pinned threads drag in the boring sidebar (`fork:`)
+
+Upstream turns off every drag in the boring sidebar (Settings > Labs), because project folders draw their rows in a
+different order from the list that sorting reads. Pinned rows sit above the folders in list order, though, so they
+can drag among themselves again. A pinned row drops only onto another pinned row, and the order saves through the
+same write the flat sidebar uses, so it holds after a reload and on other machines. Folder rows still can't drag,
+and a pinned row let go over a folder goes back to its place. The Pinned and Active labels that show during a drag
+stay hidden here: they'd sit over folder rows, which don't move apart to make room.
+
+- `apps/web/src/components/sidebar/boringPinDrag.ts`: `createBoringSidebarSortingStrategy` moves only pinned rows.
+- `apps/web/src/components/Sidebar.tsx`: uses it in the boring sidebar, keeps drops to pinned rows, and keeps
+  the drag labels hidden there.
+- Tests: `apps/web/src/components/sidebar/boringPinDrag.fork.test.ts`.
+
 ### Fork CI, release and sync (`fork:`)
 
 - Only the fork's own workflows run here: `fork-ci.yml`, `fork-release.yml`, `fork-windows-tests.yml`,
