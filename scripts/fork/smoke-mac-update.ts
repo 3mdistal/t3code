@@ -68,6 +68,27 @@ const runningFrom = (bundle: string) =>
     .split("\n")
     .filter((line) => line.includes(`${bundle}/Contents/MacOS/`));
 
+/**
+ * Each ad hoc build has its own signature, and the keychain trusts only the build that made the
+ * app's Safe Storage key, so another build waits on an access dialog nobody answers here.
+ */
+function forgetSafeStorageKeys(): void {
+  const keychain = NodeChildProcess.execFileSync("/usr/bin/security", ["dump-keychain"], {
+    timeout: 30_000,
+  }).toString();
+  const services = new Set(
+    [...keychain.matchAll(/"svce"<blob>="(T3 Code[^"]* Safe Storage)"/g)].map((match) => match[1]!),
+  );
+  for (const service of services) {
+    const deleted = NodeChildProcess.spawnSync(
+      "/usr/bin/security",
+      ["delete-generic-password", "-s", service],
+      { timeout: 10_000 },
+    );
+    console.log(`Keychain item "${service}": ${deleted.status === 0 ? "deleted" : "not deleted"}`);
+  }
+}
+
 function serveFeed(dir: string): Promise<{ server: NodeHttp.Server; port: number }> {
   const server = NodeHttp.createServer((request, response) => {
     const name = decodeURIComponent(new URL(request.url ?? "/", "http://localhost").pathname);
@@ -132,6 +153,7 @@ let step = "launching the installed app";
 let app: ElectronApplication | undefined;
 try {
   console.log(`Installed ${installedVersion}; offering ${expectedVersion} on port ${port}.`);
+  forgetSafeStorageKeys();
   app = await _electron.launch({
     executablePath: executable,
     env: {
@@ -240,10 +262,12 @@ try {
     await Promise.race([closed, NodeTimersPromises.setTimeout(10_000, undefined, { ref: false })]);
     child.kill("SIGKILL");
   }
-  // The reopened build is not Playwright's to close.
-  for (const line of runningFrom(appPath)) {
-    const pid = Number(line.trim().split(/\s+/)[0]);
-    if (Number.isInteger(pid)) NodeChildProcess.spawnSync("/bin/kill", [String(pid)]);
+  // The reopened build is not Playwright's to close, and one held by a dialog ignores SIGTERM.
+  for (const signal of ["-TERM", "-KILL"]) {
+    const pids = runningFrom(appPath).map((line) => line.trim().split(/\s+/)[0]!);
+    if (pids.length === 0) break;
+    NodeChildProcess.spawnSync("/bin/kill", [signal, ...pids]);
+    await NodeTimersPromises.setTimeout(5_000, undefined, { ref: false });
   }
   server.close();
   NodeFS.mkdirSync(artifactsDir, { recursive: true });
