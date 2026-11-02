@@ -190,12 +190,8 @@ try {
     let version = installedVersion;
     let processes: string[] = [];
     for (let waited = 0; waited < INSTALL_TIMEOUT_MS; waited += POLL_MS) {
-      // If the script falls back to two moves, there is no app in place between them.
-      try {
-        version = plistValue(appPath, "CFBundleShortVersionString");
-      } catch {
-        version = "";
-      }
+      // The swap is one step, so a missing app here is a failure, not a moment between moves.
+      version = plistValue(appPath, "CFBundleShortVersionString");
       processes = runningFrom(appPath);
       if (version === expectedVersion && processes.length > 0) break;
       await NodeTimersPromises.setTimeout(POLL_MS);
@@ -215,9 +211,8 @@ try {
       NodePath.join(home, "t3", "userdata", "logs", "mac-update-install.log"),
       "utf8",
     );
-    // The one-step exchange is what keeps the installed path from ever being empty.
     if (!installLog.includes("swapped the new app into place")) {
-      throw new Error("The install script fell back to two moves instead of swapping the bundles.");
+      throw new Error("The install log doesn't say the bundles were swapped.");
     }
     NodeChildProcess.execFileSync("/usr/bin/codesign", ["--verify", "--deep", "--strict", appPath]);
     const leftovers = NodeFS.readdirSync(NodePath.dirname(appPath)).filter((entry) =>
