@@ -441,6 +441,8 @@ are signed with a Developer ID.
   `/Applications`, and updates it to the newer one through the app's own update calls, from a local feed. The new
   build must be in place, signed, swapped in one step, and still running 15 seconds after it reopens, with no
   staging folder left. First the last release without this patch tries the same update and must stay as it was.
+  Each launch first deletes the app's `t3code Safe Storage` keychain key, since a key another build made would hold
+  the app on a keychain prompt nobody answers there.
 - Tests: `apps/desktop/src/updates/MacAdHocUpdate.fork.test.ts` covers the signature check and the bundle path, and
   runs the install script against temporary folders, with a stand-in for macOS's swap: a normal swap, an app that
   doesn't quit, and a refused swap. Off macOS it also runs the script's own swap, which must move nothing.
@@ -637,7 +639,9 @@ never downloads or installs an update on its own. Headless servers update with `
   `APPLE_API_KEY`, `APPLE_API_KEY_ID` and `APPLE_API_ISSUER`. Without them, they're signed ad hoc: after the first
   install from a `.dmg`, clear the quarantine flag once with
   `xattr -dr com.apple.quarantine "/Applications/T3 Code (Beta).app"`. Squirrel.Mac refuses ad hoc-signed updates,
-  so those builds install their own (see "Ad hoc-signed Macs install their own updates").
+  so those builds install their own (see "Ad hoc-signed Macs install their own updates"). The keychain also trusts
+  only the build that made the app's `t3code Safe Storage` key, so each new ad hoc build asks once for keychain
+  access when it first opens, whether it was installed by hand or updated itself.
 
 ## Syncing with upstream
 

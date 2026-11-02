@@ -77,7 +77,7 @@ function forgetSafeStorageKeys(): void {
     timeout: 30_000,
   }).toString();
   const services = new Set(
-    [...keychain.matchAll(/"svce"<blob>="(T3 Code[^"]* Safe Storage)"/g)].map((match) => match[1]!),
+    [...keychain.matchAll(/"svce"<blob>="(t3code[^"]* Safe Storage)"/gi)].map((match) => match[1]!),
   );
   for (const service of services) {
     const deleted = NodeChildProcess.spawnSync(
@@ -151,6 +151,8 @@ const home = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-mac-update-")
 const { server, port } = await serveFeed(NodePath.resolve(feedDir));
 let step = "launching the installed app";
 let app: ElectronApplication | undefined;
+// Playwright drops the process handle once the app exits, and this app quits to install.
+let appProcess: NodeChildProcess.ChildProcess | undefined;
 try {
   console.log(`Installed ${installedVersion}; offering ${expectedVersion} on port ${port}.`);
   forgetSafeStorageKeys();
@@ -165,7 +167,8 @@ try {
     },
     timeout: STEP_TIMEOUT_MS,
   });
-  const exited = new Promise<void>((resolve) => app!.process().once("exit", () => resolve()));
+  appProcess = app.process();
+  const exited = new Promise<void>((resolve) => appProcess!.once("exit", () => resolve()));
   step = "waiting for the first window";
   const page = await app.firstWindow({ timeout: STEP_TIMEOUT_MS });
   await page.waitForFunction(() => "desktopBridge" in globalThis, undefined, {
@@ -256,11 +259,9 @@ try {
   process.exitCode = 1;
 } finally {
   if (app) {
-    // Playwright drops the process handle once the app closes, so read it first.
-    const child = app.process();
     const closed = app.close().catch(() => {});
     await Promise.race([closed, NodeTimersPromises.setTimeout(10_000, undefined, { ref: false })]);
-    child.kill("SIGKILL");
+    appProcess?.kill("SIGKILL");
   }
   // The reopened build is not Playwright's to close, and one held by a dialog ignores SIGTERM.
   for (const signal of ["-TERM", "-KILL"]) {
