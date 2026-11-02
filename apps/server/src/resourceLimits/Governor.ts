@@ -5,6 +5,7 @@ import {
   MessageId,
   type OrchestrationV2ServerCommand,
   type OrchestrationV2ThreadShell,
+  type ResourceLimitsPause,
   type ThreadId,
 } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
@@ -17,7 +18,6 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Ref from "effect/Ref";
-import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
 import * as ServerConfig from "../config.ts";
@@ -27,8 +27,10 @@ import * as ProviderSessionManager from "../orchestration-v2/ProviderSessionMana
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { HostReadings } from "./HostReadings.ts";
+import { makeJsonFiles } from "./jsonFiles.ts";
 import {
   averageCpu,
+  delegatedThreadIds,
   effectiveLimits,
   GiB,
   headroomGiB,
@@ -38,6 +40,9 @@ import {
   latestUserMessage,
   launchAnyway,
   limitsSupported,
+  interruptible,
+  lostWake,
+  lostWakeNote,
   newestInterruptible,
   nextState,
   offUntil,
@@ -46,11 +51,16 @@ import {
   releaseOrder,
   type ResumeNote,
   type RunningTurn,
+  stoppableWork,
+  stoppedNote,
+  stoppedWorkNote,
   TIMING,
+  writtenDuringPause,
 } from "./policy.ts";
 import {
   isOff,
   liveState,
+  reportedState,
   ResourceLimits,
   TotalMemoryBytes,
   type WaitingThread,
@@ -87,14 +97,13 @@ interface Inspected {
 }
 
 const STATE_VERSION = 1;
-const Json = Schema.fromJsonString(Schema.Unknown, { space: 2 });
-const decodeJson = Schema.decodeUnknownOption(Json);
-const encodeJson = Schema.encodeEffect(Json);
 const MAX_INTERRUPTED_RUN_IDS = 50;
 // A helper thread takes the rank of the nearest thread above it that has one, this many levels up at most.
 const MAX_RANK_HOPS = 10;
 // Any local process can write the ranks file, so a larger one is skipped unread.
 const MAX_PRIORITY_BYTES = 1024 * 1024;
+
+const STOPPED_REASON = "All agents were stopped.";
 
 const waitsOnAlice = (shell: OrchestrationV2ThreadShell) =>
   shell.pendingRuntimeRequest !== null && shell.pendingRuntimeRequest.blocking !== false;
@@ -125,6 +134,10 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
     priority: path.join(dir, "priority.json"),
   };
 
+  const { readJson, writeJson } = yield* makeJsonFiles;
+
+  const firstPassPending = yield* Ref.make(true);
+  const savedWaiting = yield* Ref.make("");
   const memory = yield* Ref.make<Memory>({
     cpuWindow: [],
     lastReleaseAt: null,
@@ -133,28 +146,6 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
     interruptedRunIds: [],
     sessionCache: new Map(),
   });
-
-  const readJson = (file: string) =>
-    fs.readFileString(file).pipe(
-      Effect.map((text) => Option.getOrNull(decodeJson(text))),
-      Effect.orElseSucceed((): unknown => null),
-    );
-
-  // A temporary file and a rename, so the hook never reads half a file.
-  const writeJson = Effect.fn("ResourceLimitsGovernor.writeJson")(
-    function* (file: string, value: unknown) {
-      yield* fs.makeDirectory(path.dirname(file), { recursive: true });
-      const temporary = `${file}.${process.pid}.tmp`;
-      yield* fs.writeFileString(temporary, `${yield* encodeJson(value)}\n`);
-      yield* fs.rename(temporary, file);
-    },
-    (effect, file) =>
-      effect.pipe(
-        Effect.catchCause((cause) =>
-          Effect.logWarning("resource-limits.write-failed", { file, cause }),
-        ),
-      ),
-  );
 
   const dispatch = (
     command: Extract<OrchestrationV2ServerCommand, { readonly threadId: ThreadId }>,
@@ -206,6 +197,202 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
     ),
     Effect.orElseSucceed((): ReadonlyArray<OrchestrationV2ThreadShell> => []),
   );
+
+  const runningTurns = (shells: ReadonlyArray<OrchestrationV2ThreadShell>, now: number) =>
+    shells.flatMap((shell): Array<RunningTurn> =>
+      shell.activeRunId !== null &&
+      (shell.activityRunStatus === "starting" || shell.activityRunStatus === "running")
+        ? [
+            {
+              threadId: shell.id,
+              runId: shell.activeRunId,
+              startedAt: epoch(shell.activityRunStartedAt ?? shell.latestRunStartedAt) ?? now,
+              waitingOnUser: waitsOnAlice(shell),
+              stopRequested:
+                shell.latestRunStopRequested === true && shell.latestRunId === shell.activeRunId,
+            },
+          ]
+        : [],
+    );
+
+  /** Whether Alice wrote this thread's latest message during the pause, which makes its work hers to keep. */
+  const hersSincePause = Effect.fn("ResourceLimitsGovernor.hersSincePause")(function* (
+    threadId: ThreadId,
+    pause: ResourceLimitsPause,
+  ) {
+    const records = yield* projections
+      .getThreadRecords(threadId, ["messages", "runs"], { messageRoles: ["user"] })
+      .pipe(Effect.option);
+    const latest = Option.isSome(records)
+      ? latestUserMessage(records.value.messages, records.value.runs)
+      : undefined;
+    return (
+      latest !== undefined &&
+      writtenDuringPause(latest, DateTime.toEpochMillis(latest.createdAt), pause)
+    );
+  });
+
+  /**
+   * Interrupting a turn or closing its session leaves a Claude background command running on Windows,
+   * so Stop now asks the provider to end them first. Codex ends its own when its turn is interrupted.
+   */
+  const endBackgroundTasks = Effect.fn("ResourceLimitsGovernor.endBackgroundTasks")(function* (
+    threadId: ThreadId,
+  ) {
+    const records = yield* projections
+      .getThreadRecords(threadId, ["providerThreads", "subagents"])
+      .pipe(Effect.option);
+    if (Option.isNone(records)) return;
+    const delegated = delegatedThreadIds(records.value.subagents);
+    yield* Effect.forEach(
+      records.value.providerThreads,
+      (providerThread) =>
+        Effect.gen(function* () {
+          const taskIds = stoppableWork(providerThread.pendingBackgroundTasks ?? [], delegated).map(
+            (task) => task.taskId,
+          );
+          if (taskIds.length === 0 || providerThread.providerSessionId === null) return;
+          const runtime = yield* sessions.get(providerThread.providerSessionId);
+          if (Option.isNone(runtime) || runtime.value.stopBackgroundTasks === undefined) return;
+          yield* runtime.value.stopBackgroundTasks({ providerThread, taskIds });
+        }).pipe(Effect.ignore),
+      { concurrency: 8, discard: true },
+    );
+  });
+
+  /**
+   * Stop now: interrupts every running turn it can and queues the note it resumes with. A turn she started
+   * since the pause began is hers to keep.
+   */
+  const stopRunningTurns = Effect.fn("ResourceLimitsGovernor.stopRunningTurns")(function* (
+    shells: ReadonlyArray<OrchestrationV2ThreadShell>,
+    pause: ResourceLimitsPause,
+    now: number,
+  ) {
+    const turns = runningTurns(shells, now).filter(interruptible);
+    yield* Effect.forEach(
+      turns,
+      Effect.fnUntraced(function* ({ threadId, runId }) {
+        if (yield* hersSincePause(threadId, pause)) return;
+        yield* endBackgroundTasks(threadId);
+        const interrupted = yield* dispatch({
+          type: "run.interrupt",
+          commandId: CommandId.make(`limits:stop:${runId}`),
+          threadId,
+          runId,
+          reason: STOPPED_REASON,
+        });
+        if (!interrupted) return;
+        yield* Effect.logWarning("resource-limits.stopped", { threadId, runId });
+        yield* queueNote(threadId, `limits:stopped:${runId}`, stoppedNote(now));
+      }),
+      { concurrency: 8, discard: true },
+    );
+  });
+
+  /**
+   * Stop now's other half: a thread whose turn has ended can still have commands or subagents running
+   * in the background. Ending them closes its session too, and the note brings the thread back on
+   * resume, unless Alice has set it aside or it's waiting on her.
+   */
+  const stopBackgroundWork = Effect.fn("ResourceLimitsGovernor.stopBackgroundWork")(function* (
+    shells: ReadonlyArray<OrchestrationV2ThreadShell>,
+    pause: ResourceLimitsPause,
+    now: number,
+  ) {
+    const running = new Set(runningTurns(shells, now).map((turn) => turn.threadId));
+    // A thread waiting on Alice keeps its turn and her question, but nothing keeps running under it.
+    yield* Effect.forEach(shells.filter(waitsOnAlice), (shell) => endBackgroundTasks(shell.id), {
+      concurrency: 8,
+      discard: true,
+    });
+    const candidates = shells.filter(
+      (shell) =>
+        !running.has(shell.id) &&
+        !waitsOnAlice(shell) &&
+        (shell.pendingBackgroundTasks?.length ?? 0) > 0,
+    );
+    yield* Effect.forEach(
+      candidates,
+      Effect.fnUntraced(function* (shell) {
+        const { subagents } = yield* projections
+          .getThreadRecords(shell.id, ["subagents"])
+          .pipe(Effect.orElseSucceed(() => ({ subagents: [] })));
+        const delegated = delegatedThreadIds(subagents);
+        if (stoppableWork(shell.pendingBackgroundTasks ?? [], delegated).length === 0) return;
+        if (yield* hersSincePause(shell.id, pause)) return;
+        yield* endBackgroundTasks(shell.id);
+        const stopped = yield* dispatch({
+          type: "thread.stop",
+          commandId: CommandId.make(`limits:stop-work:${shell.id}:${pause.at}`),
+          threadId: shell.id,
+          reason: STOPPED_REASON,
+          stopDelegatedTasks: false,
+        });
+        if (!stopped) return;
+        yield* Effect.logWarning("resource-limits.stopped-background-work", {
+          threadId: shell.id,
+        });
+        const setAside =
+          shell.settledOverride === "settled" ||
+          (shell.snoozedUntil != null && (epoch(shell.snoozedUntil) ?? 0) > now);
+        if (!setAside) {
+          yield* queueNote(
+            shell.id,
+            `limits:stopped-work:${shell.id}:${pause.at}`,
+            stoppedWorkNote(now),
+          );
+        }
+      }),
+      { concurrency: 8, discard: true },
+    );
+  });
+
+  /** T3 cancels a held wake when it restarts, once the session that sent it is gone. */
+  const requeueLostWake = Effect.fn("ResourceLimitsGovernor.requeueLostWake")(function* (
+    threadId: ThreadId,
+    now: number,
+  ) {
+    const records = yield* projections
+      .getThreadRecords(threadId, ["messages", "runs"], { messageRoles: ["user"] })
+      .pipe(Effect.option);
+    if (Option.isNone(records)) return false;
+    const wake = lostWake(records.value.messages, records.value.runs);
+    if (wake === undefined) return false;
+    return yield* queueNote(threadId, `limits:lost-wake:${wake.id}`, lostWakeNote(wake.text, now));
+  });
+
+  /**
+   * The waiting list is how a restart knows what to release, and a pass only saves it every 15 s. Stop now
+   * is often followed by shutting down, so a change is saved within a second.
+   */
+  const saveWaiting = Effect.gen(function* () {
+    const { waiting } = yield* limits.read;
+    const threads = waiting.map((entry) => entry.threadId).join();
+    if (threads === (yield* Ref.get(savedWaiting))) return;
+    const saved = yield* readJson(files.state);
+    if (saved === null || typeof saved !== "object") return;
+    if (yield* writeJson(files.state, { ...saved, waiting })) {
+      yield* Ref.set(savedWaiting, threads);
+    }
+  });
+
+  /** The switch, checked often: admission follows it at once, and Stop now interrupts straight away. */
+  const followPause = Effect.gen(function* () {
+    yield* saveWaiting;
+    const before = (yield* limits.read).pause;
+    const pause = yield* limits.refreshPause;
+    if (pause?.mode !== before?.mode || pause?.at !== before?.at) {
+      yield* Effect.logInfo("resource-limits.pause-changed", { pause });
+    }
+    if (pause?.mode !== "stop") return;
+    const now = yield* Clock.currentTimeMillis;
+    if (now - pause.at < TIMING.stopSweepMs) {
+      const shells = yield* runtimeShells;
+      yield* stopRunningTurns(shells, pause, now);
+      yield* stopBackgroundWork(shells, pause, now);
+    }
+  });
 
   const inspect = Effect.fn("ResourceLimitsGovernor.inspect")(function* (entry: WaitingThread) {
     const shell = yield* projections
@@ -326,11 +513,14 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
 
   const sessionsFor = Effect.fn("ResourceLimitsGovernor.sessionsFor")(function* (
     shells: ReadonlyArray<OrchestrationV2ThreadShell>,
+    paused: boolean,
+    // A refused launch's record can arrive after its turn ended, as the refusal tells the agent to.
+    includeIdle: boolean,
   ) {
     const cache = (yield* Ref.get(memory)).sessionCache;
     const next = new Map<string, { readonly nativeIds: ReadonlyArray<string> } & SessionInfo>();
     for (const shell of shells) {
-      if (shell.activeRunId === null) continue;
+      if (shell.activeRunId === null && !includeIdle) continue;
       const key = `${shell.id}:${shell.activeRunId}:${epoch(shell.latestUserMessageAt) ?? ""}`;
       const known = cache.get(key);
       if (known !== undefined) {
@@ -355,7 +545,10 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
     const bySession: Record<string, SessionInfo> = {};
     for (const info of next.values()) {
       for (const nativeId of info.nativeIds) {
-        bySession[nativeId] = { threadId: info.threadId, launchAnyway: info.launchAnyway };
+        bySession[nativeId] = {
+          threadId: info.threadId,
+          launchAnyway: !paused && info.launchAnyway,
+        };
       }
     }
     return bySession;
@@ -366,6 +559,7 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
     names: ReadonlyArray<string>,
     bySession: Readonly<Record<string, SessionInfo>>,
     now: number,
+    paused: boolean,
   ) {
     const launches = new Map<ThreadId, Array<string>>();
     for (const name of names) {
@@ -394,7 +588,7 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
       yield* queueNote(
         threadId,
         `limits:launches:${threadId}:${now}`,
-        heldLaunchesNote(labels, now),
+        heldLaunchesNote(labels, now, paused),
       );
     }
   });
@@ -412,6 +606,8 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
   /** One pass over a reading, or over none when the sampler went quiet. */
   const pass = Effect.fn("ResourceLimitsGovernor.pass")(function* (reading: HostReading | null) {
     const now = yield* Clock.currentTimeMillis;
+    const pause = yield* limits.refreshPause;
+    const paused = pause !== null;
     const saved = yield* settings.getSettings.pipe(
       Effect.map((current) => current.resourceLimits),
       Effect.orElseSucceed(() => ({})),
@@ -441,11 +637,13 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
 
     const inbox = yield* listInbox;
     const runtime =
-      state !== "ok" || previous.waiting.length > 0 || inbox.length > 0 ? yield* runtimeShells : [];
+      state !== "ok" || paused || previous.waiting.length > 0 || inbox.length > 0
+        ? yield* runtimeShells
+        : [];
 
     // Every pass while over the limits, and before admission sees the new state, so idle sessions
-    // go before any work waits.
-    if (state !== "ok" && sessions.releaseIdleSessions !== undefined) {
+    // go before any work waits. Stop now closes them too, so nothing is left running.
+    if ((state !== "ok" || pause?.mode === "stop") && sessions.releaseIdleSessions !== undefined) {
       const closed = yield* sessions.releaseIdleSessions({
         keepThreadIds: new Set(runtime.filter(waitsOnAlice).map((shell) => shell.id)),
       });
@@ -464,11 +662,20 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
     }));
 
     // Drop threads with nothing left waiting, and snooze the rest out of Alice's inbox.
+    const firstPass = yield* Ref.getAndSet(firstPassPending, false);
     const inspected = yield* Effect.forEach(current.waiting, inspect);
     const dropped = new Set<ThreadId>();
     const changed = new Map<ThreadId, WaitingThread>();
     for (const item of inspected) {
       if (item.shell === null || !item.queued) {
+        // A wake the restart dropped comes back as a note, so the thread keeps its place in the line.
+        if (
+          item.shell !== null &&
+          firstPass &&
+          (yield* requeueLostWake(item.entry.threadId, now))
+        ) {
+          continue;
+        }
         dropped.add(item.entry.threadId);
         if (item.shell !== null) yield* unsnooze(item, now);
         continue;
@@ -489,8 +696,11 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
       }
     }
 
-    const bySession = state !== "ok" || inbox.length > 0 ? yield* sessionsFor(runtime) : {};
-    if (inbox.length > 0) yield* ingestInbox(inbox, bySession, now);
+    const bySession =
+      state !== "ok" || paused || inbox.length > 0
+        ? yield* sessionsFor(runtime, paused, inbox.length > 0)
+        : {};
+    if (inbox.length > 0) yield* ingestInbox(inbox, bySession, now, paused);
 
     // Critical: stop the newest running turn, one per interval, until memory is back.
     let lastInterruptAt = remembered.lastInterruptAt;
@@ -499,22 +709,7 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
       state === "critical" &&
       (lastInterruptAt === null || now - lastInterruptAt >= TIMING.interruptSpacingMs)
     ) {
-      const turns: Array<RunningTurn> = runtime.flatMap((shell) =>
-        shell.activeRunId !== null &&
-        (shell.activityRunStatus === "starting" || shell.activityRunStatus === "running")
-          ? [
-              {
-                threadId: shell.id,
-                runId: shell.activeRunId,
-                startedAt: epoch(shell.activityRunStartedAt ?? shell.latestRunStartedAt) ?? now,
-                waitingOnUser: waitsOnAlice(shell),
-                stopRequested:
-                  shell.latestRunStopRequested === true && shell.latestRunId === shell.activeRunId,
-              },
-            ]
-          : [],
-      );
-      const turn = newestInterruptible(turns, new Set(interruptedRunIds));
+      const turn = newestInterruptible(runningTurns(runtime, now), new Set(interruptedRunIds));
       if (turn !== undefined) {
         const { threadId, runId } = turn;
         // Interrupt only; holding the queue would also stop delegated tasks.
@@ -541,6 +736,7 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
     const released = new Set<ThreadId>();
     if (
       state === "ok" &&
+      !paused &&
       (off || releaseDue({ now, lastReleaseAt, growingSince, reading, limits: effective }))
     ) {
       const ready = inspected.filter(
@@ -583,8 +779,10 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
       source: "t3",
       at: now,
       machine,
-      state,
-      off: off ? switchedOffUntil : null,
+      state: reportedState({ ...next, pause }, now),
+      // Every agent stays held while paused, whatever the off switch says, and the hook follows that.
+      off: off && !paused ? switchedOffUntil : null,
+      pause,
       headroomGiB: headroom === null ? null : Math.round(headroom * 10) / 10,
       availableGiB: reading === null ? null : Math.round((reading.availableBytes / GiB) * 10) / 10,
       waiting: published.waiting,
@@ -594,6 +792,7 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
       lastInterruptAt,
       interruptedRunIds,
     });
+    yield* Ref.set(savedWaiting, published.waiting.map((entry) => entry.threadId).join());
   });
 
   /** Picks up the waiting list and timers a restart left behind. */
@@ -627,6 +826,7 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
         })
       : [];
     yield* limits.update((snapshot) => ({ ...snapshot, waiting }));
+    yield* Ref.set(savedWaiting, waiting.map((entry) => entry.threadId).join());
     const lastReleaseAt = number(saved.lastReleaseAt);
     yield* Ref.update(memory, (current) => ({
       ...current,
@@ -654,7 +854,7 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
     }),
   );
 
-  return { pass, restore, followSettings };
+  return { pass, restore, followSettings, followPause };
 });
 
 export const layer = Layer.effectDiscard(
@@ -665,6 +865,12 @@ export const layer = Layer.effectDiscard(
     const governor = yield* make();
     yield* governor.restore;
     yield* governor.followSettings.pipe(Effect.forkScoped);
+    yield* governor.followPause.pipe(
+      Effect.catchCause((cause) => Effect.logWarning("resource-limits.pause-failed", { cause })),
+      Effect.andThen(Effect.sleep(Duration.millis(TIMING.pauseCheckMs))),
+      Effect.forever,
+      Effect.forkScoped,
+    );
     yield* readings.next.pipe(
       // A sampler that goes quiet counts as no reading, which lets everything through.
       Effect.timeoutOption(Duration.millis(TIMING.staleReadingMs)),

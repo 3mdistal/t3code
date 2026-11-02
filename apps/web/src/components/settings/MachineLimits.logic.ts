@@ -19,17 +19,21 @@ const leftWord = (limits: EffectiveResourceLimits) =>
   limits.usesMemoryPressure ? "available" : "left";
 
 export function limitsStateLabel(
-  status: Pick<ResourceLimitsStatus, "state" | "offUntil" | "waitingThreadCount">,
+  status: Pick<ResourceLimitsStatus, "state" | "offUntil" | "pause" | "waitingThreadCount">,
   formatUntil: (epochMs: number) => string,
 ): string {
   const state =
-    status.offUntil !== null
-      ? `Off until ${formatUntil(status.offUntil)}`
-      : status.state === "ok"
-        ? "Within limits"
-        : status.state === "paused"
-          ? "Paused"
-          : "Critically low on memory";
+    status.pause !== undefined
+      ? status.pause.mode === "stop"
+        ? "All agents stopped"
+        : "All agents paused"
+      : status.offUntil !== null
+        ? `Off until ${formatUntil(status.offUntil)}`
+        : status.state === "ok"
+          ? "Within limits"
+          : status.state === "paused"
+            ? "Paused"
+            : "Critically low on memory";
   const waiting = status.waitingThreadCount;
   return waiting === 0
     ? state

@@ -642,6 +642,14 @@ export interface ProviderAdapterV2SessionRuntime {
     readonly taskId: string;
   }) => Effect.Effect<void, ProviderAdapterV2Error>;
   /**
+   * fork: limits, see FORK.md. Ends the background tasks with these ids, for a provider whose interrupt
+   * leaves them running. Ids not running on this provider thread are skipped.
+   */
+  readonly stopBackgroundTasks?: (input: {
+    readonly providerThread: OrchestrationV2ProviderThread;
+    readonly taskIds: ReadonlyArray<string>;
+  }) => Effect.Effect<void, ProviderAdapterV2Error>;
+  /**
    * Marks or unmarks background tasks the agent will resume from, using the ids the agent saw.
    * Ids not running on this provider thread come back unmatched and change nothing.
    */

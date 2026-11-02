@@ -9,6 +9,7 @@ import {
   type MemoryPressureLevel,
   type OrchestrationV2ConversationMessage,
   resolveResourceLimits,
+  type ResourceLimitsPause,
   type ResourceLimitsSettings,
   type ResourceLimitsState,
   type RunId,
@@ -36,6 +37,11 @@ export const TIMING = {
   // Task wake rewrites the ranks file every 10 minutes; one older than a day is left over, so it counts as none.
   priorityStaleMs: 24 * 3_600_000,
   priorityAheadMs: 60_000,
+  // The pause switch is read this often, so a change holds work almost at once.
+  pauseCheckMs: 1_000,
+  // Stop now keeps stopping turns this long, for any that were just starting when it was set. After that a turn
+  // that's running got there through Alice, by her answer or her Resume.
+  stopSweepMs: 30_000,
 } as const;
 
 // CPU has no release line of its own; it releases this many points under the pause line.
@@ -162,6 +168,57 @@ export const isAlicesMessage = (message: Provenance | undefined) =>
   message.scheduledTaskId === undefined &&
   message.senderThreadId === undefined;
 
+/**
+ * The pause switch, from `pause.json`: `{ version: 1, mode, at }`, with `at` in epoch ms. T3 and teenylilconfig's
+ * `memgate` and task wake all write it. It holds until someone resumes, so it has no expiry. A malformed file
+ * counts as no pause, like the rest of the limits: a broken switch lets work through.
+ */
+export function manualPause(file: unknown): ResourceLimitsPause | null {
+  if (typeof file !== "object" || file === null) return null;
+  const { version, mode, at } = file as {
+    readonly version?: unknown;
+    readonly mode?: unknown;
+    readonly at?: unknown;
+  };
+  if (version !== 1 || (mode !== "finish" && mode !== "stop")) return null;
+  if (typeof at !== "number" || !Number.isSafeInteger(at) || at < 0) return null;
+  return { mode, at };
+}
+
+export type PauseOrder = ResourceLimitsPause["mode"] | "resume";
+
+const PAUSE_ORDERS: Readonly<Record<string, PauseOrder>> = {
+  "pause all": "finish",
+  "stop all": "stop",
+  "resume all": "resume",
+};
+
+/**
+ * The order in a message Alice typed herself, when that's the whole message: "pause all", "stop all" or
+ * "resume all", in any case, with any spacing and closing punctuation. Anything longer is an ordinary message,
+ * so she can still talk about pausing, and an agent can't set the switch by sending the words.
+ */
+export function pauseOrder(
+  message: Provenance & { readonly text: string; readonly attachments: ReadonlyArray<unknown> },
+): PauseOrder | null {
+  if (!isAlicesMessage(message) || message.attachments.length > 0) return null;
+  const words = message.text
+    .trim()
+    .replace(/[.!]+$/, "")
+    .trim()
+    .toLowerCase()
+    .split(/\s+/)
+    .join(" ");
+  return Object.hasOwn(PAUSE_ORDERS, words) ? (PAUSE_ORDERS[words] ?? null) : null;
+}
+
+/** Whether a message Alice typed came after the pause began. Those still start; what she queued before it waits. */
+export const writtenDuringPause = (
+  message: Provenance,
+  writtenAt: number,
+  pause: ResourceLimitsPause,
+) => isAlicesMessage(message) && writtenAt >= pause.at;
+
 /** Whether a message contains the phrase as whole words, ignoring case, punctuation and spacing. */
 export function hasPhrase(text: string, phrase = LAUNCH_ANYWAY_PHRASE): boolean {
   const words = phrase
@@ -227,15 +284,16 @@ export interface RunningTurn {
   readonly stopRequested: boolean;
 }
 
+/** A turn waiting on Alice has nothing running and keeps her question. One already stopping needs nothing. */
+export const interruptible = (turn: RunningTurn) => !turn.waitingOnUser && !turn.stopRequested;
+
 /** The newest running turn the critical line may interrupt, skipping ones waiting on Alice or stopping. */
 export function newestInterruptible(
   turns: ReadonlyArray<RunningTurn>,
   alreadyInterrupted: ReadonlySet<string>,
 ): RunningTurn | undefined {
   return turns
-    .filter(
-      (turn) => !turn.waitingOnUser && !turn.stopRequested && !alreadyInterrupted.has(turn.runId),
-    )
+    .filter((turn) => interruptible(turn) && !alreadyInterrupted.has(turn.runId))
     .toSorted((left, right) => right.startedAt - left.startedAt)[0];
 }
 
@@ -279,6 +337,32 @@ export function waitingReason(input: {
   return `Held at ${clock(at)} because ${machine} was ${low} (${memory}${cpu}). ${then}`;
 }
 
+/** Why a run waits while every agent is paused. Like `waitingReason`, it stays true after the run starts. */
+export const pausedReason = (at: number) =>
+  `Held at ${clock(at)} because all agents were paused. After \`resume all\`, held work starts on its own, one thread at a time: board tasks by rank, then the rest oldest first. Choose Resume to start it now.`;
+
+const ORDER_WORDS = { finish: "pause all", stop: "stop all", resume: "resume all" } as const;
+
+/** What Alice sees in the thread where she typed an order. */
+export function pauseOrderNotice(
+  order: PauseOrder,
+  input: { readonly saved: boolean; readonly wasPaused: boolean; readonly at: number },
+): string {
+  const { saved, wasPaused, at } = input;
+  if (!saved) {
+    return `T3 couldn't save the pause switch at ${clock(at)}, so \`${ORDER_WORDS[order]}\` may not hold. Check the logs, or send it again.`;
+  }
+  if (order === "resume") {
+    return wasPaused
+      ? `All agents resumed at ${clock(at)}. Held work starts on its own, one thread at a time.`
+      : "Nothing was paused.";
+  }
+  const then = "Send `resume all` in any thread to start everything again.";
+  return order === "stop"
+    ? `All agents stopped at ${clock(at)}. Running turns are being interrupted, and nothing else starts. ${then}`
+    : `All agents paused at ${clock(at)}. Running turns finish, then nothing else starts. ${then}`;
+}
+
 export interface ResumeNote {
   /** The notification row's title in the transcript. */
   readonly summary: string;
@@ -286,10 +370,94 @@ export interface ResumeNote {
   readonly text: string;
 }
 
+// Claude reports an interrupted tool call as the user rejecting it, and agents take that as a no.
+const NOT_REFUSED =
+  "If your last tool call shows as rejected or declined by the user, that was T3 stopping it: nobody said no.";
+
 /** What an interrupted thread resumes with. */
 export const interruptedNote = (machine: string, at: number): ResumeNote => ({
   summary: `T3 interrupted this turn to free memory on ${machine}`,
-  text: `T3 interrupted your turn at ${clock(at)} because ${machine} was critically low on memory. Continue where you stopped.`,
+  text: `T3 interrupted your turn at ${clock(at)} because ${machine} was critically low on memory. ${NOT_REFUSED} Run it again if you still need it, then continue where you stopped.`,
+});
+
+/** What a thread resumes with after Stop now interrupted its turn. */
+export const stoppedNote = (at: number): ResumeNote => ({
+  summary: "T3 interrupted this turn when all agents were stopped",
+  text: `T3 interrupted your turn at ${clock(at)} because all agents were stopped. They've been resumed now. ${NOT_REFUSED} Whatever you had running stopped with it, so start again what you still need, then continue where you stopped.`,
+});
+
+/** For a thread with no turn running, whose background work Stop now ended. */
+export const stoppedWorkNote = (at: number): ResumeNote => ({
+  summary: "T3 stopped this thread's background work when all agents were stopped",
+  text: `T3 stopped your background work at ${clock(at)} because all agents were stopped. They've been resumed now. Start again what you still need, then continue where you stopped.`,
+});
+
+/** The threads of a thread's delegated tasks. */
+export const delegatedThreadIds = (
+  tasks: ReadonlyArray<{ readonly origin: string; readonly childThreadId: string | null }>,
+): ReadonlySet<string> =>
+  new Set(
+    tasks.flatMap((task) =>
+      task.origin === "app_owned" && task.childThreadId !== null ? [task.childThreadId] : [],
+    ),
+  );
+
+/**
+ * What Stop now has to end on a thread with no turn running. A delegated task has its own thread and
+ * stops there, and a pull request watch has nothing running.
+ */
+export function stoppableWork<
+  Task extends {
+    readonly taskId: string;
+    readonly kind: string;
+    readonly childThreadId?: string | undefined;
+  },
+>(tasks: ReadonlyArray<Task>, delegatedThreadIds: ReadonlySet<string>): ReadonlyArray<Task> {
+  return tasks.filter(
+    (task) =>
+      !task.taskId.startsWith("pull-request-watch:") &&
+      !(
+        task.kind === "subagent" &&
+        task.childThreadId !== undefined &&
+        delegatedThreadIds.has(task.childThreadId)
+      ),
+  );
+}
+
+const MAX_WAKE_LENGTH = 500;
+
+/**
+ * The wake a restart dropped: T3 cancels a queued wake from a provider session once that session is
+ * gone, so a thread that was held for it has nothing left to start it.
+ */
+export function lostWake<
+  M extends Pick<
+    OrchestrationV2ConversationMessage,
+    "id" | "text" | "createdBy" | "creationSource" | "notification" | "delegatedCompletion"
+  >,
+>(
+  messages: ReadonlyArray<M>,
+  runs: ReadonlyArray<{
+    readonly ordinal: number;
+    readonly status: string;
+    readonly userMessageId: string;
+  }>,
+): M | undefined {
+  const latest = runs.toSorted((left, right) => left.ordinal - right.ordinal).at(-1);
+  if (latest?.status !== "cancelled") return undefined;
+  return messages.find(
+    (message) =>
+      message.id === latest.userMessageId &&
+      message.createdBy === "agent" &&
+      message.creationSource === "provider" &&
+      message.notification !== undefined &&
+      message.delegatedCompletion === undefined,
+  );
+}
+
+export const lostWakeNote = (text: string, at: number): ResumeNote => ({
+  summary: "T3 restarted while this thread was held",
+  text: `T3 restarted at ${clock(at)} while this thread was held, and the message that would have woken you was dropped. It said: ${text.slice(0, MAX_WAKE_LENGTH)}\n\nContinue where you stopped.`,
 });
 
 // A hook record comes from a file any local process can write, so its text is bounded.
@@ -297,7 +465,12 @@ const MAX_LAUNCHES = 5;
 const MAX_LAUNCH_LENGTH = 200;
 
 /** What a thread resumes with after the session hook refused its subagents. */
-export function heldLaunchesNote(launches: ReadonlyArray<string>, at: number): ResumeNote {
+export function heldLaunchesNote(
+  launches: ReadonlyArray<string>,
+  at: number,
+  paused = false,
+): ResumeNote {
+  const who = paused ? "The pause on all agents" : "The memory limits";
   const shown = launches
     .slice(0, MAX_LAUNCHES)
     .map((launch) => launch.replace(/\s+/g, " ").trim().slice(0, MAX_LAUNCH_LENGTH));
@@ -305,8 +478,8 @@ export function heldLaunchesNote(launches: ReadonlyArray<string>, at: number): R
   const list = `${shown.join("; ")}${more > 0 ? `; and ${more} more` : ""}`;
   const one = launches.length === 1;
   return {
-    summary: `The memory limits held ${one ? "a launch" : `${launches.length} launches`}`,
-    text: `Continue where you stopped. The memory limits held ${one ? "this launch" : "these launches"} at ${clock(at)}: ${list}. Start ${one ? "it" : "them"} now if you still need to.`,
+    summary: `${who} held ${one ? "a launch" : `${launches.length} launches`}`,
+    text: `Continue where you stopped. ${who} held ${one ? "this launch" : "these launches"} at ${clock(at)}: ${list}. Start ${one ? "it" : "them"} now if you still need to.`,
   };
 }
 
