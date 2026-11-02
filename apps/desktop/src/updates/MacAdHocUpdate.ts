@@ -38,11 +38,12 @@ export function rememberDownloadedUpdate(event: unknown): void {
   downloadedUpdate = { file: downloadedFile, version };
 }
 
+const UNSIGNED_DIAGNOSTIC = "code object is not signed at all";
+
 /** `codesign -dv` details for code that Squirrel.Mac can never update. */
 export function isAdHocSignature(codesignDetails: string): boolean {
   return (
-    /^Signature=adhoc$/m.test(codesignDetails) ||
-    codesignDetails.includes("code object is not signed at all")
+    /^Signature=adhoc$/m.test(codesignDetails) || codesignDetails.includes(UNSIGNED_DIAGNOSTIC)
   );
 }
 
@@ -57,14 +58,18 @@ export function appBundleOf(executablePath: string): string | null {
 }
 
 /**
- * Args: pid, installed bundle, staged bundle, staging folder, "1" to reopen, tenths to wait for quit.
- * renamex_np's RENAME_SWAP (through osascript's ObjC bridge) exchanges the bundles in one step, so
- * the installed path is never empty; without it, two moves run with stopping signals ignored.
+ * Args: pid, installed bundle, staged bundle, staging folder, "1" to reopen, tenths to wait for quit,
+ * and a swap command for tests. renamex_np's RENAME_SWAP, through osascript's ObjC bridge, exchanges
+ * the bundles in one step, so the installed path is never empty; if it fails, nothing moves.
  */
 const INSTALL_SCRIPT = `
-pid=$1 target=$2 staged=$3 staging=$4 relaunch=$5 wait_tenths=$6
+pid=$1 target=$2 staged=$3 staging=$4 relaunch=$5 wait_tenths=$6 swapper=$7
 log() { printf '%s %s\\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
 swap() {
+  if [ -n "$swapper" ]; then
+    "$swapper" "$1" "$2"
+    return
+  fi
   /usr/bin/osascript -l JavaScript -e 'function run(argv) {
     ObjC.bindFunction("renamex_np", ["int", ["char *", "char *", "unsigned int"]]);
     return $.renamex_np(argv[0], argv[1], 2) === 0 ? "swapped" : "failed";
@@ -81,33 +86,22 @@ while kill -0 "$pid" 2>/dev/null; do
   sleep 0.1
   waited=$((waited + 1))
 done
+# Not stopping between the swap and the cleanup keeps the old bundle from lingering.
 trap '' HUP INT TERM
 if [ "$(swap "$staged" "$target")" = swapped ]; then
+  status=0
   log "swapped the new app into place"
 else
-  previous="$staging/previous.app"
-  if ! mv "$target" "$previous"; then
-    log "could not move the installed app aside; leaving it as it was"
-    rm -rf "$staging"
-    exit 1
-  fi
-  if ! mv "$staged" "$target"; then
-    log "could not move the new app into place; restoring the old one"
-    if mv "$previous" "$target"; then
-      rm -rf "$staging"
-    else
-      log "could not restore the old app; it is at $previous"
-    fi
-    exit 1
-  fi
-  log "moved the new app into place"
+  status=1
+  log "could not swap in the new app; leaving the installed one as it was"
 fi
 rm -rf "$staging"
-log "installed $target"
+trap - HUP INT TERM
+[ "$status" = 0 ] && log "installed $target"
 if [ "$relaunch" = 1 ]; then
   open "$target" || log "could not reopen $target"
 fi
-exit 0
+exit "$status"
 `;
 
 interface CommandResult {
@@ -142,7 +136,7 @@ async function run(command: string, args: ReadonlyArray<string>): Promise<string
 async function isAdHocSigned(bundle: string): Promise<boolean> {
   // codesign writes its details to stderr, and exits 1 for code that isn't signed at all.
   const { code, output } = await exec("/usr/bin/codesign", ["-dv", bundle]);
-  if (code !== 0 && !isAdHocSignature(output)) {
+  if (code !== 0 && !output.includes(UNSIGNED_DIAGNOSTIC)) {
     throw new Error(`codesign -dv ${bundle} exited ${code}: ${output.trim()}`);
   }
   return isAdHocSignature(output);
@@ -188,11 +182,9 @@ async function stageUpdate(bundle: string, update: DownloadedUpdate) {
     }
     await run("/usr/bin/codesign", ["--verify", "--deep", "--strict", staged]);
     // The app downloaded the zip itself, so nothing should carry a quarantine flag. One that stays
-    // would make Gatekeeper refuse the new app once the old one is gone.
-    await exec("/usr/bin/xattr", ["-dr", QUARANTINE, staged]);
-    if ((await exec("/usr/bin/xattr", ["-p", QUARANTINE, staged])).code === 0) {
-      throw new Error(`Could not clear the quarantine flag on ${staged}.`);
-    }
+    // would make Gatekeeper refuse the new app once the old one is gone. `xattr -dr` skips files
+    // without the flag and fails on any other error.
+    await run("/usr/bin/xattr", ["-dr", QUARANTINE, staged]);
     return { staging, staged };
   } catch (error) {
     await NodeFSP.rm(staging, { recursive: true, force: true });
@@ -209,6 +201,8 @@ export function spawnInstallScript(args: {
   readonly relaunch: boolean;
   readonly logFile: string;
   readonly waitTenths?: number;
+  /** Tests stand in for osascript, which only macOS has. */
+  readonly swapCommand?: string;
 }): NodeChildProcess.ChildProcess {
   const log = NodeFS.openSync(args.logFile, "a");
   try {
@@ -224,6 +218,7 @@ export function spawnInstallScript(args: {
         args.staging,
         args.relaunch ? "1" : "0",
         String(args.waitTenths ?? QUIT_WAIT_TENTHS),
+        args.swapCommand ?? "",
       ],
       { detached: true, stdio: ["ignore", log, log] },
     );
