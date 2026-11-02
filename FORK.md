@@ -224,6 +224,22 @@ logs "freeze profile saved". `T3CODE_FREEZE_PROFILES=0` turns it off. Drop this 
 - Test: `apps/server/src/observability/FreezeProfiler.fork.test.ts` blocks its own main thread and reads the saved
   profile back.
 
+### The ownership lock check stats off the event loop on Windows (`fork:`)
+
+Every 5 seconds the server stats `server-owner.sqlite` to notice if the lock was deleted or replaced. The stat was
+synchronous, so a slow disk stopped the whole server: on the PC, profiles of the freezes at noon and midnight show
+`statSync` from this loop holding the event loop for 6.8 and 4.9 seconds while a volume snapshot ran. On Windows the
+check now uses an asynchronous stat by the same path, and only one runs at a time. A stat stuck on the disk delays
+the next check and nothing else. Other platforms keep upstream's call, which upstream's tests rely on: they advance
+the test clock and read the result straight away. Proposed upstream once the fork proves it; drop this patch when
+upstream ships it or an equivalent.
+
+- `apps/server/src/serverOwnershipLockStat.ts`: the asynchronous stat, with the same result as
+  `throwIfNoEntry: false`.
+- `apps/server/src/serverOwnership.ts`: picks it on Windows.
+- Test: `apps/server/src/serverOwnership.fork.test.ts` holds a stat open and shows the loop waits on it. Upstream's
+  "lock file checks" in `serverRuntimeState.test.ts` pass unchanged.
+
 ### Storage cleanup reads git 2.56's message for a broken worktree (`fork:`)
 
 Git 2.56 reports a linked worktree whose `.git` file points at a missing repository as "gitfile does not point to a

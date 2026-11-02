@@ -28,6 +28,7 @@ import {
   serviceStateActiveVersion,
 } from "./cloud/serviceProtocol.ts";
 import * as ProcessRunner from "./processRunner.ts";
+import { statOwnershipLockOffEventLoop } from "./serverOwnershipLockStat.ts"; // fork: see FORK.md
 import {
   clearPersistedServerRuntimeState,
   isProcessAlive,
@@ -244,19 +245,22 @@ export const acquireServerOwnership = Effect.fn("acquireServerOwnership")(functi
     return yield* new OlderBootServiceError({ baseDir: olderServiceHome });
   }
 
+  const statOffEventLoop = yield* HostProcess.isWindows; // fork: see FORK.md
   yield* Effect.gen(function* () {
     let lost = lock.replacedDuringAcquire;
     let statWarningLogged = false;
     while (!lost) {
       yield* Effect.sleep("5 seconds");
       // Closing another descriptor for this inode releases SQLite's POSIX locks. Stat by path only.
-      const current = yield* Effect.sync(() => {
-        try {
-          return NodeFS.statSync(lockPath, { bigint: true, throwIfNoEntry: false });
-        } catch (cause) {
-          return cause instanceof Error && "code" in cause ? String(cause.code) : "unknown";
-        }
-      });
+      const current = yield* statOffEventLoop
+        ? statOwnershipLockOffEventLoop(lockPath)
+        : Effect.sync(() => {
+            try {
+              return NodeFS.statSync(lockPath, { bigint: true, throwIfNoEntry: false });
+            } catch (cause) {
+              return cause instanceof Error && "code" in cause ? String(cause.code) : "unknown";
+            }
+          });
       if (typeof current === "string") {
         if (!statWarningLogged) {
           yield* Effect.logWarning(
