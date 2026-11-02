@@ -73,6 +73,7 @@ import * as TaskFolderStore from "../workspace/TaskFolderStore.ts";
 // fork: limits, see FORK.md.
 import * as HostReadings from "../resourceLimits/HostReadings.ts";
 import * as ResourceLimitsGovernor from "../resourceLimits/Governor.ts";
+import * as ResourceLimitsProcessTree from "../resourceLimits/ProcessTree.ts";
 import * as ResourceLimits from "../resourceLimits/ResourceLimits.ts";
 
 export const layerEventInfrastructure = Layer.mergeAll(
@@ -482,6 +483,7 @@ export const layerProduction = Layer.mergeAll(
         layerThreadManagementProvided,
         layerProviderSessionManagerProvided,
         HostReadings.layer,
+        ResourceLimitsProcessTree.layer,
       ),
     ),
   ),
