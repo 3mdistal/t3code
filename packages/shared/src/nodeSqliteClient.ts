@@ -27,6 +27,8 @@ import type { Borrower, Connection } from "effect/sql/SqlConnection";
 import { SqlError, classifySqliteError } from "effect/sql/SqlError";
 import * as Statement from "effect/sql/Statement";
 
+import { type CheckpointWriter, makeWriterWorkerConnection } from "./nodeSqliteWriterWorker.ts"; // fork: see FORK.md
+
 const ATTR_DB_SYSTEM_NAME = "db.system.name";
 
 export interface SqliteClientConfig {
@@ -37,6 +39,8 @@ export interface SqliteClientConfig {
   readonly readerWorker?: boolean | undefined;
   /** Ignored for in-memory databases. */
   readonly checkpointWorker?: boolean | undefined;
+  /** fork: see FORK.md. Ignored for in-memory databases, and falls back to the main thread if the worker can't start. */
+  readonly writerWorker?: boolean | undefined;
 }
 
 // SqlClient masks transaction acquisition, so readOnly carries the caller's interruption policy.
@@ -638,7 +642,7 @@ parentPort.on("message", (request) => {
 
 const startCheckpointWorker = Effect.fnUntraced(function* (
   filename: string,
-  writer: NodeSqlite.DatabaseSync,
+  writer: CheckpointWriter, // fork: see FORK.md
 ) {
   const warn = (reason: string) =>
     Effect.logWarning(
@@ -831,16 +835,24 @@ const startCheckpointWorker = Effect.fnUntraced(function* (
   worker.unref();
 
   const runWithAdmission = <A, E>(
-    execute: () => Exit.Exit<A, E>,
+    execute: () => Effect.Effect<A, E>, // fork: may leave its statement on the writer worker, see FORK.md
     admitted?: Waiter,
   ): Effect.Effect<A, E> =>
     Effect.suspend(() => {
       if (!gated()) {
         // Release the election after executing; its successor must see the new WAL state.
+        // fork: a statement still on the writer worker keeps the election until it returns, see FORK.md.
+        let stillRunning = false;
         try {
-          return execute();
+          const running = execute();
+          if (admitted === undefined || Exit.isExit(running)) return running;
+          stillRunning = true;
+          return Effect.ensuring(
+            running,
+            Effect.sync(() => release(admitted)),
+          );
         } finally {
-          if (admitted !== undefined) release(admitted);
+          if (admitted !== undefined && !stillRunning) release(admitted);
         }
       }
       if (admitted !== undefined) release(admitted);
@@ -869,7 +881,18 @@ const startCheckpointWorker = Effect.fnUntraced(function* (
         Effect.onInterrupt(() => Effect.sync(() => release(waiter))),
       );
     });
-  return { check, runWithAdmission };
+  // fork: a statement on the writer worker can outlast a coordinator event, see FORK.md.
+  const settle = () => {
+    acknowledge();
+    wake();
+  };
+  // fork: with the writer worker gone, a held write fails instead of waiting on a checkpoint, see FORK.md.
+  const retire = () => {
+    stopped = true;
+    truncate = undefined;
+    wake();
+  };
+  return { check, settle, retire, runWithAdmission };
 });
 
 const make = Effect.fn("makeWithDatabase")(function* (
@@ -881,6 +904,16 @@ const make = Effect.fn("makeWithDatabase")(function* (
   const isFileDatabase = options.filename !== ":memory:" && options.filename !== "";
 
   const makeConnection = Effect.gen(function* () {
+    // fork: see FORK.md.
+    if (options.writerWorker && isFileDatabase) {
+      const workerConnection = yield* makeWriterWorkerConnection(options, {
+        startCheckpointWorker,
+        failed,
+        hasLargeBinding,
+        unsupportedStream: () => new UnsupportedNodeSqliteOperationError(),
+      });
+      if (workerConnection !== undefined) return workerConnection;
+    }
     const scope = yield* Effect.scope;
     const db = yield* Effect.try({
       try: () =>

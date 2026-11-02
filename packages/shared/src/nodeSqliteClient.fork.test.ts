@@ -21,7 +21,8 @@ vi.mock("node:worker_threads", async (importOriginal) => {
   class RecordedWorker extends actual.Worker {
     constructor(...args: ConstructorParameters<typeof actual.Worker>) {
       super(
-        ...((silentWorkers.on
+        // Only the checkpoint worker: the writer may run on a worker too.
+        ...((silentWorkers.on && String(args[0]).includes("wal_checkpoint(TRUNCATE)")
           ? ["setInterval(() => {}, 1 << 30);", { eval: true }]
           : failingWorkers.message !== undefined
             ? [`throw new Error(${JSON.stringify(failingWorkers.message)});`, { eval: true }]
@@ -132,7 +133,7 @@ it.effect("admits a write after a busy truncate copied every WAL frame", () =>
       const write = yield* sql`INSERT INTO entries VALUES ('available')`.pipe(
         Effect.forkChild({ startImmediately: true }),
       );
-      assert.equal(write.pollUnsafe()?._tag, "Success");
+      yield* Fiber.join(write);
       assert.equal(yield* countEntries(sql), 1);
     }).pipe(
       Effect.provide(

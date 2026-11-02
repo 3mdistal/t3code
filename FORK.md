@@ -246,6 +246,36 @@ upstream ships it or an equivalent.
 - Test: `apps/server/src/serverOwnership.fork.test.ts` holds a stat open and shows the loop waits on it. Upstream's
   "lock file checks" in `serverRuntimeState.test.ts` pass unchanged.
 
+### Database writes run on their own thread on Windows (`fork:`)
+
+T3's reads and checkpoints already run on worker threads, but its one writer connection ran on the event loop. A
+statement that waits on the disk stopped the whole server: on the PC, freeze profiles show single statements
+holding the event loop for 3 to 12 seconds, three of the five with no volume snapshot running. On Windows the
+writer now lives on a worker thread. Each statement is one round trip, and the caller holds the client's writer
+lock across it, so statements still run one at a time and in order. Nothing about the database file changes, and
+stock T3 opens it as before. Other platforms and in-memory databases keep upstream's writer.
+`T3CODE_SQLITE_WRITER_WORKER=0` turns it off. Drop this patch once upstream ships an equivalent.
+
+The checkpoint coordinator's reads of the writer used to be synchronous, and nothing could run while a statement
+did. Now it reads what the worker last reported, and a statement on the worker counts as an open transaction, so
+no truncate is acknowledged against it. A statement goes to the worker in the same step as its admission check, so
+no truncate can get in between. Statement classes come from the same authorizer rules, run on the worker;
+keep `writerWorkerSource` in step with the authorizer in `nodeSqliteClient.ts` when upstream changes it. A statement
+can't be interrupted once sent, as before. If the worker can't start, the client logs a warning and opens the
+writer on the event loop. If it dies later, every write fails with a `SqlError` and an error is logged until T3
+restarts, including writes the checkpoint gate was holding: reopening would lose the connection's pragmas and could
+resume a transaction that no longer exists.
+
+- `packages/shared/src/nodeSqliteWriterWorker.ts`: the worker, the connection in front of it, and the writer view the
+  coordinator reads.
+- `packages/shared/src/nodeSqliteClient.ts`: the `writerWorker` option; the coordinator takes that view,
+  `runWithAdmission` waits for a statement still on the worker before electing the next writer, and `retire` lets
+  held writes through to fail when the worker stops.
+- `apps/server/src/persistence/Sqlite.ts`: turns it on for Windows.
+- Tests: `packages/shared/src/nodeSqliteWriterWorker.fork.test.ts`, and `nodeSqliteClient.writerWorker.fork.test.ts`
+  and `nodeSqliteClient.fork.writerWorker.fork.test.ts`, which rerun the client's tests with the writer on its worker.
+  `apps/server/src/persistence/Sqlite.fork.test.ts` covers when it turns on.
+
 ### Storage cleanup reads git 2.56's message for a broken worktree (`fork:`)
 
 Git 2.56 reports a linked worktree whose `.git` file points at a missing repository as "gitfile does not point to a
