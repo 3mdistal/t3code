@@ -252,6 +252,16 @@ describe("launch anyway", () => {
     expect(launchAnyway(latestUserMessage([hers, later], runs))).toBe(false);
   });
 
+  it("ignores a message cancelled from the queue, as a typed order is", () => {
+    const hers = message("a", 1, "run:a", "launch anyway");
+    const order = message("b", 2, "run:b", "stop all");
+    const runs = [
+      { id: "run:a", status: "completed" },
+      { id: "run:b", status: "cancelled" },
+    ];
+    expect(launchAnyway(latestUserMessage([hers, order], runs))).toBe(true);
+  });
+
   it("ignores a queued message, and an agent writing the phrase", () => {
     const hers = message("a", 1, "run:a", "launch anyway");
     const queued = message("b", 2, "run:b", "something else");

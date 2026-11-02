@@ -153,7 +153,7 @@ export const makeLimitsAdmission = Effect.gen(function* () {
       if (candidate.status !== "queued") return false;
       const queued = projection.messages.find((item) => item.id === candidate.userMessageId);
       if (pause === null || queued === undefined) return isAlicesMessage(queued);
-      // While every agent is paused, only what she has typed since counts.
+      // While every agent is paused, only what she has typed since counts, and what's ahead of it in the queue goes first.
       return writtenDuringPause(queued, DateTime.toEpochMillis(queued.createdAt), pause);
     });
     if (alicesQueue) return undefined;
