@@ -891,6 +891,27 @@ it.effect(
     }).pipe(Effect.provide(layerTest)),
 );
 
+it.effect("P3: Stop now asked for again sweeps again, and stops what she started since", () =>
+  Effect.gen(function* () {
+    const governor = yield* makeGovernor;
+    const threadId = ThreadId.make("thread:p3:again");
+    const orders = ThreadId.make("thread:p3:again-orders");
+    yield* Effect.forEach([threadId, orders], createThread);
+    yield* send(orders, "stop all", alice);
+    yield* governor.followPause;
+    yield* TestClock.adjust(TIMING.stopSweepMs);
+
+    yield* send(threadId, "typed after stopping", alice);
+    yield* TestClock.adjust("1 second");
+    yield* governor.followPause;
+    assert.deepEqual(yield* runs(threadId), ["starting"]);
+
+    yield* send(orders, "Stop all.", alice);
+    yield* governor.followPause;
+    assert.deepEqual(yield* runs(threadId), ["interrupted", "queued:held"]);
+  }).pipe(Effect.provide(layerTest)),
+);
+
 it.effect("P3: past its first moments, Stop now doesn't interrupt anything new", () =>
   Effect.gen(function* () {
     const orchestrator = yield* Orchestrator.OrchestratorV2;
@@ -923,6 +944,62 @@ it.effect("P4: a restart while paused reads the switch before anything can start
     }).pipe(Effect.provide(Layer.fresh(layerLimits)));
     assert.equal(pause?.mode, "stop");
   }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect(
+  "P2: typed in an idle thread during a pause, her message goes ahead of its held queue",
+  () =>
+    Effect.gen(function* () {
+      const governor = yield* makeGovernor;
+      const threadId = ThreadId.make("thread:p2:idle-queue");
+      const untouched = ThreadId.make("thread:p2:untouched");
+      yield* Effect.forEach([threadId, untouched], createThread);
+      yield* Effect.forEach([threadId, untouched], (thread) => send(thread, "first", alice));
+      yield* Effect.forEach([threadId, untouched], (thread) =>
+        send(thread, "queued before the pause", alice, "queue_after_active"),
+      );
+      yield* TestClock.adjust("1 second");
+      yield* writePause("finish");
+      yield* governor.followPause;
+      yield* TestClock.adjust("1 second");
+      for (const thread of [threadId, untouched]) {
+        const held = yield* awaitRunUpdate(thread, (run) => run.queueHeld === true);
+        yield* endRun(thread);
+        yield* held;
+      }
+
+      yield* send(threadId, "typed during the pause", alice, "queue_after_active");
+      assert.deepEqual(yield* runs(threadId), ["interrupted", "queued", "starting"]);
+      assert.deepEqual(yield* runs(untouched), ["interrupted", "queued:held"]);
+
+      // The older message waits again once her turn is done.
+      const heldAgain = yield* awaitRunUpdate(threadId, (run) => run.queueHeld === true);
+      yield* endRun(threadId);
+      yield* heldAgain;
+      assert.deepEqual(yield* runs(threadId), ["interrupted", "queued:held", "interrupted"]);
+    }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect(
+  "P2: typed behind a running turn during a pause, her message follows what's ahead of it",
+  () =>
+    Effect.gen(function* () {
+      const governor = yield* makeGovernor;
+      const threadId = ThreadId.make("thread:p2:busy-queue");
+      yield* createThread(threadId);
+      yield* send(threadId, "first", alice);
+      yield* send(threadId, "queued before the pause", alice, "queue_after_active");
+      yield* TestClock.adjust("1 second");
+      yield* writePause("finish");
+      yield* governor.followPause;
+      yield* TestClock.adjust("1 second");
+
+      yield* send(threadId, "typed during the pause", alice, "queue_after_active");
+      const started = yield* awaitRunUpdate(threadId, (run) => run.status === "starting");
+      yield* endRun(threadId);
+      yield* started;
+      assert.deepEqual(yield* runs(threadId), ["interrupted", "starting", "queued"]);
+    }).pipe(Effect.provide(layerTest)),
 );
 
 it.effect("P5: Alice's typed orders set the switch, start nothing, and leave a notice", () =>
@@ -1010,6 +1087,72 @@ it.effect("P5: an order in a busy thread doesn't touch its turn or release its q
     assert.deepEqual(yield* runs(heldQueue), ["queued:held"]);
     yield* send(heldQueue, "stop all", alice);
     assert.deepEqual(yield* runs(heldQueue), ["queued:held", "cancelled"]);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("P5: `stop all` typed in a busy thread stops that thread's turn too", () =>
+  Effect.gen(function* () {
+    const governor = yield* makeGovernor;
+    const threadId = ThreadId.make("thread:p5:stop-busy");
+    yield* createThread(threadId);
+    yield* send(threadId, "first", alice);
+    yield* TestClock.adjust("1 second");
+
+    yield* send(threadId, "stop all", alice, "queue_after_active");
+    assert.deepEqual(yield* runs(threadId), ["starting", "cancelled"]);
+    yield* governor.followPause;
+    assert.deepEqual(yield* runs(threadId), ["interrupted", "cancelled", "queued:held"]);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("P5: asking to pause again keeps its time, and asking to stop again renews it", () =>
+  Effect.gen(function* () {
+    const limits = yield* ResourceLimits.ResourceLimits;
+    const orders = ThreadId.make("thread:p5:again");
+    yield* createThread(orders);
+
+    yield* send(orders, "pause all", alice);
+    const paused = (yield* limits.read).pause?.at;
+    yield* TestClock.adjust("5 seconds");
+    yield* send(orders, "Pause all.", alice);
+    assert.equal((yield* limits.read).pause?.at, paused);
+
+    yield* send(orders, "stop all", alice);
+    const stopped = (yield* limits.read).pause?.at;
+    assert.equal(stopped, (paused ?? 0) + 5000);
+    yield* TestClock.adjust("5 seconds");
+    yield* send(orders, "Stop all.", alice);
+    assert.equal((yield* limits.read).pause?.at, (stopped ?? 0) + 5000);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("P5: an order asks no model for a title, and leaves the next message's title alone", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const threadId = ThreadId.make("thread:p5:title");
+    yield* createThread(threadId);
+    const firstMessage = (text: string) =>
+      orchestrator.dispatch({
+        type: "message.dispatch",
+        commandId: CommandId.make(`title:${text}`),
+        threadId,
+        messageId: MessageId.make(`message:title:${text}`),
+        text,
+        titleSeed: text,
+        attachments: [],
+        dispatchMode: { type: "start_immediately" },
+        ...alice,
+      });
+
+    yield* firstMessage("pause all");
+    const afterOrder = (yield* orchestrator.getThreadProjection(threadId)).thread;
+    assert.notEqual(afterOrder.title, "pause all");
+    assert.isNotOk(afterOrder.titleRegeneration);
+
+    yield* firstMessage("the real first message");
+    const afterMessage = (yield* orchestrator.getThreadProjection(threadId)).thread;
+    assert.equal(afterMessage.title, "the real first message");
+    assert.isOk(afterMessage.titleRegeneration);
   }).pipe(Effect.provide(layerTest)),
 );
 
