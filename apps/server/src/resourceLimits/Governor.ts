@@ -56,7 +56,9 @@ import {
   stoppableWork,
   stoppedNote,
   stoppedWorkNote,
+  stoppedWorkNoteQueued,
   TIMING,
+  withDescendants,
   writtenDuringPause,
 } from "./policy.ts";
 import { ProcessTree } from "./ProcessTree.ts";
@@ -263,7 +265,9 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
     if (fresh.every((key) => noted.has(key))) return;
     const rows = yield* processTree.read;
     if (rows === null) yield* Effect.logWarning("resource-limits.process-reading-failed");
-    // All of what she started since the pause began is newer than it, and the table can't say whose a new process is.
+    // What she started since the pause began is newer than it, and the table can't say whose a new process is. A turn
+    // she steered also has older processes, which stay in: Stop now is the kill switch, and it would rather end what
+    // such a turn's finished shell left running than miss what every other turn's interrupted shell did.
     const hers = yield* Effect.filter(
       shells.filter(
         (shell) => shell.activeRunId !== null || (shell.pendingBackgroundTasks?.length ?? 0) > 0,
@@ -289,22 +293,21 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
     const orphans =
       after === null
         ? []
-        : [
-            ...new Map(
-              noted.readings
-                .flatMap((before) => orphanedProcesses(before, after, process.pid))
-                .map((row) => [`${row.pid}:${row.createdAt}`, row]),
-            ).values(),
-          ];
+        : withDescendants(
+            noted.readings.flatMap((before) => orphanedProcesses(before, after, process.pid)),
+            after,
+          );
     const results = yield* Effect.forEach(
       orphans,
-      (row) => processTree.end(row).pipe(Effect.map((ended) => ({ pid: row.pid, ended }))),
-      { concurrency: 4 },
+      (row) => processTree.end(row).pipe(Effect.map((outcome) => ({ pid: row.pid, outcome }))),
+      { concurrency: 8 },
     );
-    if (results.length > 0) {
+    if (results.some((result) => result.outcome !== "gone")) {
+      const pids = (outcome: string) =>
+        results.filter((result) => result.outcome === outcome).map((result) => result.pid);
       yield* Effect.logWarning("resource-limits.ended-orphans", {
-        ended: results.filter((result) => result.ended).map((result) => result.pid),
-        failed: results.filter((result) => !result.ended).map((result) => result.pid),
+        ended: pids("ended"),
+        failed: pids("failed"),
       });
     }
     const now = yield* Clock.currentTimeMillis;
@@ -378,8 +381,8 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
   });
 
   /**
-   * The threads whose turn has ended but which still have commands or subagents running in the background,
-   * with what's running in each. What she started since the pause began is hers to keep.
+   * The threads whose turn has ended but which still have commands or subagents running in the background.
+   * What she started since the pause began is hers to keep.
    */
   const workToStop = Effect.fn("ResourceLimitsGovernor.workToStop")(function* (
     shells: ReadonlyArray<OrchestrationV2ThreadShell>,
@@ -403,8 +406,7 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
           shell.pendingBackgroundTasks ?? [],
           delegatedThreadIds(subagents),
         );
-        if (work.length === 0 || (yield* hersSincePause(shell.id, pause))) return [];
-        return [{ shell, work: work.map((task) => task.taskId).toSorted() }];
+        return work.length > 0 && !(yield* hersSincePause(shell.id, pause)) ? [shell] : [];
       }),
       { concurrency: 8 },
     );
@@ -417,10 +419,7 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
    */
   const stopBackgroundWork = Effect.fn("ResourceLimitsGovernor.stopBackgroundWork")(function* (
     shells: ReadonlyArray<OrchestrationV2ThreadShell>,
-    found: ReadonlyArray<{
-      readonly shell: OrchestrationV2ThreadShell;
-      readonly work: ReadonlyArray<string>;
-    }>,
+    found: ReadonlyArray<OrchestrationV2ThreadShell>,
     pause: ResourceLimitsPause,
     now: number,
   ) {
@@ -431,7 +430,7 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
     });
     yield* Effect.forEach(
       found,
-      Effect.fnUntraced(function* ({ shell, work }) {
+      Effect.fnUntraced(function* (shell) {
         yield* endBackgroundTasks(shell.id);
         const stopped = yield* dispatch({
           type: "thread.stop",
@@ -447,11 +446,19 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
         const setAside =
           shell.settledOverride === "settled" ||
           (shell.snoozedUntil != null && (epoch(shell.snoozedUntil) ?? 0) > now);
-        if (!setAside) {
-          // Named for the work, so asking again while a provider still lists it queues no second note.
+        if (setAside) return;
+        // Asking again while a provider still lists the work queues no second note. One that's been read doesn't
+        // count, because this stop needs its own.
+        const records = yield* projections
+          .getThreadRecords(shell.id, ["messages", "runs"], { messageRoles: ["user"] })
+          .pipe(Effect.option);
+        if (
+          Option.isNone(records) ||
+          !stoppedWorkNoteQueued(records.value.messages, records.value.runs)
+        ) {
           yield* queueNote(
             shell.id,
-            `limits:stopped-work:${shell.id}:${work.join()}`,
+            `limits:stopped-work:${shell.id}:${pause.at}`,
             stoppedWorkNote(now),
           );
         }
@@ -504,7 +511,7 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
       const turns = yield* turnsToStop(shells, pause, now);
       const work = yield* workToStop(shells, pause, now);
       yield* noteProcesses(
-        [...turns.map((turn) => turn.runId), ...work.map(({ shell }) => shell.id)],
+        [...turns.map((turn) => turn.runId), ...work.map((shell) => shell.id)],
         shells,
         pause,
       );
