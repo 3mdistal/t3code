@@ -8,7 +8,9 @@ anyone changing the stack, and above all for the agent that resolves a sync conf
 
 Alice used to run stock T3 Code Nightly. The fork lets her run features upstream doesn't have yet, such as
 account pools and per-machine CPU and RAM limits, while staying on upstream's stable releases. She runs it on her
-Windows PC (TEENYLILPC) and her Mac Mini. Agents may install and test on the Mac Mini, never on her MacBook.
+Windows PC (TEENYLILPC), her MacBook and her Mac Mini. When she approves a landing, agents install the release on
+the PC and the MacBook, reaching the MacBook through T3's linked environments. Other agent work on the MacBook stays
+headless, and agents may install and test freely on the Mac Mini.
 
 ## Branches
 
