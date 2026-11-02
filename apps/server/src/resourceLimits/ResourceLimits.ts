@@ -3,6 +3,7 @@ import * as NodeOS from "node:os";
 import type {
   EffectiveResourceLimits,
   OrchestrationV2AppThread,
+  ResourceLimitsPause,
   ResourceLimitsState,
   ResourceLimitsStatus,
   ThreadId,
@@ -11,19 +12,27 @@ import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Path from "effect/Path";
 import * as Ref from "effect/Ref";
 
+import * as ServerConfig from "../config.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
+import { makeJsonFiles } from "./jsonFiles.ts";
 import {
   effectiveLimits,
   type HostReading,
   isAlicesMessage,
   latestUserMessage,
   launchAnyway,
+  manualPause,
+  type PauseOrder,
+  pausedReason,
   type Provenance,
   TIMING,
   waitingReason,
+  writtenDuringPause,
 } from "./policy.ts";
 
 /** The machine's RAM, which "use up to N%" is a share of. */
@@ -47,6 +56,8 @@ export interface LimitsSnapshot {
   readonly reading: HostReading | null;
   readonly cpuAverage: number | null;
   readonly offUntil: number | null;
+  /** Alice's switch that holds every agent. It outranks `offUntil` and doesn't depend on any reading. */
+  readonly pause: ResourceLimitsPause | null;
   readonly machine: string;
   /** Threads holding work for the limits, oldest first. */
   readonly waiting: ReadonlyArray<WaitingThread>;
@@ -67,12 +78,19 @@ export function liveState(snapshot: LimitsSnapshot, now: number): ResourceLimits
   return now - snapshot.reading.sampledAt > TIMING.staleReadingMs ? "ok" : snapshot.state;
 }
 
+/** What the machine reports: "paused" while Alice's switch holds work, even with memory to spare. */
+export const reportedState = (snapshot: LimitsSnapshot, now: number): ResourceLimitsState => {
+  const state = liveState(snapshot, now);
+  return state === "ok" && snapshot.pause !== null ? "paused" : state;
+};
+
 const UNLIMITED: LimitsSnapshot = {
   limits: null,
   state: "ok",
   reading: null,
   cpuAverage: null,
   offUntil: null,
+  pause: null,
   machine: "This machine",
   waiting: [],
 };
@@ -86,7 +104,17 @@ export class ResourceLimits extends Context.Reference<{
   readonly admit: (input: {
     readonly thread: Pick<OrchestrationV2AppThread, "id" | "lineage">;
     readonly message: Provenance;
+    /** When the message was written, in epoch ms; left out for one arriving now. */
+    readonly writtenAt?: number;
   }) => Effect.Effect<Admission>;
+  /** Sets or lifts Alice's switch. `supported` is false where the machine has no limits. */
+  readonly setPause: (order: PauseOrder) => Effect.Effect<{
+    readonly supported: boolean;
+    readonly saved: boolean;
+    readonly wasPaused: boolean;
+  }>;
+  /** Reads the switch again, since other processes can set it too. */
+  readonly refreshPause: Effect.Effect<ResourceLimitsPause | null>;
   readonly status: Effect.Effect<ResourceLimitsStatus | undefined>;
   /** The governor's readings and the waiting list, which only the governor prunes and releases. */
   readonly read: Effect.Effect<LimitsSnapshot>;
@@ -96,6 +124,8 @@ export class ResourceLimits extends Context.Reference<{
 }>("t3/resourceLimits/ResourceLimits", {
   defaultValue: () => ({
     admit: () => Effect.succeed(ADMITTED),
+    setPause: () => Effect.succeed({ supported: false, saved: false, wasPaused: false }),
+    refreshPause: Effect.succeed(null),
     status: Effect.undefined,
     read: Effect.succeed(UNLIMITED),
     update: () => Effect.succeed(UNLIMITED),
@@ -105,9 +135,17 @@ export class ResourceLimits extends Context.Reference<{
 const make = Effect.fn("makeResourceLimits")(function* () {
   const platform = yield* HostProcess.Platform;
   const projections = yield* ProjectionStore.ProjectionStoreV2;
+  const config = yield* ServerConfig.ServerConfig;
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const { readJson, writeJson } = yield* makeJsonFiles;
+  const pauseFile = path.join(config.stateDir, "resource-limits", "pause.json");
+  const readPause = readJson(pauseFile).pipe(Effect.map(manualPause));
+  // Read before the first dispatch, so a restart while paused doesn't start anything.
   const snapshot = yield* Ref.make<LimitsSnapshot>({
     ...UNLIMITED,
     limits: effectiveLimits({}, platform, yield* TotalMemoryBytes),
+    pause: yield* readPause,
   });
 
   // Memory gate's rule: Alice's "launch anyway" counts while it's the newest message that started
@@ -121,16 +159,26 @@ const make = Effect.fn("makeResourceLimits")(function* () {
   const admit = Effect.fn("ResourceLimits.admit")(function* (input: {
     readonly thread: Pick<OrchestrationV2AppThread, "id" | "lineage">;
     readonly message: Provenance;
+    readonly writtenAt?: number;
   }) {
-    if (isAlicesMessage(input.message)) return ADMITTED;
     const now = yield* Clock.currentTimeMillis;
     const current = yield* Ref.get(snapshot);
+    const { pause } = current;
+    if (pause === null) {
+      if (isAlicesMessage(input.message)) return ADMITTED;
+    } else if (writtenDuringPause(input.message, input.writtenAt ?? now, pause)) {
+      return ADMITTED;
+    }
     const state = liveState(current, now);
-    // While anything waits, new work queues behind it, so the governor picks what starts next.
-    if (current.limits === null || isOff(current, now)) return ADMITTED;
-    if (state === "ok" && current.waiting.length === 0) return ADMITTED;
-    const launcher = input.message.senderThreadId ?? input.thread.lineage.parentThreadId;
-    if (launcher != null && (yield* launchAnywayIn(launcher))) return ADMITTED;
+    if (current.limits === null) return ADMITTED;
+    // While every agent is paused, neither the off switch nor "launch anyway" lets work through.
+    if (pause === null) {
+      // While anything waits, new work queues behind it, so the governor picks what starts next.
+      if (isOff(current, now)) return ADMITTED;
+      if (state === "ok" && current.waiting.length === 0) return ADMITTED;
+      const launcher = input.message.senderThreadId ?? input.thread.lineage.parentThreadId;
+      if (launcher != null && (yield* launchAnywayIn(launcher))) return ADMITTED;
+    }
     const updated = yield* Ref.updateAndGet(snapshot, (latest) =>
       latest.waiting.some((entry) => entry.threadId === input.thread.id)
         ? latest
@@ -144,15 +192,41 @@ const make = Effect.fn("makeResourceLimits")(function* () {
     );
     return {
       admitted: false,
-      notice: waitingReason({
-        state,
-        reading: updated.reading,
-        limits: current.limits,
-        cpuAverage: updated.cpuAverage,
-        machine: updated.machine,
-        at: now,
-      }),
+      notice:
+        pause !== null
+          ? pausedReason(now)
+          : waitingReason({
+              state,
+              reading: updated.reading,
+              limits: current.limits,
+              cpuAverage: updated.cpuAverage,
+              machine: updated.machine,
+              at: now,
+            }),
     } satisfies Admission;
+  });
+
+  const refreshPause = readPause.pipe(
+    Effect.tap((pause) => Ref.update(snapshot, (latest) => ({ ...latest, pause }))),
+  );
+
+  const setPause = Effect.fn("ResourceLimits.setPause")(function* (order: PauseOrder) {
+    if ((yield* Ref.get(snapshot)).limits === null) {
+      return { supported: false, saved: false, wasPaused: false };
+    }
+    const saved = yield* readPause;
+    const wasPaused = saved !== null;
+    if (order === "resume") {
+      yield* fs.remove(pauseFile).pipe(Effect.ignore);
+      const left = yield* refreshPause;
+      return { supported: true, saved: left === null, wasPaused };
+    }
+    // Asking again keeps the start, so what Alice has typed since still counts as written during the pause.
+    const pause =
+      saved?.mode === order ? saved : { mode: order, at: yield* Clock.currentTimeMillis };
+    const written = yield* writeJson(pauseFile, { version: 1, ...pause });
+    if (written) yield* Ref.update(snapshot, (latest) => ({ ...latest, pause }));
+    return { supported: true, saved: written, wasPaused };
   });
 
   const status = Effect.gen(function* () {
@@ -163,8 +237,9 @@ const make = Effect.fn("makeResourceLimits")(function* () {
     const bytes = (value: number | null | undefined) =>
       value === null || value === undefined ? null : Math.max(0, Math.round(value));
     return {
-      state: liveState(current, now),
+      state: reportedState(current, now),
       offUntil: isOff(current, now) ? current.offUntil : null,
+      ...(current.pause === null ? {} : { pause: current.pause }),
       waitingThreadCount: current.waiting.length,
       sampledAt: reading?.sampledAt ?? null,
       availableBytes: bytes(reading?.availableBytes),
@@ -178,6 +253,8 @@ const make = Effect.fn("makeResourceLimits")(function* () {
 
   return {
     admit,
+    setPause,
+    refreshPause,
     status,
     read: Ref.get(snapshot),
     update: (change: (current: LimitsSnapshot) => LimitsSnapshot) =>
