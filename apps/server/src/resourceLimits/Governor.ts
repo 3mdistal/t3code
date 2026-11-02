@@ -89,15 +89,15 @@ interface Memory {
   >;
 }
 
-/** The processes read before Stop now acted, kept until what it orphaned has been looked for. */
+/** What Stop now read before it acted, kept until what it orphaned has been looked for. */
 interface NotedProcesses {
-  readonly rows: ReadonlyMap<number, ProcessRow>;
+  readonly readings: ReadonlyArray<ReadonlyArray<ProcessRow>>;
   readonly noted: ReadonlySet<string>;
   readonly checkAt: number;
   readonly until: number;
 }
 
-const NOTHING_NOTED: NotedProcesses = { rows: new Map(), noted: new Set(), checkAt: 0, until: 0 };
+const NOTHING_NOTED: NotedProcesses = { readings: [], noted: new Set(), checkAt: 0, until: 0 };
 
 interface Inspected {
   readonly entry: WaitingThread;
@@ -253,34 +253,63 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
    */
   const noteProcesses = Effect.fn("ResourceLimitsGovernor.noteProcesses")(function* (
     keys: ReadonlyArray<string>,
-    now: number,
+    shells: ReadonlyArray<OrchestrationV2ThreadShell>,
+    pause: ResourceLimitsPause,
   ) {
     if (platform !== "win32") return;
     const { noted } = yield* Ref.get(notedProcesses);
-    if (keys.every((key) => noted.has(key))) return;
+    // Asking for Stop now again acts on a thread again, so it reads again.
+    const fresh = keys.map((key) => `${pause.at}:${key}`);
+    if (fresh.every((key) => noted.has(key))) return;
     const rows = yield* processTree.read;
     if (rows === null) yield* Effect.logWarning("resource-limits.process-reading-failed");
+    // All of what she started since the pause began is newer than it, and the table can't say whose a new process is.
+    const hers = yield* Effect.filter(
+      shells.filter(
+        (shell) => shell.activeRunId !== null || (shell.pendingBackgroundTasks?.length ?? 0) > 0,
+      ),
+      (shell) => hersSincePause(shell.id, pause),
+      { concurrency: 8 },
+    );
+    const reading = hers.length > 0 ? rows?.filter((row) => row.createdAt < pause.at * 1000) : rows;
+    const now = yield* Clock.currentTimeMillis;
     yield* Ref.update(notedProcesses, (current) => ({
-      rows: new Map([...current.rows, ...(rows ?? []).map((row) => [row.pid, row] as const)]),
-      noted: new Set([...current.noted, ...keys]),
+      readings: reading == null ? current.readings : [...current.readings, reading],
+      noted: new Set([...current.noted, ...fresh]),
       checkAt: now + TIMING.orphanCheckMs,
       until: now + TIMING.orphanWatchMs,
     }));
   });
 
-  /** Ends what Stop now's interrupts left running: anything under this server whose parent died since. */
+  /** Ends what Stop now's interrupts left running. It has its own loop, because this can take seconds. */
   const endOrphans = Effect.gen(function* () {
     const noted = yield* Ref.get(notedProcesses);
-    const now = yield* Clock.currentTimeMillis;
-    if (noted.rows.size === 0 || now < noted.checkAt) return;
-    const after = yield* processTree.read;
+    if (noted.until === 0 || (yield* Clock.currentTimeMillis) < noted.checkAt) return;
+    const after = noted.readings.length > 0 ? yield* processTree.read : null;
     const orphans =
-      after === null ? [] : orphanedProcesses([...noted.rows.values()], after, process.pid);
-    yield* Effect.forEach(orphans, processTree.end, { concurrency: 8, discard: true });
-    if (orphans.length > 0) yield* Effect.logWarning("resource-limits.ended-orphans", { orphans });
-    yield* Ref.set(
-      notedProcesses,
-      now >= noted.until ? NOTHING_NOTED : { ...noted, checkAt: now + TIMING.orphanCheckMs },
+      after === null
+        ? []
+        : [
+            ...new Map(
+              noted.readings
+                .flatMap((before) => orphanedProcesses(before, after, process.pid))
+                .map((row) => [`${row.pid}:${row.createdAt}`, row]),
+            ).values(),
+          ];
+    const results = yield* Effect.forEach(
+      orphans,
+      (row) => processTree.end(row).pipe(Effect.map((ended) => ({ pid: row.pid, ended }))),
+      { concurrency: 4 },
+    );
+    if (results.length > 0) {
+      yield* Effect.logWarning("resource-limits.ended-orphans", {
+        ended: results.filter((result) => result.ended).map((result) => result.pid),
+        failed: results.filter((result) => !result.ended).map((result) => result.pid),
+      });
+    }
+    const now = yield* Clock.currentTimeMillis;
+    yield* Ref.update(notedProcesses, (current) =>
+      now >= current.until ? NOTHING_NOTED : { ...current, checkAt: now + TIMING.orphanCheckMs },
     );
   });
 
@@ -312,24 +341,23 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
     );
   });
 
-  /**
-   * Stop now: interrupts every running turn it can and queues the note it resumes with. A turn she started
-   * since the pause began is hers to keep.
-   */
-  const stopRunningTurns = Effect.fn("ResourceLimitsGovernor.stopRunningTurns")(function* (
+  /** The running turns Stop now interrupts. A turn she started since the pause began is hers to keep. */
+  const turnsToStop = (
     shells: ReadonlyArray<OrchestrationV2ThreadShell>,
     pause: ResourceLimitsPause,
     now: number,
-  ) {
-    const turns = yield* Effect.filter(
+  ) =>
+    Effect.filter(
       runningTurns(shells, now).filter(interruptible),
       ({ threadId }) => Effect.map(hersSincePause(threadId, pause), (hers) => !hers),
       { concurrency: 8 },
     );
-    yield* noteProcesses(
-      turns.map((turn) => turn.runId),
-      now,
-    );
+
+  /** Stop now: interrupts these turns and queues the note each resumes with. */
+  const stopRunningTurns = Effect.fn("ResourceLimitsGovernor.stopRunningTurns")(function* (
+    turns: ReadonlyArray<RunningTurn>,
+    now: number,
+  ) {
     yield* Effect.forEach(
       turns,
       Effect.fnUntraced(function* ({ threadId, runId }) {
@@ -350,37 +378,60 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
   });
 
   /**
-   * Stop now's other half: a thread whose turn has ended can still have commands or subagents running
-   * in the background. Ending them closes its session too, and the note brings the thread back on
-   * resume, unless Alice has set it aside or it's waiting on her.
+   * The threads whose turn has ended but which still have commands or subagents running in the background,
+   * with what's running in each. What she started since the pause began is hers to keep.
    */
-  const stopBackgroundWork = Effect.fn("ResourceLimitsGovernor.stopBackgroundWork")(function* (
+  const workToStop = Effect.fn("ResourceLimitsGovernor.workToStop")(function* (
     shells: ReadonlyArray<OrchestrationV2ThreadShell>,
     pause: ResourceLimitsPause,
     now: number,
   ) {
     const running = new Set(runningTurns(shells, now).map((turn) => turn.threadId));
-    // A thread waiting on Alice keeps its turn and her question, but nothing keeps running under it.
-    yield* Effect.forEach(shells.filter(waitsOnAlice), (shell) => endBackgroundTasks(shell.id), {
-      concurrency: 8,
-      discard: true,
-    });
     const candidates = shells.filter(
       (shell) =>
         !running.has(shell.id) &&
         !waitsOnAlice(shell) &&
         (shell.pendingBackgroundTasks?.length ?? 0) > 0,
     );
-    yield* Effect.forEach(
+    const found = yield* Effect.forEach(
       candidates,
       Effect.fnUntraced(function* (shell) {
         const { subagents } = yield* projections
           .getThreadRecords(shell.id, ["subagents"])
           .pipe(Effect.orElseSucceed(() => ({ subagents: [] })));
-        const delegated = delegatedThreadIds(subagents);
-        if (stoppableWork(shell.pendingBackgroundTasks ?? [], delegated).length === 0) return;
-        if (yield* hersSincePause(shell.id, pause)) return;
-        yield* noteProcesses([shell.id], now);
+        const work = stoppableWork(
+          shell.pendingBackgroundTasks ?? [],
+          delegatedThreadIds(subagents),
+        );
+        if (work.length === 0 || (yield* hersSincePause(shell.id, pause))) return [];
+        return [{ shell, work: work.map((task) => task.taskId).toSorted() }];
+      }),
+      { concurrency: 8 },
+    );
+    return found.flat();
+  });
+
+  /**
+   * Stop now's other half: ending a thread's background work closes its session too, and the note brings the
+   * thread back on resume, unless Alice has set it aside or it's waiting on her.
+   */
+  const stopBackgroundWork = Effect.fn("ResourceLimitsGovernor.stopBackgroundWork")(function* (
+    shells: ReadonlyArray<OrchestrationV2ThreadShell>,
+    found: ReadonlyArray<{
+      readonly shell: OrchestrationV2ThreadShell;
+      readonly work: ReadonlyArray<string>;
+    }>,
+    pause: ResourceLimitsPause,
+    now: number,
+  ) {
+    // A thread waiting on Alice keeps its turn and her question, but nothing keeps running under it.
+    yield* Effect.forEach(shells.filter(waitsOnAlice), (shell) => endBackgroundTasks(shell.id), {
+      concurrency: 8,
+      discard: true,
+    });
+    yield* Effect.forEach(
+      found,
+      Effect.fnUntraced(function* ({ shell, work }) {
         yield* endBackgroundTasks(shell.id);
         const stopped = yield* dispatch({
           type: "thread.stop",
@@ -397,9 +448,10 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
           shell.settledOverride === "settled" ||
           (shell.snoozedUntil != null && (epoch(shell.snoozedUntil) ?? 0) > now);
         if (!setAside) {
+          // Named for the work, so asking again while a provider still lists it queues no second note.
           yield* queueNote(
             shell.id,
-            `limits:stopped-work:${shell.id}:${pause.at}`,
+            `limits:stopped-work:${shell.id}:${work.join()}`,
             stoppedWorkNote(now),
           );
         }
@@ -445,13 +497,19 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
     if (pause?.mode !== before?.mode || pause?.at !== before?.at) {
       yield* Effect.logInfo("resource-limits.pause-changed", { pause });
     }
-    yield* endOrphans;
     if (pause?.mode !== "stop") return;
     const now = yield* Clock.currentTimeMillis;
     if (now - pause.at < TIMING.stopSweepMs) {
       const shells = yield* runtimeShells;
-      yield* stopRunningTurns(shells, pause, now);
-      yield* stopBackgroundWork(shells, pause, now);
+      const turns = yield* turnsToStop(shells, pause, now);
+      const work = yield* workToStop(shells, pause, now);
+      yield* noteProcesses(
+        [...turns.map((turn) => turn.runId), ...work.map(({ shell }) => shell.id)],
+        shells,
+        pause,
+      );
+      yield* stopRunningTurns(turns, now);
+      yield* stopBackgroundWork(shells, work, pause, now);
     }
   });
 
@@ -915,7 +973,7 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
     }),
   );
 
-  return { pass, restore, followSettings, followPause };
+  return { pass, restore, followSettings, followPause, endOrphans };
 });
 
 export const layer = Layer.effectDiscard(
@@ -928,6 +986,12 @@ export const layer = Layer.effectDiscard(
     yield* governor.followSettings.pipe(Effect.forkScoped);
     yield* governor.followPause.pipe(
       Effect.catchCause((cause) => Effect.logWarning("resource-limits.pause-failed", { cause })),
+      Effect.andThen(Effect.sleep(Duration.millis(TIMING.pauseCheckMs))),
+      Effect.forever,
+      Effect.forkScoped,
+    );
+    yield* governor.endOrphans.pipe(
+      Effect.catchCause((cause) => Effect.logWarning("resource-limits.orphans-failed", { cause })),
       Effect.andThen(Effect.sleep(Duration.millis(TIMING.pauseCheckMs))),
       Effect.forever,
       Effect.forkScoped,
