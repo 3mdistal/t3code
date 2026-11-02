@@ -35,6 +35,7 @@ import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import * as IpcChannels from "../ipc/channels.ts";
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
 import * as DesktopUpdatePolicy from "./DesktopUpdatePolicy.ts";
+import * as MacAdHocUpdate from "./MacAdHocUpdate.ts";
 import { normalizeDesktopUpdateReleaseNotes } from "./releaseNotes.ts";
 import { desktopUpdateChannelOf } from "@t3tools/shared/cliRelease";
 import { compareSemverVersions } from "@t3tools/shared/semver";
@@ -825,6 +826,7 @@ export const make = Effect.gen(function* () {
           yield* electronUpdater.quitAndInstall({
             isSilent: true,
             isForceRunAfter: true,
+            logDir: environment.logDir,
           });
           return { accepted: true, completed: false, failed: false };
         }).pipe(
@@ -1077,6 +1079,8 @@ export const make = Effect.gen(function* () {
             return;
           }
           yield* setState(reduceDesktopUpdateStateOnDownloadComplete(state, info.version));
+          // fork: an ad hoc-signed Mac build installs this zip itself (FORK.md).
+          MacAdHocUpdate.rememberDownloadedUpdate(raw);
           yield* logUpdaterInfo("update downloaded", { version: info.version });
         }),
       ),

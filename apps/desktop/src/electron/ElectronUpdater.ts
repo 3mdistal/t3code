@@ -4,7 +4,10 @@ import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 
+import * as Electron from "electron";
 import { autoUpdater } from "electron-updater";
+
+import * as MacAdHocUpdate from "../updates/MacAdHocUpdate.ts";
 
 type AutoUpdater = typeof autoUpdater;
 
@@ -72,6 +75,8 @@ export class ElectronUpdater extends Context.Service<
     readonly quitAndInstall: (options: {
       readonly isSilent: boolean;
       readonly isForceRunAfter: boolean;
+      /** fork: where an ad hoc-signed Mac build logs installing itself (FORK.md). */
+      readonly logDir?: string;
     }) => Effect.Effect<void, ElectronUpdaterQuitAndInstallError>;
     readonly on: <Args extends ReadonlyArray<unknown>>(
       eventName: string,
@@ -150,19 +155,36 @@ export const make = ElectronUpdater.of({
   quitAndInstall: Effect.fn("ElectronUpdater.quitAndInstall")(function ({
     isSilent,
     isForceRunAfter,
+    logDir,
   }) {
     return Effect.suspend(() => {
       const channel = autoUpdater.channel;
-      return Effect.try({
-        try: () => autoUpdater.quitAndInstall(isSilent, isForceRunAfter),
-        catch: (cause) =>
-          new ElectronUpdaterQuitAndInstallError({
-            channel,
-            isSilent,
-            isForceRunAfter,
-            cause,
-          }),
-      });
+      const toError = (cause: unknown) =>
+        new ElectronUpdaterQuitAndInstallError({
+          channel,
+          isSilent,
+          isForceRunAfter,
+          cause,
+        });
+      // fork: Squirrel.Mac refuses ad hoc-signed builds, so those install themselves (FORK.md).
+      return MacAdHocUpdate.installWithoutSquirrel({
+        relaunch: isForceRunAfter,
+        isPackaged: Electron.app.isPackaged,
+        executablePath: process.execPath,
+        pid: process.pid,
+        logDir: logDir ?? Electron.app.getPath("logs"),
+        quit: () => Electron.app.quit(),
+      }).pipe(
+        Effect.mapError(toError),
+        Effect.flatMap((installed) =>
+          installed
+            ? Effect.void
+            : Effect.try({
+                try: () => autoUpdater.quitAndInstall(isSilent, isForceRunAfter),
+                catch: toError,
+              }),
+        ),
+      );
     });
   }),
   on: Effect.fn("ElectronUpdater.on")(function (eventName, listener) {
