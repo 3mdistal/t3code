@@ -1,0 +1,192 @@
+name: Fork Mac update check
+
+# fork: installs an ad hoc-signed Mac build in /Applications and updates it to a
+# newer one through the app's own update button (see FORK.md). The fork's Mac
+# builds have no Developer ID, so Squirrel.Mac refuses them and the app swaps its
+# bundle itself. First the last release without that fix tries the same update
+# and must stay as it was, which shows the check can tell the two apart.
+
+on:
+  pull_request:
+    branches: [fork/main]
+    paths:
+      - apps/desktop/src/updates/**
+      - apps/desktop/src/electron/ElectronUpdater.ts
+      - scripts/fork/smoke-mac-update.ts
+      - .github/workflows/fork-mac-update-check.yml
+  workflow_dispatch:
+
+concurrency:
+  group: fork-mac-update-check-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # Both must be newer than CONTROL_RELEASE, on the same latest channel.
+  OLD_VERSION: 0.1.6-alice.901
+  NEW_VERSION: 0.1.6-alice.902
+  CONTROL_RELEASE: v0.1.6-alice.3
+
+jobs:
+  bundle:
+    name: Build JS bundle
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+
+      # .env.example holds the public T3 Connect identifiers that releases bake in.
+      - name: Load T3 Connect public config
+        shell: bash
+        run: |
+          set -euo pipefail
+          for key in T3CODE_CLERK_PUBLISHABLE_KEY T3CODE_CLERK_JWT_TEMPLATE T3CODE_CLERK_CLI_OAUTH_CLIENT_ID T3CODE_RELAY_URL; do
+            echo "${key}=$(sed -n "s/^${key}=//p" .env.example | head -n 1)" >> "$GITHUB_ENV"
+          done
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: false
+
+      - name: Install bundle dependencies
+        run: vp install --filter=t3... --filter=@t3tools/web... --filter=@t3tools/desktop... --filter=@t3tools/scripts...
+
+      - name: Align package versions
+        run: node scripts/update-release-package-versions.ts "$OLD_VERSION"
+
+      - uses: ./.github/actions/setup-apt-mirrors
+
+      - name: Install browser secret helper build libraries
+        run: sudo apt-get update && sudo apt-get install -y libsecret-1-dev pkg-config
+
+      - name: Build JS bundle
+        env:
+          T3CODE_TELEMETRY_CHANNEL: dev
+        run: vp run build:desktop
+
+      - name: Upload JS bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: js-bundle
+          path: |
+            apps/server/dist
+            apps/desktop/dist-electron
+          if-no-files-found: error
+          retention-days: 1
+
+  update:
+    name: Update on macOS
+    needs: bundle
+    runs-on: macos-26
+    timeout-minutes: 60
+    env:
+      APP: /Applications/T3 Code (Beta).app
+      T3CODE_DESKTOP_REUSE_RESOURCE_MONITOR: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+
+      - name: Load T3 Connect public config
+        shell: bash
+        run: |
+          set -euo pipefail
+          for key in T3CODE_CLERK_PUBLISHABLE_KEY T3CODE_CLERK_JWT_TEMPLATE T3CODE_CLERK_CLI_OAUTH_CLIENT_ID T3CODE_RELAY_URL; do
+            echo "${key}=$(sed -n "s/^${key}=//p" .env.example | head -n 1)" >> "$GITHUB_ENV"
+          done
+
+      - name: Setup dependencies
+        uses: ./.github/actions/setup-ci-deps
+        with:
+          install-args: --filter=@t3tools/desktop... --filter=t3... --filter=@t3tools/scripts...
+
+      - name: Cache resource monitor
+        id: resource_monitor_cache
+        uses: actions/cache@v6
+        with:
+          path: native/resource-monitor/target/aarch64-apple-darwin/release/t3-resource-monitor
+          key: resource-monitor-aarch64-apple-darwin-${{ hashFiles('native/resource-monitor/Cargo.lock', 'native/resource-monitor/Cargo.toml', 'native/resource-monitor/src/**') }}
+
+      - name: Setup Rust
+        if: steps.resource_monitor_cache.outputs.cache-hit != 'true'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Build resource monitor
+        if: steps.resource_monitor_cache.outputs.cache-hit != 'true'
+        run: cargo build --locked --release --manifest-path native/resource-monitor/Cargo.toml --target aarch64-apple-darwin
+
+      - name: Download JS bundle
+        uses: actions/download-artifact@v8
+        with:
+          name: js-bundle
+          path: apps
+
+      # One bundle, packaged as two versions: the installed one and its update.
+      - name: Package both versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          for build in old:"$OLD_VERSION" new:"$NEW_VERSION"; do
+            node scripts/update-release-package-versions.ts "${build#*:}"
+            vp run dist:desktop:artifact --platform mac --target dmg --arch arm64 \
+              --build-version "${build#*:}" --skip-build --verbose
+            mv release "$RUNNER_TEMP/release-${build%%:*}"
+          done
+          ls -l "$RUNNER_TEMP/release-new"
+
+      - name: Download the control release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download "$CONTROL_RELEASE" --repo "$GITHUB_REPOSITORY" --pattern '*-arm64.dmg' --dir "$RUNNER_TEMP/control"
+
+      - name: Control, the release without the fix stays as it was
+        shell: bash
+        run: |
+          set -euo pipefail
+          mount="$RUNNER_TEMP/dmg"
+          hdiutil attach -nobrowse -readonly -mountpoint "$mount" "$(ls "$RUNNER_TEMP"/control/*.dmg)"
+          rm -rf "$APP"
+          ditto "$mount/$(basename "$APP")" "$APP"
+          hdiutil detach "$mount" -force
+          node scripts/fork/smoke-mac-update.ts --app "$APP" --feed "$RUNNER_TEMP/release-new" \
+            --expect-version "$NEW_VERSION" --expect-unchanged --artifacts-dir "$RUNNER_TEMP/check/control"
+
+      - name: Update the patched build through the app
+        shell: bash
+        run: |
+          set -euo pipefail
+          mount="$RUNNER_TEMP/dmg"
+          hdiutil attach -nobrowse -readonly -mountpoint "$mount" "$(ls "$RUNNER_TEMP"/release-old/*.dmg)"
+          rm -rf "$APP"
+          ditto "$mount/$(basename "$APP")" "$APP"
+          hdiutil detach "$mount" -force
+          # The fix only takes over for code Squirrel.Mac can't update.
+          codesign -dv "$APP" 2>&1 | grep -E '^(Signature|TeamIdentifier)='
+          node scripts/fork/smoke-mac-update.ts --app "$APP" --feed "$RUNNER_TEMP/release-new" \
+            --expect-version "$NEW_VERSION" --artifacts-dir "$RUNNER_TEMP/check/update"
+
+      - name: Upload check output
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: mac-update-check
+          path: ${{ runner.temp }}/check
+          if-no-files-found: ignore
