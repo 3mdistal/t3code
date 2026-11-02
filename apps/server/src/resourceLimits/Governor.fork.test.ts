@@ -90,7 +90,7 @@ const layerTest = ThreadManagementService.layer.pipe(
 /** A process table that never changes, and ends nothing. */
 const quietProcessTree: ProcessTree["Service"] = {
   read: Effect.succeed([]),
-  end: () => Effect.succeed(true),
+  end: () => Effect.succeed("ended"),
 };
 
 /** A governor whose idle-session closing is recorded, with the state admission saw at the time. */
@@ -945,7 +945,7 @@ const fakeProcessTree = Effect.gen(function* () {
   const ended = yield* Ref.make<ReadonlyArray<number>>([]);
   const tree: ProcessTree["Service"] = {
     read: Ref.update(reads, (count) => count + 1).pipe(Effect.andThen(Ref.get(table))),
-    end: ({ pid }) => Ref.update(ended, (all) => [...all, pid]).pipe(Effect.as(true)),
+    end: ({ pid }) => Ref.update(ended, (all) => [...all, pid]).pipe(Effect.as("ended" as const)),
   };
   return { table, reads, ended, tree };
 });
@@ -974,6 +974,31 @@ it.effect("P3: Stop now ends what an interrupted command left running, and nothi
     yield* TestClock.adjust(TIMING.orphanCheckMs);
     yield* governor.endOrphans;
     assert.deepEqual(yield* Ref.get(ended), [100_003]);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("P3: Stop now ends what's under an orphan, and not what only names its reused ID", () =>
+  Effect.gen(function* () {
+    const sessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
+    const { table, ended, tree } = yield* fakeProcessTree;
+    const governor = yield* makeGovernorWith(sessions, tree);
+    const threadId = ThreadId.make("thread:p3:descendants");
+    yield* createThread(threadId);
+    yield* send(threadId, "agent work", agent);
+    yield* TestClock.adjust("1 second");
+    yield* writePause("stop");
+    yield* governor.followPause;
+
+    const unrelated = { pid: 90_000, parentPid: 100_003, createdAt: 90_000, name: "explorer.exe" };
+    yield* Ref.set(table, [
+      ...beforeInterrupt.filter((process) => process.pid !== 100_002),
+      unrelated,
+      row(100_004, 100_003),
+      row(100_005, 100_004),
+    ]);
+    yield* TestClock.adjust(TIMING.orphanCheckMs);
+    yield* governor.endOrphans;
+    assert.deepEqual(yield* Ref.get(ended), [100_003, 100_004, 100_005]);
   }).pipe(Effect.provide(layerTest)),
 );
 
@@ -1687,6 +1712,45 @@ it.effect("P7: asking again while a provider still lists the work tries again, w
       messages.filter((message) => message.id.startsWith("limits:stopped-work:")).length,
       1,
     );
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("P7: a note that's been read doesn't stand in for the next stop's", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const stops = yield* recordingStops;
+    const governor = yield* makeGovernorWith(stops.sessions);
+    const threadId = ThreadId.make("thread:p7:read");
+    yield* createThread(threadId);
+    yield* send(threadId, "work", agent);
+    const { runs: started } = yield* orchestrator.getThreadProjection(threadId);
+    yield* orchestrator.dispatch({
+      type: "run.interrupt",
+      commandId: CommandId.make("settle:p7:read"),
+      threadId,
+      runId: started[0]!.id,
+    });
+    yield* withBackgroundTasks(threadId, [{ taskId: "build", kind: "command" }]);
+    yield* TestClock.adjust("1 second");
+    yield* writePause("stop");
+    yield* governor.followPause;
+    assert.deepEqual(yield* runs(threadId), ["interrupted", "queued:held"]);
+
+    // Resume starts the note's run, and it finishes.
+    yield* removePause;
+    yield* governor.followPause;
+    yield* orchestrator.dispatch({
+      type: "queue.resume",
+      commandId: CommandId.make("resume:p7:read"),
+      threadId,
+    });
+    yield* endRun(threadId);
+    assert.deepEqual(yield* runs(threadId), ["interrupted", "interrupted"]);
+
+    yield* TestClock.adjust("1 second");
+    yield* writePause("stop");
+    yield* governor.followPause;
+    assert.deepEqual(yield* runs(threadId), ["interrupted", "interrupted", "queued:held"]);
   }).pipe(Effect.provide(layerTest)),
 );
 

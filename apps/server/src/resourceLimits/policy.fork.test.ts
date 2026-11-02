@@ -5,6 +5,8 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   effectiveLimits,
   orphanedProcesses,
+  stoppedWorkNoteQueued,
+  withDescendants,
   GiB,
   hasPhrase,
   heldLaunchesNote,
@@ -219,6 +221,48 @@ describe("isAlicesMessage", () => {
     expect(isAlicesMessage({ ...typed, senderThreadId: ThreadId.make("thread:other") })).toBe(
       false,
     );
+  });
+});
+
+describe("withDescendants", () => {
+  const row = (pid: number, parentPid: number, createdAt: number) => ({
+    pid,
+    parentPid,
+    createdAt,
+    name: "a.exe",
+  });
+  const pids = (rows: ReadonlyArray<{ readonly pid: number }>) => rows.map((found) => found.pid);
+
+  it("finds everything under a process, it first", () => {
+    const root = row(300, 1, 50);
+    const table = [row(1, 0, 1), row(7, 8, 70), root, row(8, 300, 60), row(9, 2, 90)];
+    expect(pids(withDescendants([root], table))).toEqual([300, 8, 7]);
+  });
+
+  it("doesn't follow a process older than the parent it names, or what's under that", () => {
+    // 200 outlived the parent that first held 300, and a Codex command got the ID later.
+    const root = row(300, 1, 50);
+    const table = [root, row(200, 300, 40), row(201, 200, 60), row(301, 300, 50)];
+    expect(pids(withDescendants([root], table))).toEqual([300, 301]);
+  });
+
+  it("names a process once, and survives a loop", () => {
+    const [first, second] = [row(10, 11, 5), row(11, 10, 5)];
+    expect(pids(withDescendants([first, second], [first, second]))).toEqual([10, 11]);
+  });
+});
+
+describe("stoppedWorkNoteQueued", () => {
+  const note = { id: "limits:stopped-work:thread:1", runId: "note-run" };
+  it("counts a note only while its run waits in the queue", () => {
+    const run = (status: string) => [{ id: "note-run", status }];
+    expect(stoppedWorkNoteQueued([note], run("queued"))).toBe(true);
+    expect(stoppedWorkNoteQueued([note], run("completed"))).toBe(false);
+    expect(stoppedWorkNoteQueued([note], run("cancelled"))).toBe(false);
+    expect(stoppedWorkNoteQueued([{ ...note, id: "limits:stopped:run:1" }], run("queued"))).toBe(
+      false,
+    );
+    expect(stoppedWorkNoteQueued([{ ...note, runId: null }], run("queued"))).toBe(false);
   });
 });
 

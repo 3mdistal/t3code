@@ -1,5 +1,4 @@
-// fork: limits. Reads the machine's process table and ends a process with what's under it, for Stop now on Windows;
-// see FORK.md.
+// fork: limits. Reads the machine's process table and ends one process, for Stop now on Windows; see FORK.md.
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -17,9 +16,11 @@ const MAX_READ_BYTES = 1024 * 1024;
 const END_TIMEOUT = "5 seconds";
 
 // Windows gives a process's id to nothing new while a handle to it is open, so holding one keeps the id this process's
-// through the check and the kill. Exit 3 means the id already belongs to something else.
+// through the check, and the kill goes through that handle. Not taskkill's /T: it follows parent ids with no check of
+// start times, and a process still names its long-dead parent's id, which this process may now hold.
+// Exit 3 means the process is gone, or the id already belongs to something else.
 const endCommand = ({ pid, createdAt }: ProcessRow) =>
-  `$ErrorActionPreference = 'Stop'; $held = Get-Process -Id ${pid}; $null = $held.Handle; $row = Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}'; if (${microseconds("$row")} -ne ${createdAt}) { exit 3 }; & (Join-Path $env:SystemRoot 'System32\\taskkill.exe') /PID ${pid} /T /F | Out-Null; exit $LASTEXITCODE`;
+  `$ErrorActionPreference = 'Stop'; $held = Get-Process -Id ${pid} -ErrorAction SilentlyContinue; if (-not $held) { exit 3 }; $null = $held.Handle; $row = Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}'; if (-not $row -or ${microseconds("$row")} -ne ${createdAt}) { exit 3 }; try { $held.Kill() } catch { if ($held.HasExited) { exit 3 }; throw }; exit 0`;
 
 export const parseProcessRows = (stdout: string): ReadonlyArray<ProcessRow> =>
   stdout.split(/\r?\n/g).flatMap((line) => {
@@ -43,8 +44,8 @@ export class ProcessTree extends Context.Service<
   {
     /** The machine's processes, or null when they couldn't all be read in time. */
     readonly read: Effect.Effect<ReadonlyArray<ProcessRow> | null>;
-    /** Ends a process and what's under it, if it's still that process. Whether it did. */
-    readonly end: (row: ProcessRow) => Effect.Effect<boolean>;
+    /** Ends this one process, if it's still that process. */
+    readonly end: (row: ProcessRow) => Effect.Effect<"ended" | "gone" | "failed">;
   }
 >()("t3/resourceLimits/ProcessTree") {}
 
@@ -81,8 +82,16 @@ export const layer = Layer.effect(
             timeoutBehavior: "timedOutResult",
           })
           .pipe(
-            Effect.map((result) => result.code === 0 && !result.timedOut),
-            Effect.orElseSucceed(() => false),
+            Effect.map((result) =>
+              result.timedOut
+                ? ("failed" as const)
+                : result.code === 0
+                  ? ("ended" as const)
+                  : result.code === 3
+                    ? ("gone" as const)
+                    : ("failed" as const),
+            ),
+            Effect.orElseSucceed(() => "failed" as const),
           );
       }),
     });
