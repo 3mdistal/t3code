@@ -24,18 +24,22 @@ const amountLeft = (limits: EffectiveResourceLimits, leftGiB: number, resolve: M
     : resolve(msg("{amount} left", { amount: gib(leftGiB) }));
 
 export function limitsStateLabel(
-  status: Pick<ResourceLimitsStatus, "state" | "offUntil" | "waitingThreadCount">,
+  status: Pick<ResourceLimitsStatus, "state" | "offUntil" | "pause" | "waitingThreadCount">,
   formatUntil: (epochMs: number) => string,
   resolve: MessageResolver = m,
 ): string {
   const state =
-    status.offUntil !== null
-      ? `Off until ${formatUntil(status.offUntil)}`
-      : status.state === "ok"
-        ? "Within limits"
-        : status.state === "paused"
-          ? "Paused"
-          : "Critically low on memory";
+    status.pause !== undefined
+      ? status.pause.mode === "stop"
+        ? resolve(msg("All agents stopped"))
+        : resolve(msg("All agents paused"))
+      : status.offUntil !== null
+        ? resolve(msg("Off until {time}", { time: formatUntil(status.offUntil) }))
+        : status.state === "ok"
+          ? resolve(msg("Within limits"))
+          : status.state === "paused"
+            ? resolve(msg("Paused"))
+            : resolve(msg("Critically low on memory"));
   const waiting = status.waitingThreadCount;
   return waiting === 0
     ? state

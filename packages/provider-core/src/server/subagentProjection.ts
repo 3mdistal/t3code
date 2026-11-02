@@ -391,11 +391,13 @@ export function subagentHoldsCompletion(
         task.completionDelivery?.state === "claimed"))
   );
 }
+// fork: limits, see FORK.md. The ids the governor gives the notes interrupted threads resume with.
+const LIMITS_RESUME_NOTE = /^limits:(stopped|stopped-work|interrupted):/;
 
 export function delegatedTaskProgress(projection: {
   readonly runs: OrchestrationV2ThreadProjection["runs"];
   readonly messages: ReadonlyArray<
-    Pick<OrchestrationV2ConversationMessage, "runId" | "notification" | "createdBy">
+    Pick<OrchestrationV2ConversationMessage, "id" | "runId" | "notification" | "createdBy">
   >;
   readonly subagents: ReadonlyArray<
     Pick<OrchestrationV2ThreadProjection["subagents"][number], "status" | "completionDelivery">
@@ -411,7 +413,16 @@ export function delegatedTaskProgress(projection: {
     (run) => !monitorRuns.has(run.id) && run.status !== "rolled_back",
   );
   const held = (run: OrchestrationV2Run) => run.status === "queued" && run.queueHeld === true;
-  const active = workRuns.some((run) => !terminal(run.status) && !held(run));
+  // fork: limits, see FORK.md. A child T3 interrupted to hold is still working: it comes back with
+  // its note, and its parent waits for the real result.
+  const resuming = new Set(
+    projection.messages
+      .filter((message) => LIMITS_RESUME_NOTE.test(message.id))
+      .map((message) => message.runId),
+  );
+  const active = workRuns.some(
+    (run) => !terminal(run.status) && (!held(run) || resuming.has(run.id)),
+  );
   // Held wakes wait on nobody, but a held message the user wrote is the child's next work.
   const userRunIds = new Set(
     projection.messages.flatMap((message) =>

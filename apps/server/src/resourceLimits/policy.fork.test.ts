@@ -10,16 +10,24 @@ import {
   idleSessionsToClose,
   type HostReading,
   isAlicesMessage,
+  interruptible,
   latestUserMessage,
   launchAnyway,
+  lostWake,
+  lostWakeNote,
+  manualPause,
   newestInterruptible,
   nextState,
   offUntil,
+  pauseOrder,
+  pauseOrderNotice,
   priorityRanks,
   releaseDue,
   releaseOrder,
   SESSION_GIB,
+  stoppableWork,
   TIMING,
+  writtenDuringPause,
 } from "./policy.ts";
 
 const pc = effectiveLimits({}, "win32", 128 * GiB)!;
@@ -316,7 +324,187 @@ describe("offUntil", () => {
   });
 });
 
+describe("interruptible", () => {
+  const turn = { threadId: ThreadId.make("t"), runId: RunId.make("r"), startedAt: 0 };
+
+  it("leaves turns waiting on Alice, and turns already stopping, alone", () => {
+    expect(interruptible({ ...turn, waitingOnUser: false, stopRequested: false })).toBe(true);
+    expect(interruptible({ ...turn, waitingOnUser: true, stopRequested: false })).toBe(false);
+    expect(interruptible({ ...turn, waitingOnUser: false, stopRequested: true })).toBe(false);
+  });
+});
+
+describe("stoppableWork", () => {
+  it("keeps what's really running", () => {
+    const tasks = [
+      { taskId: "a", kind: "command" },
+      { taskId: "b", kind: "monitor" },
+      { taskId: "c", kind: "background_task" },
+      { taskId: "d", kind: "subagent" },
+      { taskId: "e", kind: "subagent", childThreadId: "native-child" },
+    ];
+    expect(stoppableWork(tasks, new Set())).toEqual(tasks);
+  });
+
+  it("leaves delegated tasks and pull request watches alone", () => {
+    const delegated = { taskId: "a", kind: "subagent", childThreadId: "child" };
+    const watch = { taskId: "pull-request-watch:github.com/a/b#1", kind: "monitor" };
+    expect(stoppableWork([delegated, watch], new Set(["child"]))).toEqual([]);
+  });
+});
+
+describe("lostWake", () => {
+  const wake = {
+    id: MessageId.make("wake"),
+    text: "Background command finished",
+    createdBy: "agent",
+    creationSource: "provider",
+    notification: { source: { kind: "command" }, outcome: "updated", summary: "s" },
+  } as const;
+  const run = (ordinal: number, status: string, userMessageId: string) => ({
+    ordinal,
+    status,
+    userMessageId,
+  });
+
+  it("finds the wake behind the thread's cancelled latest run", () => {
+    expect(lostWake([wake], [run(1, "completed", "x"), run(2, "cancelled", "wake")])).toBe(wake);
+  });
+
+  it("needs the latest run to be the cancelled one", () => {
+    expect(
+      lostWake([wake], [run(1, "cancelled", "wake"), run(2, "completed", "x")]),
+    ).toBeUndefined();
+    expect(lostWake([wake], [run(1, "queued", "wake")])).toBeUndefined();
+    expect(lostWake([wake], [])).toBeUndefined();
+  });
+
+  it("only counts a provider's own wake", () => {
+    const runs = [run(1, "cancelled", "wake")];
+    expect(lostWake([{ ...wake, createdBy: "user" }], runs)).toBeUndefined();
+    expect(lostWake([{ ...wake, creationSource: "server" }], runs)).toBeUndefined();
+    expect(lostWake([{ ...wake, notification: undefined }], runs)).toBeUndefined();
+  });
+});
+
+describe("lostWakeNote", () => {
+  it("carries what the wake said, bounded", () => {
+    expect(lostWakeNote("done", 0).text).toContain("It said: done");
+    expect(lostWakeNote("x".repeat(5000), 0).text.length).toBeLessThan(800);
+  });
+});
+
+describe("manualPause", () => {
+  it("reads the switch and keeps only what it knows", () => {
+    expect(manualPause({ version: 1, mode: "finish", at: 5, by: "board" })).toEqual({
+      mode: "finish",
+      at: 5,
+    });
+    expect(manualPause({ version: 1, mode: "stop", at: 0 })).toEqual({ mode: "stop", at: 0 });
+  });
+
+  it("has no expiry: an old switch still holds", () => {
+    expect(manualPause({ version: 1, mode: "finish", at: 1 })?.at).toBe(1);
+  });
+
+  it.each([
+    null,
+    undefined,
+    "pause",
+    [],
+    {},
+    { version: 2, mode: "finish", at: 5 },
+    { version: 1, mode: "resume", at: 5 },
+    { version: 1, mode: "finish" },
+    { version: 1, mode: "finish", at: "5" },
+    { version: 1, mode: "finish", at: -1 },
+    { version: 1, mode: "finish", at: 1.5 },
+    { version: 1, mode: "finish", at: Number.NaN },
+  ])("treats %j as no pause", (file) => {
+    expect(manualPause(file)).toBeNull();
+  });
+});
+
+describe("pauseOrder", () => {
+  const alice = { createdBy: "user", creationSource: "web", attachments: [] } as const;
+
+  it.each([
+    ["pause all", "finish"],
+    ["stop all", "stop"],
+    ["resume all", "resume"],
+    ["  Pause   ALL. ", "finish"],
+    ["STOP ALL!", "stop"],
+    ["resume\nall", "resume"],
+  ] as const)("reads %j", (text, order) => {
+    expect(pauseOrder({ ...alice, text })).toBe(order);
+    expect(pauseOrder({ ...alice, creationSource: "mobile", text })).toBe(order);
+  });
+
+  it.each(["pause", "stop", "stop now", "please pause all", "pause all?", "pause all agents", ""])(
+    "leaves %j as an ordinary message",
+    (text) => {
+      expect(pauseOrder({ ...alice, text })).toBeNull();
+    },
+  );
+
+  it("doesn't read inherited names as orders", () => {
+    expect(pauseOrder({ ...alice, text: "constructor" })).toBeNull();
+    expect(pauseOrder({ ...alice, text: "__proto__" })).toBeNull();
+  });
+
+  it("counts only what Alice typed herself, with nothing attached", () => {
+    const text = "stop all";
+    expect(pauseOrder({ ...alice, createdBy: "agent", text })).toBeNull();
+    expect(pauseOrder({ ...alice, creationSource: "mcp", text })).toBeNull();
+    expect(pauseOrder({ ...alice, senderThreadId: ThreadId.make("t"), text })).toBeNull();
+    expect(pauseOrder({ ...alice, scheduledTaskId: ScheduledTaskId.make("s"), text })).toBeNull();
+    expect(pauseOrder({ ...alice, attachments: [{}], text })).toBeNull();
+  });
+});
+
+describe("writtenDuringPause", () => {
+  const pause = { mode: "finish", at: 100 } as const;
+  const alice = { createdBy: "user", creationSource: "web" } as const;
+
+  it("counts her messages from the moment the pause began", () => {
+    expect(writtenDuringPause(alice, 99, pause)).toBe(false);
+    expect(writtenDuringPause(alice, 100, pause)).toBe(true);
+  });
+
+  it("never counts an agent's", () => {
+    expect(writtenDuringPause({ createdBy: "agent", creationSource: "mcp" }, 200, pause)).toBe(
+      false,
+    );
+  });
+});
+
+describe("pauseOrderNotice", () => {
+  const input = { saved: true, wasPaused: false, at: 0 };
+
+  it("says what each order did and how to undo it", () => {
+    expect(pauseOrderNotice("finish", input)).toContain("resume all");
+    expect(pauseOrderNotice("finish", input)).toContain("Running turns finish");
+    expect(pauseOrderNotice("stop", input)).toContain("Running turns are being interrupted");
+    expect(pauseOrderNotice("resume", { ...input, wasPaused: true })).toContain(
+      "one thread at a time",
+    );
+    expect(pauseOrderNotice("resume", input)).toBe("Nothing was paused.");
+  });
+
+  it("owns up when the switch couldn't be saved", () => {
+    expect(pauseOrderNotice("stop", { ...input, saved: false })).toContain("stop all");
+    expect(pauseOrderNotice("stop", { ...input, saved: false })).toContain("couldn't save");
+  });
+});
+
 describe("heldLaunchesNote", () => {
+  it("names the pause when that's what held the launch", () => {
+    expect(heldLaunchesNote(["a child"], 0).text).toContain("The memory limits held this launch");
+    const paused = heldLaunchesNote(["a child"], 0, true);
+    expect(paused.summary).toBe("The pause on all agents held a launch");
+    expect(paused.text).toContain("The pause on all agents held this launch");
+  });
+
   it("bounds what a hook record can put in the prompt", () => {
     const note = heldLaunchesNote(
       Array.from({ length: 8 }, (_, index) => `task ${index} ${"x".repeat(500)}`),
