@@ -349,10 +349,46 @@ Upstream's passkey entitlements need a provisioning profile for upstream's App I
 - Tests: `scripts/fork/versionScheme.test.ts` holds the plist to upstream's rendered entitlements and checks the
   ad hoc identity.
 
+### Ad hoc-signed Macs install their own updates (`fork:`)
+
+electron-updater hands a Mac update to Squirrel.Mac, which only installs a build that meets the running app's
+designated requirement. An ad hoc signature's requirement is that one build's code hash, so Squirrel.Mac refuses
+every new build, and the sidebar's "restart and install" did nothing. On a bundle signed ad hoc, or not at all, the
+app now installs the update itself:
+
+1. It unpacks the zip electron-updater already downloaded and checked against `latest-mac.yml` into a hidden folder
+   beside the installed app, so the final move stays on one volume. The folder must hold one app, with the
+   installed app's bundle ID, the version that was downloaded, and a valid signature.
+2. It starts a detached script and quits. The script waits for the app to exit, moves the installed app into that
+   folder, moves the new one into its place, removes the folder, and reopens the app. If the new app can't move
+   in, it puts the old one back. If the app hasn't quit after two minutes, it leaves everything as it was. It logs
+   to `mac-update-install.log` in the app's log folder.
+3. If unpacking or a check fails, nothing quits, and upstream's recovery reports the failed install as before.
+
+A build with a Developer ID signature still goes through Squirrel.Mac, as do Windows and Linux. The app downloads
+the zip itself, so nothing quarantines the new build, and the `xattr` step is only for the first install from a
+`.dmg`. A Mac on a release older than this patch updates by hand once. Drop this patch when the fork's Mac builds
+are signed with a Developer ID.
+
+- `apps/desktop/src/updates/MacAdHocUpdate.ts` (fork only): the signature check, the staging and its checks, and
+  the install script.
+- `apps/desktop/src/electron/ElectronUpdater.ts`: `quitAndInstall` tries it before Squirrel.Mac, and takes the app's
+  log folder.
+- `apps/desktop/src/updates/DesktopUpdates.ts`: keeps the downloaded zip once the update is offerable, and passes
+  the log folder.
+- `.github/workflows/fork-mac-update-check.yml` and `scripts/fork/smoke-mac-update.ts`: on pull requests that touch
+  the updater, a GitHub macOS runner packages one bundle as two versions, installs the older one in
+  `/Applications`, and updates it to the newer one through the app's own update calls, from a local feed. The new
+  build must be in place, signed, and running, with no staging folder left. First the last release without this
+  patch tries the same update and must stay as it was.
+- Tests: `apps/desktop/src/updates/MacAdHocUpdate.fork.test.ts` covers the signature check and the bundle path, and
+  runs the install script against temporary folders: a normal swap, an app that doesn't quit, and a new app that
+  can't move in.
+
 ### Fork CI, release and sync (`fork:`)
 
-- Only the fork's own workflows run here: `fork-ci.yml`, `fork-release.yml`, `fork-windows-tests.yml`, and
-  upstream's `release-desktop.yml`, which `fork-release.yml` calls. Every other workflow is upstream's, with its
+- Only the fork's own workflows run here: `fork-ci.yml`, `fork-release.yml`, `fork-windows-tests.yml`,
+  `fork-mac-update-check.yml`, and upstream's `release-desktop.yml`, which `fork-release.yml` calls. Every other workflow is upstream's, with its
   `on:` triggers commented out and `workflow_call`, which nothing calls, in their place. This is deliberate:
   upstream's release, deploy and bot workflows would publish, deploy or label here, and GitHub can't disable a
   workflow before it first runs. The files stay, rather than being deleted, because upstream's tests and knip read
@@ -526,10 +562,10 @@ never downloads or installs an update on its own. Headless servers update with `
 - **Windows** builds are unsigned. SmartScreen warns once on a fresh install (More info, then Run anyway).
   Updates aren't signature-checked, since an unsigned build carries no publisher name.
 - **macOS** builds are signed and notarized when the repository has the secrets `CSC_LINK`, `CSC_KEY_PASSWORD`,
-  `APPLE_API_KEY`, `APPLE_API_KEY_ID` and `APPLE_API_ISSUER`. Without them, they're signed ad hoc: clear the
-  quarantine flag once with `xattr -dr com.apple.quarantine "/Applications/T3 Code (Beta).app"`. macOS only
-  updates an app in place when every version carries the same real signature, so a Mac without signed builds
-  updates by hand.
+  `APPLE_API_KEY`, `APPLE_API_KEY_ID` and `APPLE_API_ISSUER`. Without them, they're signed ad hoc: after the first
+  install from a `.dmg`, clear the quarantine flag once with
+  `xattr -dr com.apple.quarantine "/Applications/T3 Code (Beta).app"`. Squirrel.Mac refuses ad hoc-signed updates,
+  so those builds install their own (see "Ad hoc-signed Macs install their own updates").
 
 ## Syncing with upstream
 

@@ -11,6 +11,7 @@ import * as NodePath from "node:path";
 /** The workflows that run on the fork. Every other workflow file is upstream's, with its triggers commented out. */
 export const RUNNING_WORKFLOWS: ReadonlySet<string> = new Set([
   "fork-ci.yml",
+  "fork-mac-update-check.yml",
   "fork-release.yml",
   "fork-windows-tests.yml",
   // Upstream's packaging, which fork-release.yml calls.
