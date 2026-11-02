@@ -313,17 +313,23 @@ jobs:
         run: |
           set -euo pipefail
           if [[ "$MAC_RESULT" == success ]]; then
-            mac_note='- **macOS (Apple silicon):** open the `.dmg` and drag the app to Applications. If macOS says the app is damaged, run `xattr -dr com.apple.quarantine "/Applications/T3 Code (Beta).app"`.'
+            mac_note='- **macOS (Apple silicon):** open the `.dmg` and drag the app to Applications. If macOS says the app is damaged, run `xattr -dr com.apple.quarantine "/Applications/T3 Code (Beta).app"`. After that, the app installs its own updates.'
           else
             mac_note='- **macOS:** this release has no macOS build, because its build did not finish. The next release that builds it includes macOS.'
             echo "::warning::Publishing without macOS: its build ended as ${MAC_RESULT}."
           fi
+          # Install steps come first, under their own heading, so the desktop update popover, which
+          # shows a release's last few list items, shows the newest patches rather than these.
           cat > notes.md <<EOF
-          ${NOTES}
+          ### Install
 
           - **Windows:** run the \`.exe\`. SmartScreen warns once: choose **More info**, then **Run anyway**.
           ${mac_note}
           - **CLI / headless server:** extract the \`t3\` archive for your platform.
+
+          ### Patches
+
+          ${NOTES}
           EOF
           gh release create "v${VERSION}" release-assets/* \
             --repo "$GITHUB_REPOSITORY" \
