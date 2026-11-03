@@ -62,6 +62,7 @@ const makeHome = Effect.gen(function* () {
     random: yield* SecureRandom.SecureRandom,
     idAllocator: yield* IdAllocator.IdAllocatorV2,
     queryRunner: {
+      keepsTranscriptsOnDisk: true,
       allocateSessionId: Effect.succeed(SESSION),
       open: () =>
         Effect.succeed({
