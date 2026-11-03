@@ -6807,7 +6807,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                 title:
                   workflowWithThreads === undefined
                     ? task.title
-                    : `Workflow ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â· ${workflowWithThreads.name ?? task.title ?? "Untitled"}`,
+                    : `Workflow · ${workflowWithThreads.name ?? task.title ?? "Untitled"}`,
                 ordinal: input.context.subagentsByTaskId.size,
               }),
               now,
