@@ -35,6 +35,11 @@ function recordEffect(action: string) {
 }
 
 vi.mock("../components/CustomSnoozeDialog", () => ({ requestCustomSnooze: vi.fn() }));
+// fork: thread tags, see FORK.md.
+vi.mock("../components/sidebar/threadTags", () => ({
+  readThreadTagMenu: () => null,
+  useThreadTagMenuActions: () => () => false,
+}));
 vi.mock("react", () => ({
   useCallback: (callback: unknown) => callback,
   useMemo: (factory: () => unknown) => factory(),
