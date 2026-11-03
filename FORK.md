@@ -715,6 +715,35 @@ Users read about it in the Memory and CPU limits section of `docs/user/remote-ac
   `packages/provider-core/src/server/subagentProjection.fork.test.ts`, and `MachineLimits.logic.fork.test.ts`.
   `Governor.fork.test.ts` runs the real orchestrator with fake readings and a test clock.
 
+### Awaited Claude tasks keep their wake owner (`fork:`)
+
+Claude can remove a finished background command from its roster before its native wake arrives. Releasing or
+settling the thread in that interval closed the SDK query and lost the wake. The adapter now retains awaited
+commands in the existing pending-work roster, and its runtime probes retain both those commands and buffered
+notifications. The hold ends after a committed continuation attaches and consumes the buffer. Offering an
+in-memory request or queueing a run does not end it. Empty roster levels cannot erase the hold.
+
+Missing native wake evidence expires after two minutes, with a warning. Once native evidence arrives, admission
+can wait for the governor without expiring. Failed reads or dispatches retry with capped backoff, fresh command
+receipts and a stable message ID. Stop, disabled-provider cancellation and process replacement retire the owning
+query's state; restart uses the existing awaited-work recovery. An unexpected provider exit cancels an
+undeliverable native wake with a visible notice. There is no migration, event type or setting.
+
+- `apps/server/src/orchestration-v2/Adapters/ClaudeWakeOwnership.ts` owns the query-scoped deadline and handoff;
+  `ClaudeAdapterV2.ts` publishes and probes it at the existing roster and continuation seams.
+- Upstream now covers part of this. It publishes owed wakes for opaque tasks that left the roster (OWEDPR), and its
+  wake latch retires an unstarted wake's frames (#28173, #30114). The fork merges its held commands into that
+  published list, and a retired wake also ends its query's hold. Upstream #31840 keeps the old run's event
+  reader open while its last consumed roster lists pending work, so `RunExecutionService.ts` carries no fork
+  code. The fork's own share is the hold for awaited commands, the deadline, retries and the idle check.
+- `packages/provider-core/src/server/ProviderContinuationRequests.ts` and
+  `apps/server/src/orchestration-v2/ProviderContinuationService.ts` carry the optional receipt and retry callback.
+- Tests: `Adapters/ClaudeWakeOwnership.fork.test.ts` and `ClaudeWakeOwnership.fork.test.ts`, with the real session
+  manager, continuation worker, settlement worker and SQLite replay. The replay testkits expose dispatch and
+  close gates. Existing Claude assertions retain buffered notifications and distinguish roster gaps from ID reuse.
+- `CodexWakeGap.fork.test.ts` asserts delivery and a new run as an expected failure for the known Codex gap below.
+  Its completed-command handler can still be interrupted before enqueueing; Codex code is unchanged.
+
 ## Versions
 
 A release is `vX.Y.Z-alice.N`. `X.Y.Z` is the upstream stable tag the stack sits on, and `N` counts the fork's
@@ -850,3 +879,9 @@ could run; `node scripts/fork/ci-workflows.ts` fixes that. If `fork/main` gained
 - Upstream's fallback model checks the usage of the account a saved default names, not its pool. With a
   fallback model set, a new thread whose default is a pooled account goes to the fallback once that one
   account is out of usage, even while the pool's other accounts have room.
+
+### Codex background continuations
+
+A Codex background command's continuation can be lost if memory cleanup closes its session before the
+continuation is queued. `CodexWakeGap.fork.test.ts` records the desired delivery and new run as an expected
+failure. The Claude wake patch leaves Codex unchanged.
