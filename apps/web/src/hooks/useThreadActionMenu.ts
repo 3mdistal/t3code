@@ -26,6 +26,10 @@ import {
   type ThreadActionMenuId,
 } from "../components/threadActionMenu.logic";
 import { titleRegenerationToast } from "../components/threadTitleRegenerationToast";
+import {
+  readThreadTagMenu, // fork: thread tags, see FORK.md.
+  useThreadTagMenuActions, // fork: thread tags, see FORK.md.
+} from "../components/sidebar/threadTags";
 import { stackedThreadToast, toastManager } from "../components/ui/toast";
 import { copyThreadReference } from "../lib/copyThreadReference";
 import { m } from "../i18n/messages";
@@ -99,6 +103,7 @@ export function useThreadActionMenu(input: {
     reportFailure: false,
   });
   const handleNewThread = useNewThreadHandler();
+  const handleThreadTagAction = useThreadTagMenuActions(); // fork: thread tags, see FORK.md.
   const confirmThreadDelete = useClientSettings((s) => s.confirmThreadDelete);
   const confirmThreadArchive = useClientSettings((s) => s.confirmThreadArchive);
   const timestampFormat = useClientSettings((s) => s.timestampFormat);
@@ -152,6 +157,7 @@ export function useThreadActionMenu(input: {
       snoozePresets,
       canShareWithGuest,
       canTurnIntoProject: canTurnThreadIntoProject(threadRef),
+      tags: readThreadTagMenu(threadRef), // fork: thread tags, see FORK.md.
     });
     const run = async (action: ThreadActionMenuId) => {
       const api = readLocalApi();
@@ -168,6 +174,7 @@ export function useThreadActionMenu(input: {
         );
         return;
       }
+      if (handleThreadTagAction(threadRef, action)) return; // fork: thread tags, see FORK.md.
       if (action.startsWith("snooze:")) {
         const preset =
           action === "snooze:custom"

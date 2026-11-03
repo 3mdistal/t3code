@@ -288,6 +288,39 @@ development builds don't, and the phone app doesn't read these links; it does re
 - Tests: `packages/shared/src/promptLinks.fork.test.ts`, `apps/desktop/src/app/DesktopClerk.fork.test.ts` and
   `apps/web/src/components/desktop/threadLinkTarget.fork.test.ts`.
 
+### Thread tags (`fork:`)
+
+Threads carry free-form tags. Right-click a thread, open Tags, and tick a tag or add a new one; the row shows its
+tags as small colored chips on the branch line of two-line rows, as colored dots after the title on one-line
+rows, and in full in the hover card. Agents tag and untag with `t3_thread_organize` (`tag` and `untag`, with
+`tags`), and `t3_thread_list` returns each thread's tags and filters by `tags`, matching any of them. Tags match
+regardless of case, and a new tag takes the spelling already in use. A tag holds up to 40 characters (an agent's
+longer tag, up to upstream's 64, is cut to 40), and a thread up to 20 tags.
+
+- Upstream v0.1.11 added its own tags (#29053): stored on the thread, set by the `thread.tag.set` command, and
+  used only to hide tagged threads while recording (`hideTaggedThreads`). It has no menu, agent tool or filter
+  that sets or reads them. The fork's tags stay a separate store for now, so upstream's hiding doesn't see them.
+  `packages/contracts/src/threadTags.ts` holds both; the fork's agent tools check each tag with upstream's
+  `ThreadTag`.
+
+- Stock compatibility: tags live under the new `threadTags` settings key on the server that owns the thread,
+  mapping thread id to tags. Stock T3 ignores the key, and drops it the next time it saves settings, so after a
+  rollback the threads stay but their tags are gone.
+- A patch adds or removes one tag at a time, and the server applies it to the tags it holds, so ticks from two
+  windows both land. A list replaces a thread's tags. Writing tags needs the settings-write scope, and the server
+  reports the `threadTags` capability so older servers hide the menu.
+- Tags of a deleted thread stay in settings, so their names stay in the Tags menu.
+- Fork files: `packages/contracts/src/threadTags.ts`, and in `apps/web/src/components/sidebar/`, `threadTags.ts`,
+  `ThreadTagChips.tsx` and `NewThreadTagDialog.tsx`.
+- Upstream files it changes: the settings schema, patch and capability in `packages/contracts`, the patch in
+  `packages/shared/src/serverSettings.ts`, the capability in `ServerEnvironment.ts`, the two MCP tools, the thread
+  menu in `threadActionMenu.logic.ts`, `Sidebar.tsx` and `useThreadActionMenu.ts`, the chips in
+  `SidebarThreadRow.tsx`, the dialog host in `routes/__root.tsx`, and the menu's tag icon in
+  `contextMenuFallback.ts`. `apps/server/src/mcp/toolkits/core.test.ts` provides settings to the thread tools,
+  `useThreadActionMenu.test.ts` stubs the tag menu, and `agentContextBudget.json` records the larger MCP tool list.
+- Tests: `packages/contracts/src/threadTags.fork.test.ts`, `packages/shared/src/serverSettings.fork.test.ts`,
+  `apps/server/src/mcp/threadTags.fork.test.ts` and `apps/web/src/components/threadActionMenu.logic.fork.test.ts`.
+
 ### A delegated thread settles as soon as its task ends (`fork:`)
 
 T3 runs every Codex thread in one shared `codex app-server`, and each loaded thread starts its own MCP helpers. On
