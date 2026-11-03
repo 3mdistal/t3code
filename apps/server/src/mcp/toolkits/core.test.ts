@@ -79,6 +79,7 @@ const layerThreadToolkit = McpHttpServer.layerThreadToolkit.pipe(
   Layer.provide(Layer.mock(PeerForwarding.PeerForwarding)({})),
   Layer.provide(Layer.mock(PeerLinkRequests.PeerLinkRequests)({})),
   Layer.provide(Layer.mock(PeerLinks.PeerLinks)({})),
+  Layer.provide(ServerSettings.layerTest()), // fork: thread tags, see FORK.md.
 );
 
 const threadId = ThreadId.make("mcp-core-thread");

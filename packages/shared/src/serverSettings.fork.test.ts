@@ -2,6 +2,7 @@ import {
   DEFAULT_SERVER_SETTINGS,
   ProviderDriverKind,
   ProviderInstanceId,
+  ThreadId,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 import { applyServerSettingsPatch } from "./serverSettings.ts";
@@ -56,5 +57,24 @@ describe("resourceLimits settings patch", () => {
     expect(
       applyServerSettingsPatch(saved, { cursorKeychainUsageEnabled: true }).resourceLimits,
     ).toEqual({ criticalHeadroomGiB: 12 });
+  });
+});
+
+// fork: thread tags, see FORK.md.
+
+describe("thread tags settings", () => {
+  it("applies tag ticks to the tags the server holds", () => {
+    const thread = ThreadId.make("thread-a");
+    const current = { ...DEFAULT_SERVER_SETTINGS, threadTags: { [thread]: ["frontend"] } };
+    const next = applyServerSettingsPatch(current, {
+      threadTags: { [thread]: { review: true, frontend: false } },
+    });
+    expect(next.threadTags).toEqual({ [thread]: ["review"] });
+    expect(applyServerSettingsPatch(next, { threadTags: { [thread]: null } }).threadTags).toEqual(
+      {},
+    );
+    expect(
+      applyServerSettingsPatch(next, { enableProviderUpdateChecks: false }).threadTags,
+    ).toEqual(next.threadTags);
   });
 });

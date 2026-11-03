@@ -21,6 +21,7 @@ import {
 } from "../../threadAccess.ts";
 import * as ThreadSearch from "../../../orchestration-v2/ThreadSearch.ts";
 import * as ScheduledTasks from "../../../scheduledTasks/ScheduledTaskService.ts";
+import * as Settings from "../../../serverSettings.ts"; // fork: thread tags, see FORK.md.
 import { queuedRunsInDeliveryOrder } from "../../../orchestration-v2/QueuedRunOrder.ts";
 import { ThreadToolkit } from "./tools.ts";
 
@@ -335,6 +336,21 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
         return yield* threads
           .settleThread({ ...common, byOwnAgent: caller?.id === projection.thread.id })
           .pipe(Effect.mapError(dispatchFailure));
+      }
+      // fork: thread tags, see FORK.md.
+      if (input.action === "tag" || input.action === "untag") {
+        const tags = yield* required(input.tags, "tags");
+        const settings = yield* Settings.ServerSettingsService;
+        const next = yield* settings
+          .updateSettings({
+            threadTags: {
+              [projection.thread.id]: Object.fromEntries(
+                tags.map((tag) => [tag, input.action === "tag"]),
+              ),
+            },
+          })
+          .pipe(Effect.mapError(unavailable));
+        return { tags: next.threadTags[projection.thread.id] ?? [] };
       }
       let command: OrchestrationV2Command;
       switch (input.action) {

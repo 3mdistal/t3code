@@ -19,6 +19,8 @@ import {
   RunId,
   NonNegativeInt,
   ProjectId,
+  THREAD_TAGS_PER_THREAD, // fork: thread tags, see FORK.md.
+  ThreadTag, // fork: thread tags, see FORK.md.
 } from "@t3tools/contracts";
 import * as Crypto from "effect/Crypto";
 import * as Schema from "effect/Schema";
@@ -27,11 +29,13 @@ import { Tool, Toolkit } from "effect/ai";
 import * as ThreadSearch from "../../../orchestration-v2/ThreadSearch.ts";
 import * as ScheduledTaskService from "../../../scheduledTasks/ScheduledTaskService.ts";
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
+import * as Settings from "../../../serverSettings.ts"; // fork: thread tags, see FORK.md.
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 
 const ThreadOrganizeTool = Tool.make("t3_thread_organize", {
   description:
-    "Pin, snooze, settle, archive, or mark a thread unread. Omit `threadId` for this thread. `snooze` needs `snoozedUntil`. Settling this thread applies at turn end. A failed turn or queued message leaves it active.",
+    // fork: thread tags, see FORK.md.
+    "Pin, snooze, settle, archive, tag, or mark a thread unread. Omit `threadId` for this thread. `snooze` needs `snoozedUntil`; `tag` and `untag` need `tags`, and return the thread's tags. Settling this thread applies at turn end. A failed turn or queued message leaves it active.",
   parameters: Schema.Struct({
     environmentId: OrchestratorMcpEnvironmentTarget,
     threadId: Schema.optional(ThreadId),
@@ -45,12 +49,19 @@ const ThreadOrganizeTool = Tool.make("t3_thread_organize", {
       "archive",
       "unarchive",
       "mark_unread",
+      "tag", // fork: thread tags, see FORK.md.
+      "untag", // fork: thread tags, see FORK.md.
     ]),
     snoozedUntil: Schema.optional(IsoDateTime),
+    // fork: thread tags, see FORK.md.
+    tags: Schema.optional(
+      Schema.Array(ThreadTag).check(Schema.isMaxLength(THREAD_TAGS_PER_THREAD)),
+    ),
   }),
   success: Schema.Union([
     OrchestrationV2DispatchCommandResult,
     Schema.Struct({ settlesWhenTurnEnds: Schema.Literal(true) }),
+    Schema.Struct({ tags: Schema.Array(Schema.String) }), // fork: thread tags, see FORK.md.
   ]),
   failure: OrchestratorMcpFailure,
   failureMode: "return" as const,
@@ -58,6 +69,7 @@ const ThreadOrganizeTool = Tool.make("t3_thread_organize", {
     McpInvocationContext.McpInvocationContext,
     ThreadManagementService.ThreadManagementService,
     Crypto.Crypto,
+    Settings.ServerSettingsService, // fork: thread tags, see FORK.md.
   ],
 })
   .annotate(Tool.Title, "Organize a thread")

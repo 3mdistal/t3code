@@ -113,6 +113,8 @@ import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuShortcut, MenuTrigger } f
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { MiddleTruncate } from "../ui/middle-truncate";
 import { useThreadHasUnsentDraft } from "../../composerDraftStore";
+import { ThreadTagChips, ThreadTagsDetail } from "./ThreadTagChips"; // fork: thread tags, see FORK.md.
+import { useThreadTags } from "./threadTags"; // fork: thread tags, see FORK.md.
 
 // The fields thread rows show. Provider status pushes refresh `checkedAt`,
 // status and auth on every provider; leaving those out keeps each
@@ -296,6 +298,8 @@ function SidebarThreadTooltip({
             <MiddleTruncate value={thread.branch} className="flex" />
           </div>
         ) : null}
+        <ThreadTagsDetail environmentId={thread.environmentId} threadId={thread.id} />{" "}
+        {/* fork: thread tags, see FORK.md. */}
         {branchMismatch ? (
           <div className="flex min-w-0 items-start gap-2 text-warning">
             <CircleAlertIcon aria-hidden className="mt-0.5 size-3 shrink-0 stroke-current" />
@@ -1129,13 +1133,15 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
       </span>
     ) : null;
   const diff = latestRunDiff(thread);
+  const threadTags = useThreadTags(thread.environmentId, thread.id); // fork: thread tags, see FORK.md.
   // Only the trailing icons would remain, so the row moves them to the title line instead.
   const metaLineEmpty =
     !thread.branch &&
     !showsScratchMachine &&
     prBadge === null &&
     diff === null &&
-    runningTerminalIds.length === 0;
+    runningTerminalIds.length === 0 &&
+    threadTags.length === 0; // fork: thread tags, see FORK.md.
   const metaLine = metaLineEmpty ? null : (
     <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-secondary-label text-xs">
       {thread.branch ? (
@@ -1144,6 +1150,8 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
           <span className="flex min-w-0 flex-1">
             <MiddleTruncate value={thread.branch} showTitle={false} />
           </span>
+          <ThreadTagChips tags={threadTags} max={2} className="max-w-1/2" />{" "}
+          {/* fork: thread tags, see FORK.md. */}
         </>
       ) : showsScratchMachine ? (
         <>
@@ -1153,9 +1161,14 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
             className="size-3 shrink-0"
           />
           <span className="min-w-0 flex-1 truncate">{props.scratchMachineLabel}</span>
+          <ThreadTagChips tags={threadTags} max={2} className="max-w-1/2" />{" "}
+          {/* fork: thread tags, see FORK.md. */}
         </>
       ) : (
-        <span className="flex-1" />
+        <>
+          <ThreadTagChips tags={threadTags} max={2} /> {/* fork: thread tags, see FORK.md. */}
+          <span className="flex-1" />
+        </>
       )}
       {terminalStatusIcon}
       {prBadge}
@@ -1247,6 +1260,8 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
               )}
               {draftIndicator}
               {title}
+              {/* fork: thread tags, see FORK.md. One-line rows have no meta line, so tags show as dots. */}
+              {multiline ? null : <ThreadTagChips tags={threadTags} max={3} dots />}
               {multiline ? titleLineIcons : null}
               {pinIndicator}
               {multiline ? null : terminalStatusIcon}

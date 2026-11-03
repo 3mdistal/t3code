@@ -34,6 +34,7 @@ import {
 } from "./threadPullRequest.ts";
 import { hasOnlyPairedSurrogates } from "./threadMetadataMcp.ts";
 import { ThreadTitleRegeneration } from "./threadTitle.ts";
+import { THREAD_TAGS_PER_THREAD, ThreadTag } from "./threadTags.ts"; // fork: thread tags, see FORK.md.
 import {
   OrchestrationV2Actor,
   OrchestrationV2CreationSource,
@@ -337,6 +338,8 @@ export const OrchestratorMcpThreadListInput = Schema.Struct({
   titleContains: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(256))),
   settled: Schema.optional(Schema.Boolean),
   snoozed: Schema.optional(Schema.Boolean),
+  // fork: thread tags, see FORK.md. Threads with any of these tags.
+  tags: Schema.optional(Schema.Array(ThreadTag).check(Schema.isMaxLength(THREAD_TAGS_PER_THREAD))),
   includeSubagents: Schema.optional(Schema.Boolean),
   cursor: Schema.optional(NonNegativeInt),
   limit: Schema.optional(PositiveInt.check(Schema.isLessThanOrEqualTo(100))),
@@ -371,6 +374,7 @@ export const OrchestratorMcpThreadListItem = Schema.Struct({
   settledAt: Schema.NullOr(IsoDateTime),
   snoozed: Schema.Boolean,
   snoozedUntil: Schema.NullOr(IsoDateTime),
+  tags: Schema.optional(Schema.Array(Schema.String)), // fork: thread tags, see FORK.md.
   parentThreadId: Schema.NullOr(ThreadId),
   relationshipToParent: Schema.NullOr(Schema.Literals(["fork", "subagent"])),
   itemCount: NonNegativeInt,

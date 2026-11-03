@@ -1,6 +1,7 @@
 import type { ModelPreferences } from "@t3tools/contracts/settings";
 import {
   applyProviderPoolsPatch, // fork: see FORK.md.
+  applyThreadTagsPatch, // fork: thread tags, see FORK.md.
   DEFAULT_MODEL_BY_PROVIDER,
   DEFAULT_TEXT_GENERATION_MODEL,
   DEFAULT_TEXT_GENERATION_MODEL_BY_PROVIDER,
@@ -374,6 +375,7 @@ export function applyServerSettingsPatch(
     providerPools: providerPoolsPatch, // fork: see FORK.md.
     // fork: limits, see FORK.md. Replaced whole, so an omitted limit returns to its default.
     resourceLimits: resourceLimitsPatch,
+    threadTags: threadTagsPatch, // fork: thread tags, see FORK.md.
     sourceControlHosts: sourceControlHostsPatch,
     usagePriceOverrides: usagePriceOverridesPatch,
     usageModelAliases: usageModelAliasesPatch,
@@ -579,6 +581,10 @@ export function applyServerSettingsPatch(
       : {}),
     // fork: limits, see FORK.md.
     ...(resourceLimitsPatch !== undefined ? { resourceLimits: resourceLimitsPatch } : {}),
+    // fork: thread tags, see FORK.md.
+    ...(threadTagsPatch !== undefined
+      ? { threadTags: applyThreadTagsPatch(current.threadTags, threadTagsPatch) }
+      : {}),
     ...(usagePriceOverridesPatch !== undefined
       ? {
           usagePriceOverrides: mergeSettingsEntries(

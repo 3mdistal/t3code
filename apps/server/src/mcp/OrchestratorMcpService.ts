@@ -62,6 +62,8 @@ import {
   type ServerProviderModel,
   ThreadId,
   isOrchestrationV2WorkActive,
+  hasAnyThreadTag, // fork: thread tags, see FORK.md.
+  type ThreadTagSettings, // fork: thread tags, see FORK.md.
 } from "@t3tools/contracts";
 import { getProviderOptionCurrentValue } from "@t3tools/shared/model";
 import { runRanAfter } from "@t3tools/shared/orchestrationV2ThreadError";
@@ -2850,6 +2852,12 @@ const make = Effect.gen(function* () {
           ? null
           : new Set(input.statuses);
       const titleContains = input.titleContains?.toLocaleLowerCase();
+      // fork: thread tags, see FORK.md. Unreadable settings list threads untagged.
+      const threadTags = yield* serverSettings.getSettings.pipe(
+        Effect.map((settings) => settings.threadTags),
+        Effect.orElseSucceed(() => ({}) as ThreadTagSettings),
+      );
+      const wantedTags = input.tags === undefined || input.tags.length === 0 ? null : input.tags;
       const filtered = projectThreads
         .filter(
           (thread) => statuses === null || statuses.has(thread.activityRunStatus ?? thread.status),
@@ -2864,6 +2872,10 @@ const make = Effect.gen(function* () {
         .filter(
           (thread) =>
             titleContains === undefined || thread.title.toLocaleLowerCase().includes(titleContains),
+        )
+        .filter(
+          // fork: thread tags, see FORK.md.
+          (thread) => wantedTags === null || hasAnyThreadTag(threadTags[thread.id], wantedTags),
         );
       const cursor = input.cursor ?? 0;
       const limit = input.limit ?? DEFAULT_THREAD_LIST_LIMIT;
@@ -2872,7 +2884,11 @@ const make = Effect.gen(function* () {
       return {
         projectId,
         currentThreadId: parent?.thread.id ?? null,
-        threads: page.map((shell) => listItemFromShell(scope, shell, nowMs)),
+        // fork: thread tags, see FORK.md.
+        threads: page.map((shell) => {
+          const tags = threadTags[shell.id];
+          return { ...listItemFromShell(scope, shell, nowMs), ...(tags ? { tags } : {}) };
+        }),
         nextCursor,
         total: filtered.length,
       } satisfies OrchestratorMcpThreadListResult;

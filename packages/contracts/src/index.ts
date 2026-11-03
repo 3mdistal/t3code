@@ -18,6 +18,7 @@ export * from "./provider.ts";
 export * from "./providerInstance.ts";
 export * from "./providerPool.ts"; // fork: see FORK.md.
 export * from "./resourceLimits.ts"; // fork: limits, see FORK.md.
+export * from "./threadTags.ts"; // fork: thread tags, see FORK.md.
 export * from "./providerSetup.ts";
 export * from "./providerRuntime.ts";
 export * from "./providerUsageLimits.ts";
