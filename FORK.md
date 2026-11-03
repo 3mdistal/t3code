@@ -158,6 +158,31 @@ the same gaps as automatic delivery, so it queues there. Its manual live check,
 - Test: #23559's own changes to `apps/server/src/orchestration-v2/CommandPolicy.test.ts`, which replace upstream's
   assertion that an explicit steer goes straight to the run.
 
+### A Claude session that was never saved recovers (`fork:`)
+
+Claude only writes a session's transcript once a prompt reaches it, but T3 records a provider turn either way. When
+a pool moved a thread to another account on a provider notification, which sends no prompt, the new session had an
+accepted turn and no transcript. Every later run asked `claude --resume` for it and failed with "No conversation
+found with session ID", so the thread stayed broken and a retry couldn't help. Upstream's check for empty transcripts
+leaves a missing one to the CLI. A transcript deleted some other way would end the same way.
+
+Before each resume T3 now asks the adapter whether the session can be resumed. It can't when the next query would pass
+`--resume` and no project folder in the account's Claude home holds the transcript. That failure takes upstream's
+existing fallback: a fresh native session with the whole thread as a context handoff. The run succeeds, and threads
+already broken this way recover on their next run. A live process, a session with no turns that the next query will
+create, and a home T3 can't read are all left as they were. The check runs apart from `resumeThread` because the
+session manager skips `resumeThread` for a thread it has loaded. The notification itself isn't delivered: the
+process it belonged to is gone, and the handoff carries the history.
+
+- `packages/provider-core/src/server/ProviderAdapter.ts`: the optional `assertNativeThreadResumable`.
+- `apps/server/src/orchestration-v2/Adapters/ClaudeLostSession.ts`: the transcript scan, used by
+  `Adapters/ClaudeAdapterV2.ts`.
+- `apps/server/src/orchestration-v2/ProviderTurnStartService.ts`: calls it before `resumeThread`, and shares the
+  "has turns" rule with the turn input through `nativeThreadHasTurnsIn`.
+- Tests: `apps/server/src/orchestration-v2/Adapters/ClaudeLostSession.fork.test.ts` and
+  `apps/server/src/orchestration-v2/testkit/LostClaudeSession.integration.fork.test.ts`. Upstream's resume tests pass
+  unchanged.
+
 ### Connections recover when SQLite is busy (`fork:`)
 
 The checkpoint worker used WAL allocation and a failed truncate as reasons to hold writers, even after every
