@@ -170,7 +170,8 @@ Before each resume T3 now asks the adapter whether the session can be resumed. I
 `--resume` and no project folder in the account's Claude home holds the transcript. That failure takes upstream's
 existing fallback: a fresh native session with the whole thread as a context handoff. The run succeeds, and threads
 already broken this way recover on their next run. A live process, a session with no turns that the next query will
-create, and a home T3 can't read are all left as they were. The check runs apart from `resumeThread` because the
+create, and a home T3 can't read are all left as they were, as is a replayed session, which has no files to look for
+(`keepsTranscriptsOnDisk` is set only on the real query runner). The check runs apart from `resumeThread` because the
 session manager skips `resumeThread` for a thread it has loaded. The notification itself isn't delivered: the
 process it belonged to is gone, and the handoff carries the history.
 

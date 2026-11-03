@@ -605,6 +605,8 @@ export class ClaudeSettingsLaunchArgError extends Schema.TaggedError<ClaudeSetti
 }
 
 export interface ClaudeAgentSdkQueryRunnerShape {
+  /** fork: a replayed session has no files to look for. See FORK.md, "A Claude session that was never saved recovers". */
+  readonly keepsTranscriptsOnDisk?: true;
   readonly allocateSessionId: Effect.Effect<string, ClaudeAgentSdkQueryRunnerError>;
   readonly open: (
     input: ClaudeAgentSdkQueryOpenInput,
@@ -952,6 +954,8 @@ export const layerQueryRunner: Layer.Layer<
     const portDiscovery = yield* PortScanner.PortDiscovery;
 
     return ClaudeAgentSdkQueryRunner.of({
+      // fork: see FORK.md, "A Claude session that was never saved recovers".
+      keepsTranscriptsOnDisk: true,
       allocateSessionId: crypto
         .randomUUIDv4()
         .pipe(Effect.mapError((cause) => queryRunnerError(cause, "allocateSessionId"))),
@@ -11105,6 +11109,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             }) {
               const nativeThreadId = threadInput.providerThread.nativeThreadRef?.nativeId;
               if (
+                queryRunner.keepsTranscriptsOnDisk !== true ||
                 nativeThreadId === undefined ||
                 nativeThreadId === null ||
                 (yield* Ref.get(queryContext))?.nativeThreadId === nativeThreadId ||
