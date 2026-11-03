@@ -47,17 +47,20 @@ it.effect(
       const oldQuery = {};
       const newQuery = {};
       const task = { taskId: "waiter", kind: "command" as const, awaited: true as const };
+      const other = { ...task, taskId: "other" };
       yield* ownership.acquire("native", oldQuery, [task]);
       ownership.clear("native");
-      yield* ownership.acquire("native", newQuery, [task]);
-      ownership.markWaking("native", newQuery);
+      yield* ownership.acquire("native", newQuery, [task, other]);
+      ownership.markWaking("native", newQuery, [task.taskId]);
       yield* TestClock.adjust(CLAUDE_WAKE_OWNERSHIP_TIMEOUT_MS);
       assert.isFalse(yield* Queue.take(deadlines));
       assert.isFalse(yield* Queue.take(deadlines));
-      ownership.consumeWake("native", oldQuery);
+      assert.isTrue(yield* Queue.take(deadlines));
+      ownership.consumeWake("native", newQuery, [other.taskId]);
+      ownership.consumeWake("native", oldQuery, [task.taskId]);
       ownership.consumeObserved("native", newQuery, task.taskId);
       assert.deepEqual(ownership.merge("native", []), [task]);
-      ownership.consumeWake("native", newQuery);
+      ownership.consumeWake("native", newQuery, [task.taskId]);
       assert.isFalse(ownership.has());
     }),
 );

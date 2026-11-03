@@ -1,3 +1,4 @@
+import { writeClaudeWakeCancellationNotices } from "./ClaudeWakeCancellation.ts"; // fork: see FORK.md.
 import { AgentScope } from "@t3tools/shared/AgentScope";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
@@ -1187,12 +1188,22 @@ export const layerWithOptions = (
         readonly reason: ProviderSessionReleaseReason;
         readonly detail?: string;
         readonly releasedProviderThreads: ReadonlyArray<ReleasedProviderThread>;
+        readonly wakeCancellationNotices?: ReadonlyArray<OrchestrationV2TurnItem>; // fork: see FORK.md.
         readonly releasedAt: DateTime.Utc;
         readonly detachedThreadId?: ThreadId;
         readonly replaced: boolean;
       }) =>
         Effect.all(
           [
+            // fork: storage failures retry the captured notice after process release; see FORK.md.
+            Effect.exit(
+              writeClaudeWakeCancellationNotices(
+                input.wakeCancellationNotices ?? [],
+                input.entry.runtime,
+                idAllocator,
+                eventSink,
+              ),
+            ),
             input.replaced
               ? Effect.succeed(Exit.void)
               : Effect.exit(writeReleasedSessionEvents(input)),
@@ -1385,6 +1396,21 @@ export const layerWithOptions = (
                     reason: input.reason,
                     ...detachedThread,
                   });
+                  // fork: persist awaited-wake loss before subscriber/scope teardown; see FORK.md.
+                  const notice =
+                    input.reason === "idle_timeout" &&
+                    entry.runtime.backgroundWakeCancellationNotice !== undefined
+                      ? yield* entry.runtime.backgroundWakeCancellationNotice
+                      : null;
+                  const wakeNotices = notice === null ? [] : [notice];
+                  const noticesWritten = yield* Effect.exit(
+                    writeClaudeWakeCancellationNotices(
+                      wakeNotices,
+                      entry.runtime,
+                      idAllocator,
+                      eventSink,
+                    ),
+                  );
                   if (input.cancelIdleFiber !== false) {
                     yield* cancelIdleFiber(entry.idleFiber);
                   }
@@ -1419,6 +1445,7 @@ export const layerWithOptions = (
                     reason: input.reason,
                     ...(input.detail === undefined ? {} : { detail: input.detail }),
                     releasedProviderThreads,
+                    wakeCancellationNotices: Exit.isFailure(noticesWritten) ? wakeNotices : [], // fork: see FORK.md.
                     releasedAt,
                     ...detachedThread,
                   };
