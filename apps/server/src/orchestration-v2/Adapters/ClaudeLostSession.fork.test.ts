@@ -56,6 +56,7 @@ const makeHome = Effect.gen(function* () {
     crypto: yield* Crypto.Crypto,
     idAllocator: yield* IdAllocator.IdAllocatorV2,
     queryRunner: {
+      keepsTranscriptsOnDisk: true,
       allocateSessionId: Effect.succeed(SESSION),
       open: () =>
         Effect.succeed({
