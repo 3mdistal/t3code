@@ -234,7 +234,8 @@ most two at a time, with three seconds between claims. The limit covers provider
 entire agent turn. Pending starts wait in the outbox rather than occupying workers; the existing six-worker
 and four-background-worker reservation stays in place. New work
 requested after startup keeps its ordinary admission. There is no new setting. Memory limits and Pause all
-still run before a provider start is enqueued.
+still run before a provider start is enqueued. Stale start effects for terminal runs drain without consuming
+the gap, so they cannot block a continuation's startup retry.
 
 A queue behind a turn that will continue retains its existing holds: recovery does not add a hold to messages
 that were already waiting to run. Messages already held by Stop, Pause all or the governor remain held.
@@ -247,7 +248,7 @@ this patch. No schema, persisted event type or settings format changes.
 - `EffectWorker.ts` and `RestartContinuation.ts`: pass the attempt to dispatch and use the longer retry delays.
 - `ProviderRuntimeRecoveryService.ts`: preserves the queue behind a continuing run, including a continuation
   prepared before a clean shutdown.
-- Tests: `RestartPacing.fork.test.ts` exercises concurrent claims, the gap and control availability on the test
+- Tests: `RestartPacing.fork.test.ts` exercises claims, stale terminal starts, the gap and control availability on the test
   clock; `ProviderPoolFailover.integration.fork.test.ts` reopens temporary SQLite snapshots with fake providers
   to exercise a rejected pool dispatch, six Claude/Codex continuations and ordered queued messages. Upstream's
   `ProviderRuntimeRecoveryService.test.ts` supplies the new empty-outbox lookup in its queued-work fixture;
