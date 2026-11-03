@@ -523,7 +523,12 @@ function useSidebarThreads(input: {
   const listedSettledThreads = settledThreads.filter(olderSettledShelf.isListed);
   useOlderSettledShelfGrowth(olderSettledShelf, listedSettledThreads);
   const settledCount =
-    settledThreads.length + olderSettledShelf.unloadedCount(partition.visibleThreads);
+    settledThreads.length +
+    olderSettledShelf.unloadedCount([
+      ...partition.visibleThreads,
+      // fork: sidebar filter and sort, see FORK.md. Hidden by a filter, but loaded.
+      ...filterSidebarV2VisibleThreads(view.hiddenThreads, scopedProjectKeys, delegatedUnderParent),
+    ]);
   const visibleSettledThreads = (() => {
     const visible = listedSettledThreads.slice(0, settledVisibleCount);
     if (
@@ -1390,19 +1395,16 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     threadTagsOf,
   );
   const sidebarViewFiltering = hasSidebarViewFilters(sidebarView);
-  const sidebarViewThreads = sidebarViewFiltering
-    ? threads.filter(
-        (thread) =>
-          // The open thread stays listed, so a filter never hides where the user is.
-          threadShellKey(thread) === routeRowThreadKey ||
-          matchesSidebarViewFilters(sidebarView, {
-            tags: threadTagsOf(thread),
-            status: sidebarViewStatusOf(thread),
-            pinned: thread.pinnedAt != null,
-            openPullRequest: hasOpenPullRequest(thread),
-          }),
-      )
-    : threads;
+  const shownBySidebarView = (thread: (typeof threads)[number]) =>
+    // The open thread stays listed, so a filter never hides where the user is.
+    threadShellKey(thread) === routeRowThreadKey ||
+    matchesSidebarViewFilters(sidebarView, {
+      tags: threadTagsOf(thread),
+      status: sidebarViewStatusOf(thread),
+      pinned: thread.pinnedAt != null,
+      openPullRequest: hasOpenPullRequest(thread),
+    });
+  const sidebarViewThreads = sidebarViewFiltering ? threads.filter(shownBySidebarView) : threads;
   const {
     workingShelfEnabled,
     pinnedThreads,
@@ -1470,6 +1472,9 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
           sidebarViewStatusOf(thread),
           isSidebarViewUnread(thread, localLastVisitedAtById[threadShellKey(thread)]),
         ),
+      hiddenThreads: sidebarViewFiltering
+        ? threads.filter((thread) => !shownBySidebarView(thread))
+        : [],
     },
   });
 

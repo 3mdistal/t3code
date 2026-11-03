@@ -417,13 +417,15 @@ status or none). Project folders follow the sort by their top thread, pinned fol
 unless the user has set a manual project order. Filters never change the sort or the grouping.
 
 - Stock compatibility: the view lives in browser storage under `t3code:sidebar-view:v1`, and picked projects stay
-  in the existing project filter. Nothing changes on the server. With the Labs switch off the sidebar is stock,
-  project picker included.
-- Rows keep their icons in fixed slots: the machine and agent icons sit on the title line whether or not the row
-  has a branch, and a pinned card row shows its pin on the title line instead of in the project label.
-- The thread on screen stays listed even when it doesn't match. A tagged thread sits in one tag folder, a picked
-  tag first, then the first by name. A thread with no run counts as Done. Right-click a project in the menu to
-  open its settings; pinning a project stays on the folder's own menu.
+  in the existing project filter. Nothing changes on the server. With the Labs switch off the list and its header
+  are stock, project picker included; only the row icon slots below change.
+- Rows keep their icons in fixed slots, in both sidebars: the machine and agent icons sit on the title line whether
+  or not the row has a branch, and a pinned card row shows its pin on the title line instead of in the project label.
+- The thread on screen stays listed when it doesn't match a tag, status or switch filter. Picking projects hides
+  other projects' threads, as the stock picker does. A tagged thread sits in one tag folder, a picked tag first,
+  then the first by name. A thread with no run counts as Done. The Settled count adds older settled threads that
+  haven't loaded yet, which the filters can't see. Right-click a project in the menu to open its settings; pinning
+  a project stays on the folder's own menu.
 - Fork files: in `apps/web/src/components/sidebar/`, `sidebarView.ts`, `SidebarFilterMenu.tsx`,
   `SidebarSortMenu.tsx` and `SidebarViewFolderHeader.tsx`.
 - Upstream files it changes: `Sidebar.tsx` (the header buttons, and filtering, sorting and folders in the boring

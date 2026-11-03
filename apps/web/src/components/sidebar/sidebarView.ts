@@ -266,7 +266,7 @@ export const NO_TAG_GROUP_KEY = "tag:";
 
 /**
  * Tag folders, ordered by their top thread, with untagged threads last. A thread sits
- * in one folder only: its first tag that the filter picked, else its first tag.
+ * in one folder only: its first tag by name that the filter picked, else its first by name.
  */
 export function groupSidebarThreadsByTag<T>(
   threads: readonly T[],
@@ -277,7 +277,7 @@ export function groupSidebarThreadsByTag<T>(
   const groups = new Map<string, SidebarViewGroup<T>>();
   const untagged: T[] = [];
   for (const thread of threads) {
-    const tags = tagsOf(thread);
+    const tags = tagsOf(thread).toSorted((left, right) => left.localeCompare(right));
     const tag = tags.find((candidate) => picked.has(candidate.toLocaleLowerCase())) ?? tags[0];
     if (tag === undefined) {
       untagged.push(thread);
@@ -365,6 +365,8 @@ export interface SidebarFolderView {
   readonly keepProjectOrder: boolean;
   readonly tagsOf: (thread: EnvironmentThreadShell) => ReadonlyArray<string>;
   readonly needsMeRankOf: (thread: EnvironmentThreadShell) => number;
+  // Loaded threads the filters hide, so the Settled count doesn't take them for unloaded ones.
+  readonly hiddenThreads: ReadonlyArray<EnvironmentThreadShell>;
 }
 
 /** Menu search: every project, tag and status whose name contains the query. */
