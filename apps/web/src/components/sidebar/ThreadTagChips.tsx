@@ -5,7 +5,8 @@ import { TagIcon } from "lucide-react";
 import { cn } from "~/lib/utils";
 import { threadTagHue, useThreadTags } from "./threadTags";
 
-export const threadTagDotClassName = "size-1.5 shrink-0 rounded-full";
+/** A short upright bar, since a round dot in the sidebar means a status needs attention. */
+export const threadTagDotClassName = "h-2.5 w-1 shrink-0 rounded-full";
 /** A tag's color, the same on rows, the hover card and the filter menu. */
 export const threadTagDotStyle = (tag: string) => ({
   backgroundColor: `oklch(0.7 0.14 ${threadTagHue(tag)})`,

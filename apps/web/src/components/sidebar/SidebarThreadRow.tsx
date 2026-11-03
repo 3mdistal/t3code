@@ -268,6 +268,7 @@ function SidebarThreadTooltip({
   branchMismatch,
   terminalStatus,
   terminalProcessCount,
+  status,
 }: {
   thread: SidebarThreadSummary;
   project: ProjectFaviconProject | null;
@@ -285,6 +286,15 @@ function SidebarThreadTooltip({
   } | null;
   terminalStatus: TerminalStatusIndicator | null;
   terminalProcessCount: number;
+  // fork: sidebar look, see FORK.md. Set when the row shows only the status icon.
+  status?:
+    | {
+        label: string;
+        icon: keyof typeof TOP_STATUS_ICONS;
+        className: string;
+      }
+    | null
+    | undefined;
 }) {
   const driverKind = providerEntry?.driverKind ?? null;
   const previousProviderNames = thread.providerInstanceHistory
@@ -305,6 +315,13 @@ function SidebarThreadTooltip({
           ) : null
         }
       >
+        {/* fork: sidebar look, see FORK.md. */}
+        {status ? (
+          <div className={cn("flex min-w-0 items-center gap-2", status.className)}>
+            <TopStatusIcon icon={status.icon} className="size-3" />
+            <div className="min-w-0 truncate">{status.label}</div>
+          </div>
+        ) : null}
         {projectDisplayName ? (
           <div className="flex min-w-0 items-center gap-2">
             {project ? <ProjectFavicon project={project} className="size-3 shrink-0" /> : null}
@@ -583,6 +600,8 @@ type SidebarThreadRowProps = {
   variant: "card" | "slim" | "folder" | "folder-multiline";
   // fork: sidebar filter and sort, see FORK.md. Tag and status folders hold several projects.
   showProjectInFolder?: boolean | undefined;
+  // fork: sidebar look, see FORK.md. The folder's heading already says this row's status.
+  statusInFolderHeading?: boolean | undefined;
   navigationParent?: string | undefined;
   variantAction: SidebarSweepAction;
   settlementSupported: boolean;
@@ -887,6 +906,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
       branchMismatch={branchMismatch}
       terminalStatus={terminalStatus}
       terminalProcessCount={terminalProcessCount}
+      status={variant === "folder" ? topStatus : null} // fork: sidebar look, see FORK.md.
     />
   );
 
@@ -1270,8 +1290,20 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     ) : null;
   const diff = latestRunDiff(thread);
   const threadTags = useThreadTags(thread.environmentId, thread.id); // fork: thread tags, see FORK.md.
+  // fork: row icon slots, see FORK.md. Always on the title line, so a branch never moves them.
+  // A two-line row keeps them on line two, so the title has line one to itself.
+  const titleLineIcons = (
+    <span aria-hidden className="inline-flex shrink-0 items-center gap-1">
+      {remoteMachineIcon}
+      <SidebarProviderStack
+        thread={thread}
+        providerEntryByInstanceId={props.providerEntryByInstanceId}
+      />
+    </span>
+  );
   // Only the trailing icons would remain, so the row moves them to the title line instead.
   const metaLineEmpty =
+    variant !== "folder-multiline" && // fork: sidebar look, see FORK.md. Its status lives there.
     !checkoutThread.branch &&
     !showsScratchMachine &&
     prBadge === null &&
@@ -1280,14 +1312,25 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     runningTerminalIds.length === 0 &&
     threadTags.length === 0; // fork: thread tags, see FORK.md.
   const metaLine = metaLineEmpty ? null : (
-    <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-secondary-label text-xs">
+    <div
+      className={cn(
+        "mt-0.5 flex min-w-0 items-center gap-1.5 text-secondary-label text-xs",
+        // fork: sidebar look, see FORK.md. Starts under the title, past the favicon.
+        variant === "folder-multiline" && props.showProjectInFolder && "ms-6.5",
+      )}
+    >
       {checkoutThread.branch ? (
         <>
           <ThreadWorktreeIndicator thread={checkoutThread} />
           <span className="flex min-w-0 flex-1">
             <MiddleTruncate value={checkoutThread.branch} showTitle={false} />
           </span>
-          <ThreadTagChips tags={threadTags} max={2} className="max-w-1/2" />{" "}
+          <ThreadTagChips
+            tags={threadTags}
+            max={2}
+            dots={variant === "folder-multiline"}
+            className="max-w-1/2"
+          />{" "}
           {/* fork: thread tags, see FORK.md. */}
         </>
       ) : showsScratchMachine ? (
@@ -1298,12 +1341,18 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
             className="size-3 shrink-0"
           />
           <span className="min-w-0 flex-1 truncate">{props.scratchMachineLabel}</span>
-          <ThreadTagChips tags={threadTags} max={2} className="max-w-1/2" />{" "}
+          <ThreadTagChips
+            tags={threadTags}
+            max={2}
+            dots={variant === "folder-multiline"}
+            className="max-w-1/2"
+          />{" "}
           {/* fork: thread tags, see FORK.md. */}
         </>
       ) : (
         <>
-          <ThreadTagChips tags={threadTags} max={2} /> {/* fork: thread tags, see FORK.md. */}
+          <ThreadTagChips tags={threadTags} max={2} dots={variant === "folder-multiline"} />{" "}
+          {/* fork: thread tags, see FORK.md. */}
           <span className="flex-1" />
         </>
       )}
@@ -1317,17 +1366,32 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
         </span>
       ) : null}
       {/* fork: row icon slots, see FORK.md. The machine and agent icons sit on the title line. */}
+      {/* fork: sidebar look, see FORK.md. Line two ends with the status and age, so the title gets line one. */}
+      {variant === "folder-multiline" ? titleLineIcons : null}
+      {variant === "folder-multiline" ? (
+        <span className="inline-flex shrink-0 items-center gap-1 tabular-nums">
+          {topStatus && !isWokeStatus && !props.statusInFolderHeading ? (
+            <span className={cn("inline-flex items-center gap-1 font-medium", topStatus.className)}>
+              <TopStatusIcon icon={topStatus.icon} className="size-4" />
+              {topStatus.label}
+            </span>
+          ) : null}
+          {status === "working" ? (
+            <WorkingDuration
+              environmentId={thread.environmentId}
+              startedAt={resolveWorkingStartedAt(thread)}
+            />
+          ) : status === "waiting" ? (
+            <WorkingDuration
+              environmentId={thread.environmentId}
+              startedAt={thread.latestRun?.completedAt ?? null}
+            />
+          ) : (
+            <RelativeTimeLabel timestamp={resolveThreadActivityTimestamp(thread)} />
+          )}
+        </span>
+      ) : null}
     </div>
-  );
-  // fork: row icon slots, see FORK.md. Always on the title line, so a branch never moves them.
-  const titleLineIcons = (
-    <span aria-hidden className="inline-flex shrink-0 items-center gap-1">
-      {remoteMachineIcon}
-      <SidebarProviderStack
-        thread={thread}
-        providerEntryByInstanceId={props.providerEntryByInstanceId}
-      />
-    </span>
   );
 
   if (variant !== "card") {
@@ -1363,7 +1427,8 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                     ? "flex flex-col justify-center px-2.5 py-1.5"
                     : "flex h-9 items-center gap-2.5 px-2.5",
                   // Lines titles up with the folder name, past its chevron and icon.
-                  inFolder && "ps-9",
+                  // fork: sidebar look, see FORK.md. A row with a favicon has it in that space.
+                  inFolder && !props.showProjectInFolder && "ps-9",
                 )}
                 onClick={handleClick}
                 onDoubleClick={handleDoubleClick}
@@ -1379,7 +1444,9 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                 <span
                   className={cn(
                     "flex shrink-0 items-center transition-opacity",
-                    (!props.isActive || variantAction === "unsettle") &&
+                    // fork: sidebar look, see FORK.md. In a folder it is the row's only project cue.
+                    !inFolder &&
+                      (!props.isActive || variantAction === "unsettle") &&
                       "opacity-40 grayscale group-focus-within/sidebar-row:opacity-100 group-focus-within/sidebar-row:grayscale-0 group-hover/sidebar-row:opacity-100 group-hover/sidebar-row:grayscale-0",
                   )}
                 >
@@ -1392,7 +1459,6 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
               {title}
               {/* fork: thread tags, see FORK.md. One-line rows have no meta line, so tags show as dots. */}
               {multiline ? null : <ThreadTagChips tags={threadTags} max={3} dots />}
-              {multiline ? titleLineIcons : null}
               {pinIndicator}
               {multiline ? null : terminalStatusIcon}
               {multiline ? null : issueBadge}
@@ -1406,7 +1472,12 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
               ) : (
                 <span
                   className={cn(
-                    "relative ml-auto flex h-6 min-w-8 shrink-0 items-center justify-end",
+                    "relative ml-auto flex h-6 shrink-0 items-center justify-end",
+                    // fork: sidebar look, see FORK.md. These rows leave the title the room until
+                    // hovering brings the action.
+                    multiline
+                      ? "group-any-hover/sidebar-row:min-w-8"
+                      : "min-w-4 group-any-hover/sidebar-row:min-w-8",
                     props.sweepAction !== null && "hidden",
                     jumpHintLabel && JUMP_HINT_SLOT_CLASS_NAME,
                   )}
@@ -1444,16 +1515,13 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                           <T>Dismiss Woke notification</T>
                         </TooltipPopup>
                       </Tooltip>
-                    ) : inFolder && topStatus ? (
+                    ) : multiline ? null : inFolder && // fork: sidebar look, see FORK.md.
+                      topStatus &&
+                      !props.statusInFolderHeading ? (
                       // Folder rows have no status line, so the status takes the time slot.
-                      <span
-                        className={cn(
-                          "inline-flex items-center gap-1 text-xs font-medium",
-                          topStatus.className,
-                        )}
-                      >
-                        <TopStatusIcon icon={topStatus.icon} className="size-3" />
-                        {topStatus.label}
+                      // fork: sidebar look, see FORK.md. Only the icon, so the title keeps its room.
+                      <span className={cn("inline-flex items-center", topStatus.className)}>
+                        <TopStatusIcon icon={topStatus.icon} className="size-4" />
                       </span>
                     ) : (
                       <span className="text-xs">
