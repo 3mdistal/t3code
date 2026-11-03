@@ -391,9 +391,11 @@ thread up to 20 tags.
 - Stock compatibility: tags live under the new `threadTags` settings key on the server that owns the thread,
   mapping thread id to tags. Stock T3 ignores the key, and drops it the next time it saves settings, so after a
   rollback the threads stay but their tags are gone.
-- A patch adds or removes one tag at a time, and the server applies it to the tags it holds, so ticks from two
-  windows both land. A list replaces a thread's tags. Writing tags needs the settings-write scope, and the server
-  reports the `threadTags` capability so older servers hide the menu.
+- A patch adds or removes one tag at a time, removals first, and the server applies it to the tags it holds, so
+  ticks from two windows both land. A list replaces a thread's tags. Writing tags from the app needs the
+  settings-write scope, and the server reports the `threadTags` capability so older servers hide the menu. An agent
+  tags with the thread permissions that pin and snooze use, not the environment-settings ones, because a tag only
+  organizes one thread.
 - Tags of a deleted thread stay in settings, so their names stay in the Tags menu.
 - Upstream v0.1.7 (#29053) added its own tags, stored on the thread through a `thread.tag.set` command, and a
   `hideTaggedThreads` setting that hides threads with chosen tags. It has no way yet to set a tag in the app or from
