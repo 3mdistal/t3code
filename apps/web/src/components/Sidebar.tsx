@@ -36,7 +36,6 @@ import {
   DEFAULT_SIDEBAR_VIEW,
   groupSidebarThreadsByStatus,
   groupSidebarThreadsByTag,
-  hasOpenPullRequest,
   hasSidebarViewFilters,
   isSidebarViewUnread,
   matchesSidebarViewFilters,
@@ -46,6 +45,7 @@ import {
   type SidebarFolderView,
   type SidebarViewGroup,
   sidebarGroupNamesRowStatus,
+  sidebarPrFiltersOf,
   sidebarViewAllowsWorkingShelf,
   sidebarViewStatusOf,
   sortSidebarViewThreads,
@@ -961,6 +961,7 @@ function useSidebarLookups() {
   ];
   return {
     projects,
+    environments,
     serverConfigs,
     projectGroups,
     environmentLabelById,
@@ -1025,6 +1026,7 @@ function readRouteThreadKey(router: AnyRouter): string | null {
 export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReveal }) {
   const {
     projects,
+    environments,
     serverConfigs,
     projectGroups,
     environmentLabelById,
@@ -1449,7 +1451,8 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
       tags: threadTagsOf(thread),
       status: sidebarViewStatusOf(thread),
       pinned: thread.pinnedAt != null,
-      openPullRequest: hasOpenPullRequest(thread),
+      pullRequests: sidebarPrFiltersOf(thread),
+      machine: thread.environmentId,
     });
   const sidebarViewThreads = sidebarViewFiltering ? threads.filter(shownBySidebarView) : threads;
   const {
@@ -3334,6 +3337,14 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                       }}
                       tags={sidebarFilterFacets.tags}
                       statuses={sidebarFilterFacets.statuses}
+                      pinned={sidebarFilterFacets.pinned}
+                      pullRequests={sidebarFilterFacets.pullRequests}
+                      machines={environments.map((environment) => ({
+                        key: environment.environmentId,
+                        label: environment.label,
+                        machine: environmentMachineById.get(environment.environmentId) ?? "server",
+                        count: sidebarFilterFacets.machines.get(environment.environmentId) ?? 0,
+                      }))}
                       filterCount={countSidebarViewFilters(sidebarView, projectScopeKeys.length)}
                       onClear={() => {
                         setProjectScopeKeys([]);

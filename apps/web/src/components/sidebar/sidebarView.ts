@@ -3,7 +3,7 @@ import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/model
 import { hasAnyThreadTag } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 
-import { useLocalStorage } from "~/hooks/useLocalStorage";
+import { readLocalStorageValue, useLocalStorage } from "~/hooks/useLocalStorage";
 import {
   firstValidTimestampMs,
   hasUnseenCompletion,
@@ -32,6 +32,24 @@ export const SIDEBAR_STATUS_LABELS: Record<SidebarStatusFilter, string> = {
   done: "Done",
 };
 
+const SIDEBAR_PIN_FILTERS = ["pinned", "not-pinned"] as const;
+export type SidebarPinFilter = (typeof SIDEBAR_PIN_FILTERS)[number];
+
+export const SIDEBAR_PIN_FILTER_LABELS: Record<SidebarPinFilter, string> = {
+  pinned: "Pinned",
+  "not-pinned": "Not pinned",
+};
+
+const SIDEBAR_PR_FILTERS = ["open", "merged", "closed", "none"] as const;
+export type SidebarPrFilter = (typeof SIDEBAR_PR_FILTERS)[number];
+
+export const SIDEBAR_PR_FILTER_LABELS: Record<SidebarPrFilter, string> = {
+  open: "Open",
+  merged: "Merged",
+  closed: "Closed",
+  none: "No PR",
+};
+
 export const SIDEBAR_THREAD_SORTS = [
   "latest-message",
   "needs-me",
@@ -57,33 +75,71 @@ export const SIDEBAR_GROUPING_LABELS: Record<SidebarGrouping, string> = {
   none: "None",
 };
 
-const SidebarViewSchema = Schema.Struct({
+const sidebarViewFields = {
   tags: Schema.Array(Schema.String),
   statuses: Schema.Array(Schema.Literals(SIDEBAR_STATUS_FILTERS)),
-  pinnedOnly: Schema.Boolean,
-  openPrOnly: Schema.Boolean,
   sort: Schema.Literals(SIDEBAR_THREAD_SORTS),
   groupBy: Schema.Literals(SIDEBAR_GROUPINGS),
   // Tag and status folders; project folders keep their open state in the UI state store.
   collapsedGroups: Schema.Array(Schema.String),
+};
+
+const SidebarViewSchema = Schema.Struct({
+  ...sidebarViewFields,
+  pinned: Schema.Array(Schema.Literals(SIDEBAR_PIN_FILTERS)),
+  pullRequests: Schema.Array(Schema.Literals(SIDEBAR_PR_FILTERS)),
+  // Environment ids.
+  machines: Schema.Array(Schema.String),
 });
 export type SidebarView = typeof SidebarViewSchema.Type;
+
+const SidebarViewV1Schema = Schema.Struct({
+  ...sidebarViewFields,
+  pinnedOnly: Schema.Boolean,
+  openPrOnly: Schema.Boolean,
+});
 
 export const DEFAULT_SIDEBAR_VIEW: SidebarView = {
   tags: [],
   statuses: [],
-  pinnedOnly: false,
-  openPrOnly: false,
+  pinned: [],
+  pullRequests: [],
+  machines: [],
   sort: "latest-message",
   groupBy: "project",
   collapsedGroups: [],
 };
 
-const SIDEBAR_VIEW_STORAGE_KEY = "t3code:sidebar-view:v1";
+const SIDEBAR_VIEW_STORAGE_KEY = "t3code:sidebar-view:v2";
+// Left in place, so an older build still finds its own saved view.
+const SIDEBAR_VIEW_V1_STORAGE_KEY = "t3code:sidebar-view:v1";
+
+/** A view saved before the Pinned and Pull request menus: the switches become their picks. */
+export function migrateSidebarViewV1(stored: typeof SidebarViewV1Schema.Type): SidebarView {
+  const { pinnedOnly, openPrOnly, ...view } = stored;
+  return {
+    ...view,
+    pinned: pinnedOnly ? ["pinned"] : [],
+    pullRequests: openPrOnly ? ["open"] : [],
+    machines: [],
+  };
+}
+
+let initialSidebarView: SidebarView | null = null;
+function readInitialSidebarView(): SidebarView {
+  initialSidebarView ??= migrateSidebarViewV1(
+    readLocalStorageValue(
+      SIDEBAR_VIEW_V1_STORAGE_KEY,
+      { ...DEFAULT_SIDEBAR_VIEW, pinnedOnly: false, openPrOnly: false },
+      SidebarViewV1Schema,
+    ),
+  );
+  return initialSidebarView;
+}
 
 /** The sidebar's filters, sort and grouping. Projects stay in the UI state store's project scope. */
 export function useSidebarView() {
-  return useLocalStorage(SIDEBAR_VIEW_STORAGE_KEY, DEFAULT_SIDEBAR_VIEW, SidebarViewSchema);
+  return useLocalStorage(SIDEBAR_VIEW_STORAGE_KEY, readInitialSidebarView(), SidebarViewSchema);
 }
 
 export function sidebarStatusFilterOf(status: SidebarThreadStatus): SidebarStatusFilter {
@@ -119,9 +175,14 @@ export function isSidebarViewUnread(
   });
 }
 
-export function hasOpenPullRequest(thread: Pick<EnvironmentThreadShell, "pullRequests">): boolean {
-  return thread.pullRequests.some(
-    (link) => link.source !== "stack-dismissed" && link.snapshot?.state === "open",
+/** A thread with several pull requests matches if any of them does. */
+export function sidebarPrFiltersOf(
+  thread: Pick<EnvironmentThreadShell, "pullRequests">,
+): ReadonlyArray<SidebarPrFilter> {
+  const links = thread.pullRequests.filter((link) => link.source !== "stack-dismissed");
+  if (links.length === 0) return ["none"];
+  return SIDEBAR_PR_FILTERS.filter((filter) =>
+    links.some((link) => link.snapshot?.state === filter),
   );
 }
 
@@ -130,39 +191,49 @@ export interface SidebarViewThreadFacts {
   readonly tags: ReadonlyArray<string>;
   readonly status: SidebarStatusFilter;
   readonly pinned: boolean;
-  readonly openPullRequest: boolean;
+  readonly pullRequests: ReadonlyArray<SidebarPrFilter>;
+  readonly machine: string;
 }
 
 export function hasSidebarViewFilters(view: SidebarView): boolean {
-  return view.tags.length > 0 || view.statuses.length > 0 || view.pinnedOnly || view.openPrOnly;
+  return countSidebarViewFilters(view, 0) > 0;
 }
 
-/** A thread passes when it has any picked tag and any picked status, and every switch holds. */
+/** A thread passes when, for each kind of filter with picks, it matches any of them. */
 export function matchesSidebarViewFilters(
   view: SidebarView,
   facts: SidebarViewThreadFacts,
 ): boolean {
   if (view.tags.length > 0 && !hasAnyThreadTag(facts.tags, view.tags)) return false;
   if (view.statuses.length > 0 && !view.statuses.includes(facts.status)) return false;
-  if (view.pinnedOnly && !facts.pinned) return false;
-  if (view.openPrOnly && !facts.openPullRequest) return false;
+  if (view.pinned.length > 0 && !view.pinned.includes(facts.pinned ? "pinned" : "not-pinned")) {
+    return false;
+  }
+  if (
+    view.pullRequests.length > 0 &&
+    !facts.pullRequests.some((pullRequest) => view.pullRequests.includes(pullRequest))
+  ) {
+    return false;
+  }
+  if (view.machines.length > 0 && !view.machines.includes(facts.machine)) return false;
   return true;
 }
 
-/** The badge on the filter button: each picked project, tag and status, and each switch. */
+/** The badge on the filter button: every pick counts once. */
 export function countSidebarViewFilters(view: SidebarView, projectCount: number): number {
   return (
     projectCount +
     view.tags.length +
     view.statuses.length +
-    Number(view.pinnedOnly) +
-    Number(view.openPrOnly)
+    view.pinned.length +
+    view.pullRequests.length +
+    view.machines.length
   );
 }
 
 /** Clear filters leaves the sort, grouping and closed folders alone. */
 export function clearSidebarViewFilters(view: SidebarView): SidebarView {
-  return { ...view, tags: [], statuses: [], pinnedOnly: false, openPrOnly: false };
+  return { ...view, tags: [], statuses: [], pinned: [], pullRequests: [], machines: [] };
 }
 
 /**
@@ -331,8 +402,9 @@ export interface SidebarFilterCount<T> {
 }
 
 /**
- * How many threads each project, tag and status holds, for the filter menu. Projects are
- * keyed `environmentId:projectId`; tags merge across case and sort by name.
+ * How many threads each filter option holds, for the filter menu. Projects are keyed
+ * `environmentId:projectId`; tags merge across case and sort by name. A thread counts under
+ * each state its pull requests are in.
  */
 export function countSidebarFilterFacets<T extends EnvironmentThreadShell>(
   threads: readonly T[],
@@ -341,8 +413,14 @@ export function countSidebarFilterFacets<T extends EnvironmentThreadShell>(
   readonly projects: ReadonlyMap<string, number>;
   readonly tags: ReadonlyArray<SidebarFilterCount<string>>;
   readonly statuses: ReadonlyArray<SidebarFilterCount<SidebarStatusFilter>>;
+  readonly pinned: ReadonlyArray<SidebarFilterCount<SidebarPinFilter>>;
+  readonly pullRequests: ReadonlyArray<SidebarFilterCount<SidebarPrFilter>>;
+  readonly machines: ReadonlyMap<string, number>;
 } {
   const projects = new Map<string, number>();
+  const machines = new Map<string, number>();
+  const pullRequests = new Map<SidebarPrFilter, number>();
+  let pinnedCount = 0;
   const tags = new Map<string, { value: string; count: number }>();
   const statuses = new Map<SidebarStatusFilter, number>();
   for (const thread of threads) {
@@ -355,11 +433,25 @@ export function countSidebarFilterFacets<T extends EnvironmentThreadShell>(
     }
     const status = sidebarViewStatusOf(thread);
     statuses.set(status, (statuses.get(status) ?? 0) + 1);
+    machines.set(thread.environmentId, (machines.get(thread.environmentId) ?? 0) + 1);
+    for (const pullRequest of sidebarPrFiltersOf(thread)) {
+      pullRequests.set(pullRequest, (pullRequests.get(pullRequest) ?? 0) + 1);
+    }
+    if (thread.pinnedAt != null) pinnedCount += 1;
   }
   return {
     projects,
     tags: [...tags.values()].toSorted((left, right) => left.value.localeCompare(right.value)),
     statuses: SIDEBAR_STATUS_FILTERS.map((value) => ({ value, count: statuses.get(value) ?? 0 })),
+    pinned: [
+      { value: "pinned", count: pinnedCount },
+      { value: "not-pinned", count: threads.length - pinnedCount },
+    ],
+    pullRequests: SIDEBAR_PR_FILTERS.map((value) => ({
+      value,
+      count: pullRequests.get(value) ?? 0,
+    })),
+    machines,
   };
 }
 
@@ -388,7 +480,7 @@ export interface SidebarFolderView {
   readonly hiddenThreads: ReadonlyArray<EnvironmentThreadShell>;
 }
 
-/** Menu search: every project, tag and status whose name contains the query. */
+/** Menu search: every filter option whose name contains the query. */
 export function matchesSidebarFilterQuery(label: string, query: string): boolean {
   const needle = query.trim().toLocaleLowerCase();
   return needle.length === 0 || label.toLocaleLowerCase().includes(needle);
