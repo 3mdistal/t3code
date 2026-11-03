@@ -24,6 +24,7 @@ export const makeStartPacing = Effect.gen(function* () {
       EXISTS (
         SELECT 1 FROM orchestration_v2_projection_runs AS restart_run
         WHERE restart_run.run_id = json_extract(candidate.payload_json, '$.runId')
+          AND restart_run.status = 'starting'
           AND (restart_run.requested_at < ${startedAt}
             OR json_extract(restart_run.payload_json, '$.restartContinuationOfRunId') IS NOT NULL)
       )
@@ -55,7 +56,8 @@ export const makeStartPacing = Effect.gen(function* () {
       const rows = yield* sql<{ readonly restored: number }>`
         SELECT requested_at < ${startedAt}
           OR json_extract(payload_json, '$.restartContinuationOfRunId') IS NOT NULL AS restored
-        FROM orchestration_v2_projection_runs WHERE run_id = ${request.runId}
+        FROM orchestration_v2_projection_runs
+        WHERE run_id = ${request.runId} AND status = 'starting'
       `;
       if (rows[0]?.restored === 1) nextStartAt = DateTime.toEpochMillis(now) + RESTART_START_GAP_MS;
     }),
