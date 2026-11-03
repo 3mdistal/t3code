@@ -265,6 +265,11 @@ export function layerProviderReplay<Transcript extends ProviderReplayTranscript,
     readonly providerInstances?: Partial<
       ProviderInstanceRegistry.ProviderInstanceRegistry["Service"]
     >;
+    // fork: exercise the idle pin cutoff without hours of worker ticks; see FORK.md.
+    readonly idleSessionOptions?: Pick<
+      ProviderSessionManager.ProviderSessionManagerV2LayerOptions,
+      "idleTimeoutMs" | "maxIdlePinMs"
+    >;
     // fork: gate real continuation dispatch in wake ownership replays; see FORK.md.
     readonly continuationDispatch?: (
       dispatch: Orchestrator.OrchestratorV2Shape["dispatch"],
@@ -309,6 +314,11 @@ export function layerWithRegistry<Error>(
     /** The instances the ingestor reads snapshots from, such as an endpoint behind a hub. */
     readonly providerInstances?: Partial<
       ProviderInstanceRegistry.ProviderInstanceRegistry["Service"]
+    >;
+    // fork: see FORK.md.
+    readonly idleSessionOptions?: Pick<
+      ProviderSessionManager.ProviderSessionManagerV2LayerOptions,
+      "idleTimeoutMs" | "maxIdlePinMs"
     >;
     // fork: see FORK.md.
     readonly continuationDispatch?: (
@@ -463,6 +473,7 @@ export function layerWithRegistry<Error>(
   );
   const layerProviderSessionManagerProvided = ProviderSessionManager.layerWithOptions({
     configureMcp: false,
+    ...options.idleSessionOptions, // fork: see FORK.md.
   }).pipe(
     Layer.provide(
       Layer.mergeAll(

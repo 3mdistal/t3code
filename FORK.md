@@ -725,19 +725,32 @@ commands in the existing pending-work roster, and its runtime probes retain both
 notifications. The hold ends after a committed continuation attaches and consumes the buffer. Offering an
 in-memory request or queueing a run does not end it. Empty roster levels cannot erase the hold.
 
-Missing native wake evidence expires after two minutes, with a warning. Once native evidence arrives, admission
-can wait for the governor without expiring. Failed reads or dispatches retry with capped backoff, fresh command
-receipts and a stable message ID. Stop, disabled-provider cancellation and process replacement retire the owning
-query's state; restart uses the existing awaited-work recovery. An unexpected provider exit cancels an
-undeliverable native wake with a visible notice. There is no migration, event type or setting.
+Missing native wake evidence expires after two minutes, with a warning. Native evidence claims only the task IDs
+in its notifications; consuming one wake leaves other tasks held under their original deadlines. Failed reads or
+dispatches retry with capped backoff, fresh command receipts and a stable message ID. Admission can wait for the
+governor up to the existing idle pin limit (four hours by default). At that limit the manager persists a visible
+"Background wake cancelled" notice before closing the session, then retries a failed notice write with the other
+release records. This bounds memory retention without silently losing a wake. The existing restart reconciler
+operates on the whole server; using it for one idle session would affect unrelated work.
+
+Upstream #24891 lets settling cancel a queued message the user didn't write, where it used to refuse. Auto-settle
+still gives a queued turn two minutes to start, but a background wake held for admission can wait far longer, so
+the settlement read skips a thread while one is queued.
+
+Stop, disabled-provider cancellation and process replacement retire the owning query's state; restart uses the
+existing awaited-work recovery. An unexpected provider exit also cancels an undeliverable native wake with a
+visible notice. Intentional Stop stays quiet. There is no migration, event type or setting.
 
 - `apps/server/src/orchestration-v2/Adapters/ClaudeWakeOwnership.ts` owns the query-scoped deadline and handoff;
   `ClaudeAdapterV2.ts` publishes and probes it at the existing roster and continuation seams.
+- `ProviderSessionManager.ts`, `ClaudeWakeCancellation.ts` and the optional in-memory adapter callback persist
+  cancellation at bounded idle release independently of the closing reader, using existing turn-item events.
 - Upstream now covers part of this. It publishes owed wakes for opaque tasks that left the roster (OWEDPR), and its
   wake latch retires an unstarted wake's frames (#28173, #30114). The fork merges its held commands into that
-  published list, and a retired wake also ends its query's hold. Upstream #31840 keeps the old run's event
-  reader open while its last consumed roster lists pending work, so `RunExecutionService.ts` carries no fork
-  code. The fork's own share is the hold for awaited commands, the deadline, retries and the idle check.
+  published list, and a retired wake also ends its query's hold on the tasks it reported. Upstream #31840 keeps
+  the old run's event reader open while its last consumed roster lists pending work, so `RunExecutionService.ts`
+  carries no fork code. The fork's own share is the hold for awaited commands, the deadline, retries and the idle
+  check.
 - `packages/provider-core/src/server/ProviderContinuationRequests.ts` and
   `apps/server/src/orchestration-v2/ProviderContinuationService.ts` carry the optional receipt and retry callback.
 - Tests: `Adapters/ClaudeWakeOwnership.fork.test.ts` and `ClaudeWakeOwnership.fork.test.ts`, with the real session
