@@ -540,6 +540,8 @@ type SidebarThreadRowProps = {
   // "folder" is a one-line row inside a boring sidebar project folder;
   // "folder-multiline" adds the card's branch and PR line under it.
   variant: "card" | "slim" | "folder" | "folder-multiline";
+  // fork: sidebar filter and sort, see FORK.md. Tag and status folders hold several projects.
+  showProjectInFolder?: boolean | undefined;
   navigationParent?: string | undefined;
   variantAction: SidebarSweepAction;
   settlementSupported: boolean;
@@ -1178,19 +1180,11 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
           <span className="text-diff-deletion-foreground">−{formatDiffCount(diff.deletions)}</span>
         </span>
       ) : null}
-      <span
-        aria-hidden
-        className="pointer-events-none ml-auto inline-flex shrink-0 items-center gap-1"
-      >
-        {remoteMachineIcon}
-        <SidebarProviderStack
-          thread={thread}
-          providerEntryByInstanceId={props.providerEntryByInstanceId}
-        />
-      </span>
+      {/* fork: row icon slots, see FORK.md. The machine and agent icons sit on the title line. */}
     </div>
   );
-  const titleLineIcons = metaLineEmpty ? (
+  // fork: row icon slots, see FORK.md. Always on the title line, so a branch never moves them.
+  const titleLineIcons = (
     <span aria-hidden className="inline-flex shrink-0 items-center gap-1">
       {remoteMachineIcon}
       <SidebarProviderStack
@@ -1198,7 +1192,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
         providerEntryByInstanceId={props.providerEntryByInstanceId}
       />
     </span>
-  ) : null;
+  );
 
   if (variant !== "card") {
     const multiline = variant === "folder-multiline";
@@ -1245,7 +1239,8 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
             {/* `contents` keeps one-line rows a single flex row. */}
             <div className={multiline ? "flex h-6 min-w-0 items-center gap-2.5" : "contents"}>
               {accessibleTitle}
-              {inFolder ? null : (
+              {/* fork: sidebar filter and sort, see FORK.md. */}
+              {inFolder && !props.showProjectInFolder ? null : (
                 <span
                   className={cn(
                     "flex shrink-0 items-center transition-opacity",
@@ -1444,9 +1439,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
               {props.project ? (
                 <ProjectFavicon project={props.project} className="size-4 shrink-0" />
               ) : null}
-              {/* Left of the status slot, the pin would slide when hover swaps the
-                label for the wider row controls. */}
-              {pinIndicator}
+              {/* fork: row icon slots, see FORK.md. The pin sits on the title line. */}
               {props.projectDisplayName ? (
                 <span
                   className={cn("min-w-0 flex-1 truncate font-normal text-secondary-label text-xs")}
@@ -1589,6 +1582,8 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                   Regenerating title
                 </span>
               ) : null}
+              {/* fork: row icon slots, see FORK.md. */}
+              {pinIndicator}
               {titleLineIcons}
             </div>
             {metaLine}

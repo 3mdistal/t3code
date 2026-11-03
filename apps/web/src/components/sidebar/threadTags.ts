@@ -47,6 +47,30 @@ export function useThreadTags(
   return serialized === "[]" ? NO_TAGS : (JSON.parse(serialized) as ReadonlyArray<string>);
 }
 
+type ThreadTagsByEnvironment = ReadonlyMap<
+  EnvironmentId,
+  Readonly<Record<string, ReadonlyArray<string>>>
+>;
+
+/**
+ * Every server's thread tags, for the sidebar filter. Read as one string, so the sidebar
+ * re-renders when tags change and not when other server settings or providers do.
+ */
+export function useThreadTagsByEnvironment(): ThreadTagsByEnvironment {
+  const serialized = useAtomValue(environmentServerConfigsAtom, (configs) =>
+    JSON.stringify(
+      [...configs].flatMap(([environmentId, config]) =>
+        config.environment.capabilities.threadTags === true
+          ? [[environmentId, config.settings.threadTags]]
+          : [],
+      ),
+    ),
+  );
+  return new Map(
+    JSON.parse(serialized) as Array<[EnvironmentId, Record<string, ReadonlyArray<string>>]>,
+  );
+}
+
 /** A steady hue per tag, so a tag keeps its color everywhere it shows. */
 export function threadTagHue(tag: string): number {
   let hash = 0;

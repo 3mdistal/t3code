@@ -5,8 +5,11 @@ import { TagIcon } from "lucide-react";
 import { cn } from "~/lib/utils";
 import { threadTagHue, useThreadTags } from "./threadTags";
 
-const tagDotClassName = "size-1.5 shrink-0 rounded-full";
-const tagDotStyle = (tag: string) => ({ backgroundColor: `oklch(0.7 0.14 ${threadTagHue(tag)})` });
+export const threadTagDotClassName = "size-1.5 shrink-0 rounded-full";
+/** A tag's color, the same on rows, the hover card and the filter menu. */
+export const threadTagDotStyle = (tag: string) => ({
+  backgroundColor: `oklch(0.7 0.14 ${threadTagHue(tag)})`,
+});
 
 /**
  * A thread's tags as small chips; extra tags fold into "+N", and the hover card lists them all.
@@ -29,7 +32,7 @@ export function ThreadTagChips(props: {
         className={cn("flex shrink-0 items-center gap-0.5", props.className)}
       >
         {shown.map((tag) => (
-          <span key={tag} className={tagDotClassName} style={tagDotStyle(tag)} />
+          <span key={tag} className={threadTagDotClassName} style={threadTagDotStyle(tag)} />
         ))}
         {hidden > 0 ? (
           <span className="ms-0.5 text-2xs leading-4 text-muted-foreground">+{hidden}</span>
@@ -47,7 +50,7 @@ export function ThreadTagChips(props: {
           key={tag}
           className="inline-flex min-w-0 max-w-24 items-center gap-1 rounded-sm bg-muted/70 px-1 text-2xs leading-4 text-muted-foreground"
         >
-          <span aria-hidden className={tagDotClassName} style={tagDotStyle(tag)} />
+          <span aria-hidden className={threadTagDotClassName} style={threadTagDotStyle(tag)} />
           <span className="min-w-0 truncate">{tag}</span>
         </span>
       ))}
