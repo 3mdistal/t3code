@@ -28,7 +28,8 @@ export function normalizeThreadTag(tag: string): string {
   return tag.trim().replace(/\s+/g, " ").slice(0, THREAD_TAG_MAX_LENGTH).trim();
 }
 
-const tagKey = (tag: string) => tag.toLocaleLowerCase();
+// Compared in their stored form, so a tag typed with extra spaces still finds itself.
+const tagKey = (tag: string) => normalizeThreadTag(tag).toLocaleLowerCase();
 
 /** Tags match regardless of case, and a new tag takes the spelling already in use. */
 export function applyThreadTagsPatch(
@@ -44,7 +45,9 @@ export function applyThreadTagsPatch(
     const changes: ReadonlyArray<readonly [string, boolean]> = Array.isArray(change)
       ? change.map((tag) => [tag, true] as const)
       : Object.entries(change ?? {});
-    for (const [raw, add] of changes) {
+    // Removals go first, so a patch that swaps tags on a full thread keeps its additions.
+    const ordered = [...changes.filter(([, add]) => !add), ...changes.filter(([, add]) => add)];
+    for (const [raw, add] of ordered) {
       const name = normalizeThreadTag(raw);
       if (name === "") continue;
       const key = tagKey(name);

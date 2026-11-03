@@ -20,7 +20,6 @@ import { stackedThreadToast, toastManager } from "../ui/toast";
 import { requestNewThreadTag } from "./NewThreadTagDialog";
 
 const NO_TAGS: ReadonlyArray<string> = [];
-const TAG_SEPARATOR = "\u0000";
 
 /** The Tags submenu for a thread, or null when its server can't hold tags. */
 export function readThreadTagMenu(threadRef: ScopedThreadRef): ThreadTagMenuState | null {
@@ -41,12 +40,11 @@ export function useThreadTags(
   environmentId: EnvironmentId,
   threadId: ThreadId,
 ): ReadonlyArray<string> {
-  // Joined so the row only re-renders when this thread's tags change.
-  const joined = useAtomValue(
-    serverEnvironment.settingsValueAtom(environmentId),
-    (settings) => settings?.threadTags[threadId]?.join(TAG_SEPARATOR) ?? "",
+  // Read as one string so the row only re-renders when this thread's tags change.
+  const serialized = useAtomValue(serverEnvironment.settingsValueAtom(environmentId), (settings) =>
+    JSON.stringify(settings?.threadTags[threadId] ?? NO_TAGS),
   );
-  return joined === "" ? NO_TAGS : joined.split(TAG_SEPARATOR);
+  return serialized === "[]" ? NO_TAGS : (JSON.parse(serialized) as ReadonlyArray<string>);
 }
 
 /** A steady hue per tag, so a tag keeps its color everywhere it shows. */
