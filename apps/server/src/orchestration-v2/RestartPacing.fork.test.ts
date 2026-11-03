@@ -15,6 +15,22 @@ it.effect("paces six restored starts while leaving control effects claimable", (
     const sql = yield* SqlClient.SqlClient;
     const outbox = yield* EffectOutbox.EffectOutboxV2;
     const now = DateTime.formatIso(yield* DateTime.now);
+    yield* sql`
+      INSERT INTO orchestration_v2_projection_runs
+        (run_id, thread_id, ordinal, provider, status, requested_at, payload_json)
+      VALUES ('stale:run', 'stale:thread', 1, 'codex', 'failed', ${now},
+        ${JSON.stringify({ restartContinuationOfRunId: "stale:source" })})
+    `;
+    yield* outbox.enqueue([
+      {
+        id: "stale:start",
+        commandId: CommandId.make("stale:start"),
+        threadId: ThreadId.make("stale:thread"),
+        request: { type: "provider-turn.start", runId: RunId.make("stale:run") },
+      },
+    ]);
+    const stale = Option.getOrThrow(yield* outbox.claimNext({ workerId: "pacing-test" }));
+    yield* outbox.succeed({ effectId: stale.id, workerId: "pacing-test" });
     const starts = Array.from({ length: 6 }, (_, index) => ({
       id: `start:${index}`,
       commandId: CommandId.make(`start:${index}`),
