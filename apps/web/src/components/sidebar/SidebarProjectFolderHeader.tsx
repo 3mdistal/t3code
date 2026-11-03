@@ -32,11 +32,12 @@ export function sidebarFolderRowId(projectKey: string) {
 
 /**
  * A project folder in the boring sidebar. It reads like a shelf header: a trailing
- * count and chevron, with the count and a status dot only while it is closed, so a
- * closed folder still says when a hidden thread needs you.
+ * count and chevron, with a status dot only while it is closed, so a closed folder
+ * still says when a hidden thread needs you.
  */
 export const SidebarProjectFolderHeader = memo(function SidebarProjectFolderHeader(props: {
   group: SidebarProjectSnapshot;
+  threadCount: number; // fork: sidebar look, see FORK.md.
   collapsed: boolean;
   hiddenThreads: readonly EnvironmentThreadShell[];
   onToggle: (group: SidebarProjectSnapshot) => void;
@@ -62,7 +63,8 @@ export const SidebarProjectFolderHeader = memo(function SidebarProjectFolderHead
   return (
     <li
       data-testid="sidebar-project-folder"
-      className="group/project-folder relative mt-2 list-none first:mt-0"
+      // fork: sidebar look, see FORK.md. Room above, and a quieter name, so it reads as a heading.
+      className="group/project-folder relative mt-3 list-none first:mt-0"
     >
       <button
         type="button"
@@ -78,7 +80,7 @@ export const SidebarProjectFolderHeader = memo(function SidebarProjectFolderHead
         className="flex h-8 w-full cursor-pointer items-center gap-2.5 rounded-(--control-radius) px-(--sidebar-row-content-inset) text-left outline-none hover:bg-sidebar-row-hover focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
       >
         <ProjectFavicon project={group} className="size-4 shrink-0" />
-        <span className="min-w-0 flex-1 truncate text-sm font-medium text-sidebar-foreground/90">
+        <span className="min-w-0 flex-1 truncate text-sm font-medium text-sidebar-foreground/70">
           {group.displayName}
         </span>
         {dot ? (
@@ -86,9 +88,10 @@ export const SidebarProjectFolderHeader = memo(function SidebarProjectFolderHead
             <span className="sr-only">{FOLDER_DOT_LABEL[dot]}</span>
           </span>
         ) : null}
-        {collapsed && hiddenThreads.length > 0 ? (
+        {/* fork: sidebar look, see FORK.md. Open or closed, like a shelf header. */}
+        {props.threadCount > 0 ? (
           <span className="shrink-0 text-xs tabular-nums text-sidebar-muted-foreground group-hover/project-folder:invisible pointer-coarse:invisible">
-            {hiddenThreads.length}
+            {props.threadCount}
           </span>
         ) : null}
         <ChevronDownIcon

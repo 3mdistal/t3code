@@ -508,6 +508,37 @@ unless the user has set a manual project order. Filters never change the sort or
   extends the fork's `threadTags.ts` and `ThreadTagChips.tsx`.
 - Tests: `apps/web/src/components/sidebar/sidebarView.fork.test.ts`.
 
+### Working section and grouped rows in the boring sidebar (`fork:`)
+
+The Working section setting (General) now applies to the boring sidebar too. Working and monitoring threads sit in
+a Working section docked above Snoozed and Settled, as in the classic sidebar, and go back to their folder when they
+stop. The section steps aside when threads are grouped or filtered by status, so those threads show under their own
+status instead of in a closed section. Pinned threads stay pinned.
+
+Group by none is the classic list. A grouped list (project, tag or status) has one row type, including pinned and
+working rows, so cards and one-liners never mix:
+
+- One-line rows show the status as its icon only, so the title keeps the room, and the hover card names it. Under a
+  heading that already says the status the row shows its age instead; Needs you rows keep the icon, since that
+  heading covers several kinds of wait.
+- A row outside a project folder has its favicon in the left slot, in color, so its title starts where Snoozed and
+  Settled titles do. Rows in a project folder leave that slot empty, lining up with the folder name.
+- "Two-line folder rows" now means two lines on every row: the title alone on line one, then the branch, tag marks,
+  pull request, agent, status and age on line two.
+- Folder headings always show their thread count, like the section headings. They sit quieter than the titles under
+  them, with more space above each one and above the first section, so they don't read as rows.
+- A tag's color mark is a short upright bar, because a round dot in the sidebar means a status needs attention.
+- Snoozed and Settled rows give the title the room they held for the hover action, as folder rows do.
+
+- Stock compatibility: no new settings, storage or server changes. With the Labs switch off the list is stock, apart
+  from the wider titles in Snoozed and Settled.
+- Fork files: `sidebarView.ts` (`sidebarViewAllowsWorkingShelf`, `sidebarGroupNamesRowStatus`) and
+  `ThreadTagChips.tsx` in `apps/web/src/components/sidebar/`.
+- Upstream files it changes: `Sidebar.tsx` (the Working section's gate, row types, shelf spacing),
+  `SidebarThreadRow.tsx` (the folder and two-line layouts, the hover card's status),
+  `SidebarProjectFolderHeader.tsx` (the count), and the setting descriptions in `SettingsPanels.tsx` and
+  `LabsSettingsPanel.tsx`.
+
 ### Bulk thread actions (`fork:`)
 
 Right-clicking several selected threads offers what a single thread's menu does, so a batch doesn't take one click

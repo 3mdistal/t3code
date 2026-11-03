@@ -44,6 +44,8 @@ import {
   orderSidebarFoldersByThreads,
   type SidebarFolderView,
   type SidebarViewGroup,
+  sidebarGroupNamesRowStatus,
+  sidebarViewAllowsWorkingShelf,
   sidebarViewStatusOf,
   sortSidebarViewThreads,
   useSidebarView,
@@ -471,9 +473,10 @@ function useSidebarThreads(input: {
     keepEmptyFolders: keepEmpty,
     view, // fork: sidebar filter and sort, see FORK.md.
   } = input;
-  // Folders already separate the work, so boring mode has no Working shelf.
+  // fork: Working section in the boring sidebar, see FORK.md. Only status folders replace it.
   const workingShelfEnabled =
-    useClientSettings((s) => s.sidebarWorkingShelfEnabled) && folderGroups === null;
+    useClientSettings((s) => s.sidebarWorkingShelfEnabled) &&
+    (folderGroups === null || view.allowsWorkingShelf);
   const inboxReturnsVersion = useSyncExternalStore(
     inboxReturns.subscribe,
     inboxReturns.getSnapshot,
@@ -1480,6 +1483,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
       collapsedGroups: sidebarView.collapsedGroups,
       pickedTags: sidebarView.tags,
       keepProjectOrder: projectSortOrder === "manual",
+      allowsWorkingShelf: sidebarViewAllowsWorkingShelf(sidebarView),
       tagsOf: threadTagsOf,
       needsMeRankOf: (thread) =>
         needsMeRank(
@@ -3609,25 +3613,31 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                     )}
                   >
                     {(() => {
+                      // fork: sidebar look, see FORK.md. A grouped list has one row type, as a
+                      // classic list does, so pinned and working rows match the folders below.
+                      const groupedRows = projectFolders !== null && sidebarView.groupBy !== "none";
+                      const firstShelfClassName = groupedRows ? "mt-auto h-10 pt-2" : "mt-auto";
                       const renderThreadRow = (
                         thread: EnvironmentThreadShell,
                         section: SidebarSection,
                         // The tree row of the project folder this row sits in.
                         folderRow?: string,
                         showProjectInFolder = false, // fork: sidebar filter and sort, see FORK.md.
+                        statusInFolderHeading = false, // fork: sidebar look, see FORK.md.
                       ) => {
                         const threadKey = scopedThreadKey(
                           scopeThreadRef(thread.environmentId, thread.id),
                         );
                         const isCard =
                           section === "active" || section === "pinned" || section === "working";
-                        const rowVariant = folderRow
-                          ? folderRowsMultiline
-                            ? "folder-multiline"
-                            : "folder"
-                          : isCard
-                            ? "card"
-                            : "slim";
+                        const rowVariant =
+                          folderRow || (isCard && groupedRows) // fork: see FORK.md.
+                            ? folderRowsMultiline
+                              ? "folder-multiline"
+                              : "folder"
+                            : isCard
+                              ? "card"
+                              : "slim";
                         return (
                           <SortableThreadRow
                             key={threadKey}
@@ -3641,7 +3651,8 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                             }
                             thread={thread}
                             variant={rowVariant}
-                            showProjectInFolder={showProjectInFolder} // fork: sidebar filter and sort, see FORK.md.
+                            showProjectInFolder={showProjectInFolder || !folderRow} // fork: see FORK.md.
+                            statusInFolderHeading={statusInFolderHeading} // fork: sidebar look, see FORK.md.
                             navigationParent={
                               folderRow ??
                               (section === "working" ||
@@ -3759,6 +3770,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                                 <SidebarViewFolderHeader
                                   key={`view-folder:${folder.key}`}
                                   group={folder.viewGroup}
+                                  threadCount={folder.threads.length + folder.hiddenThreads.length}
                                   collapsed={folder.collapsed}
                                   hiddenThreads={folder.hiddenThreads}
                                   onToggle={toggleViewFolder}
@@ -3769,6 +3781,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                                 <SidebarProjectFolderHeader
                                   key={`project-folder:${folder.group.projectKey}`}
                                   group={folder.group}
+                                  threadCount={folder.threads.length + folder.hiddenThreads.length} // fork: see FORK.md.
                                   collapsed={folder.collapsed}
                                   hiddenThreads={folder.hiddenThreads}
                                   onToggle={toggleProjectFolder}
@@ -3786,6 +3799,8 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                                     ? undefined
                                     : sidebarFolderRowId(folder.key),
                                   folder.viewGroup !== null,
+                                  folder.viewGroup !== null &&
+                                    sidebarGroupNamesRowStatus(folder.viewGroup),
                                 ),
                               );
                             }
@@ -3838,7 +3853,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                               <SidebarSectionHeader
                                 key="working-shelf-header"
                                 marker="working-header"
-                                className="mt-auto"
+                                className={firstShelfClassName} // fork: sidebar look, see FORK.md.
                                 label="Working"
                                 count={workingThreads.length}
                                 toggle={{
@@ -3853,7 +3868,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                               <SidebarSectionHeader
                                 key="snoozed-shelf-header"
                                 marker="snoozed-header"
-                                className={cn(workingThreads.length === 0 && "mt-auto")}
+                                className={cn(workingThreads.length === 0 && firstShelfClassName)} // fork: see FORK.md.
                                 label="Snoozed"
                                 count={snoozedThreads.length}
                                 toggle={{
@@ -3869,7 +3884,8 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                                 key="settled-shelf-header"
                                 marker="settled-header"
                                 className={cn(
-                                  workingThreads.length + snoozedThreads.length === 0 && "mt-auto",
+                                  workingThreads.length + snoozedThreads.length === 0 &&
+                                    firstShelfClassName, // fork: sidebar look, see FORK.md.
                                 )}
                                 label="Settled"
                                 count={settledCount}

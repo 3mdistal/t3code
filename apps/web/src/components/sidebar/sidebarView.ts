@@ -317,6 +317,14 @@ export function groupSidebarThreadsByStatus<T>(
   });
 }
 
+/**
+ * Whether a folder's heading already says what its rows would. "Needs you" holds several
+ * kinds of wait, so those rows still say which.
+ */
+export function sidebarGroupNamesRowStatus(group: Pick<SidebarViewGroup<unknown>, "status">) {
+  return group.status !== null && group.status !== "needs-you";
+}
+
 export interface SidebarFilterCount<T> {
   readonly value: T;
   readonly count: number;
@@ -355,6 +363,16 @@ export function countSidebarFilterFacets<T extends EnvironmentThreadShell>(
   };
 }
 
+/**
+ * Working threads fold into the Working section unless the view is about status. Status folders
+ * have their own Working folder, and a status filter shouldn't hide its matches in a closed shelf.
+ */
+export function sidebarViewAllowsWorkingShelf(
+  view: Pick<SidebarView, "groupBy" | "statuses">,
+): boolean {
+  return view.groupBy !== "status" && view.statuses.length === 0;
+}
+
 /** What boring sidebar folders take from the view. */
 export interface SidebarFolderView {
   readonly sort: SidebarThreadSort;
@@ -363,6 +381,7 @@ export interface SidebarFolderView {
   readonly pickedTags: ReadonlyArray<string>;
   // A manual project order wins over the sort for project folders.
   readonly keepProjectOrder: boolean;
+  readonly allowsWorkingShelf: boolean;
   readonly tagsOf: (thread: EnvironmentThreadShell) => ReadonlyArray<string>;
   readonly needsMeRankOf: (thread: EnvironmentThreadShell) => number;
   // Loaded threads the filters hide, so the Settled count doesn't take them for unloaded ones.
