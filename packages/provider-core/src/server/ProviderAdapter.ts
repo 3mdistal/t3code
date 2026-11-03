@@ -573,6 +573,8 @@ export interface ProviderAdapterV2SessionRuntime {
   /** Manager runtimes broadcast independent subscriptions; adapters may expose only a single-consumer stream. */
   readonly subscribeEvents?: Effect.Effect<ProviderAdapterV2EventSubscription>;
   readonly hasPendingBackgroundWork?: Effect.Effect<boolean>;
+  /** fork: lets bounded idle release persist a wake-loss notice before closing the event pump; see FORK.md. */
+  readonly backgroundWakeCancellationNotice?: Effect.Effect<OrchestrationV2TurnItem | null>;
   /** Root-subscription probe; replacement checks opt in to subagents owned by the live process. */
   readonly hasPendingBackgroundWorkForThread?: (
     providerThread: OrchestrationV2ProviderThread,

@@ -55,11 +55,20 @@ it.effect.each([
   { emptyFirst: false, end: "exit" },
   { emptyFirst: false, end: "restart" },
   { emptyFirst: false, end: "top-level" },
+  { emptyFirst: true, end: "second-task" },
+  { emptyFirst: false, end: "idle-expire" },
 ])("owns an awaited Claude wake ($emptyFirst, $end)", ({ emptyFirst, end }) =>
   Effect.gen(function* () {
     const scenarioName = `fork-claude-wake-${emptyFirst}-${end}`;
-    const deliverWake =
-      end === "wake" || end === "retry" || end === "stop-retry" || end === "top-level";
+    const deliverWake = [
+      "wake",
+      "retry",
+      "stop-retry",
+      "top-level",
+      "second-task",
+      "idle-expire",
+    ].includes(end);
+    const secondTask = end === "second-task";
     const workspace = yield* checkpointWorkspace(scenarioName);
     const nativeId = "00000000-0000-4000-8000-000000000001";
     let ordinal = 10;
@@ -81,6 +90,26 @@ it.effect.each([
         usage: { input_tokens: 1, output_tokens: 1 },
         modelUsage: {},
         permission_denials: [],
+      });
+    const assistant = (text: string, id: string) =>
+      frame({
+        type: "assistant",
+        parent_tool_use_id: null,
+        message: {
+          id,
+          type: "message",
+          role: "assistant",
+          stop_reason: null,
+          stop_sequence: null,
+          usage: {
+            input_tokens: 1,
+            output_tokens: 1,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+          },
+          model: CLAUDE_MODEL_SELECTION.model,
+          content: [{ type: "text", text }],
+        },
       });
     const transcript = yield* ClaudeOrchestratorReplayHarness.decodeTranscript({
       provider: "claudeAgent",
@@ -114,9 +143,26 @@ it.effect.each([
             },
           },
         },
+        ...(secondTask
+          ? [
+              {
+                type: "emit_inbound" as const,
+                label: "task-start",
+                frame: frame({
+                  type: "system",
+                  subtype: "task_started",
+                  task_id: "other",
+                  tool_use_id: "tool_other",
+                  task_type: "local_bash",
+                  description: "Second waiter",
+                  is_backgrounded: true,
+                }),
+              },
+            ]
+          : []),
         {
           type: "emit_inbound",
-          label: "task-start",
+          label: secondTask ? "primary-start" : "task-start",
           frame: frame({
             type: "system",
             subtype: "task_started",
@@ -170,27 +216,9 @@ it.effect.each([
               {
                 type: "emit_inbound" as const,
                 label: "native-wake",
-                frame: frame({
-                  type: "assistant",
-                  parent_tool_use_id: null,
-                  message: {
-                    id: "wake",
-                    type: "message",
-                    role: "assistant",
-                    stop_reason: null,
-                    stop_sequence: null,
-                    usage: {
-                      input_tokens: 1,
-                      output_tokens: 1,
-                      cache_creation_input_tokens: 0,
-                      cache_read_input_tokens: 0,
-                    },
-                    model: CLAUDE_MODEL_SELECTION.model,
-                    content: [{ type: "text", text: "Wake received" }],
-                  },
-                }),
+                frame: assistant("Wake received", "wake"),
               },
-              ...(end === "stop-retry"
+              ...(end === "stop-retry" || end === "idle-expire"
                 ? [{ type: "expect_outbound" as const, frame: { type: "query.close" } }]
                 : [
                     {
@@ -210,6 +238,33 @@ it.effect.each([
                       },
                     },
                     { type: "emit_inbound" as const, frame: result("Follow-up received") },
+                    ...(secondTask
+                      ? [
+                          {
+                            type: "emit_inbound" as const,
+                            label: "second-wake",
+                            frame: frame({
+                              type: "system",
+                              subtype: "task_notification",
+                              task_id: "other",
+                              tool_use_id: "tool_other",
+                              task_type: "local_bash",
+                              status: "completed",
+                              output_file: "/tmp/other.output",
+                              summary: "Second waiter exited",
+                            }),
+                          },
+                          {
+                            type: "emit_inbound" as const,
+                            frame: assistant("Second wake received", "second-wake"),
+                          },
+                          {
+                            type: "emit_inbound" as const,
+                            label: "second-result",
+                            frame: result("Second wake received"),
+                          },
+                        ]
+                      : []),
                   ]),
             ]),
       ],
@@ -228,6 +283,8 @@ it.effect.each([
       "native-wake",
       "wake-result",
       "query-exit",
+      "second-wake",
+      "second-result",
     ]);
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
@@ -248,6 +305,7 @@ it.effect.each([
     const dispatchEntered = yield* Deferred.make<void>();
     const allowDispatch = yield* Deferred.make<void>();
     const dispatched = yield* Deferred.make<void>();
+    const secondDispatched = yield* Deferred.make<void>();
     const rejected = yield* Deferred.make<void>();
     const attempts: Array<{ commandId: string; messageId: string }> = [];
     const defaults = yield* ResourceLimits;
@@ -288,10 +346,10 @@ it.effect.each([
       ).pipe(Effect.forkScoped({ startImmediately: true }));
       const awaited = yield* runtime.awaitBackgroundTasks!({
         providerThread,
-        taskIds: ["waiter"],
+        taskIds: secondTask ? ["waiter", "other"] : ["waiter"],
         awaited: true,
       });
-      assert.deepEqual(awaited.matched, ["waiter"]);
+      assert.deepEqual(awaited.matched, secondTask ? ["waiter", "other"] : ["waiter"]);
       yield* Fiber.join(marked);
       gate.release("root-result");
       yield* event(
@@ -403,7 +461,7 @@ it.effect.each([
         }),
       );
       const release = yield* makeDelegatedChildRelease();
-      const cleanup = Effect.gen(function* () {
+      const cleanup = Effect.fn("ClaudeWakeReplay.cleanup")(function* (expectedTask: string) {
         yield* release.releaseFinishedChildren(threadId);
         // Run the ordinary settlement worker against the same SQLite projections.
         const read = yield* Deferred.make<void>();
@@ -450,11 +508,11 @@ it.effect.each([
           (yield* orchestrator.getThreadProjection(
             threadId,
           )).providerThreads[0]!.pendingBackgroundTasks?.some(
-            (task) => task.taskId === "waiter" && task.awaited === true,
+            (task) => task.taskId === expectedTask && task.awaited === true,
           ),
         );
-      }).pipe(Effect.scoped);
-      yield* cleanup;
+      }, Effect.scoped);
+      yield* cleanup("waiter");
       if (end === "restart") {
         yield* Fiber.interrupt(effectDaemon);
         yield* Effect.gen(function* () {
@@ -519,7 +577,7 @@ it.effect.each([
       gate.release("native-wake");
       if (end === "retry" || end === "stop-retry") {
         yield* Deferred.await(rejected);
-        yield* cleanup;
+        yield* cleanup("waiter");
         if (end === "stop-retry") {
           yield* orchestrator.dispatch({
             type: "thread.stop",
@@ -537,7 +595,7 @@ it.effect.each([
         yield* TestClock.adjust("1 second");
       }
       yield* Deferred.await(dispatchEntered);
-      yield* cleanup;
+      yield* cleanup("waiter");
       yield* Deferred.succeed(allowDispatch, undefined);
       yield* Deferred.await(dispatched);
       const queued = (yield* orchestrator.getThreadProjection(threadId)).runs.find(
@@ -564,9 +622,31 @@ it.effect.each([
         queue.map((run) => run.userMessageId),
         [queued.userMessageId, followUpId],
       );
+      if (end === "idle-expire") {
+        const closed = yield* event(
+          ({ event }) =>
+            event.type === "provider-session.updated" &&
+            event.payload.id === providerThread.providerSessionId &&
+            event.payload.status === "stopped",
+        ).pipe(Effect.forkScoped({ startImmediately: true }));
+        yield* TestClock.adjust("3 seconds");
+        yield* Fiber.join(closed);
+        const expired = yield* orchestrator.getThreadProjection(threadId);
+        assert.isTrue(
+          expired.turnItems.some(
+            (item) => item.type === "system_notice" && item.title === "Background wake cancelled",
+          ),
+        );
+        assert.isFalse(yield* sessions.isLive(providerThread.providerSessionId!));
+        assert.deepEqual(
+          expired.runs.filter((run) => run.status === "queued").map((run) => run.userMessageId),
+          [queued.userMessageId, followUpId],
+        );
+        return;
+      }
       // Admission can take longer than the missing-native-wake deadline.
-      yield* TestClock.adjust("3 minutes");
-      yield* cleanup;
+      if (!secondTask) yield* TestClock.adjust("3 minutes");
+      yield* cleanup("waiter");
       held = false;
       yield* orchestrator.dispatch({
         type: "queue.resume",
@@ -597,7 +677,36 @@ it.effect.each([
             item.text.includes("Wake received"),
         ),
       );
-      assert.deepEqual(completed.providerThreads[0]!.pendingBackgroundTasks, []);
+      if (secondTask) {
+        assert.deepEqual(
+          completed.providerThreads[0]!.pendingBackgroundTasks?.map((task) => task.taskId),
+          ["other"],
+        );
+        yield* cleanup("other");
+        gate.release("second-wake");
+        yield* Deferred.await(secondDispatched);
+        yield* effects.drain();
+        gate.release("second-result");
+        yield* event(
+          ({ event }) =>
+            event.type === "run.updated" &&
+            !completed.runs.some((run) => run.id === event.payload.id) &&
+            ["completed", "failed", "cancelled", "interrupted"].includes(event.payload.status),
+        );
+        yield* effects.drain();
+        const second = yield* orchestrator.getThreadProjection(threadId);
+        assert.isTrue(
+          second.turnItems.some(
+            (item) =>
+              item.type === "assistant_message" && item.text.includes("Second wake received"),
+          ),
+        );
+        assert.deepEqual(
+          second.runs.map((run) => run.status),
+          ["completed", "completed", "completed", "completed"],
+        );
+        assert.deepEqual(second.providerThreads[0]!.pendingBackgroundTasks, []);
+      } else assert.deepEqual(completed.providerThreads[0]!.pendingBackgroundTasks, []);
       assert.deepEqual(
         completed.runs.map((run) => run.status),
         ["completed", "completed", "completed"],
@@ -621,6 +730,9 @@ it.effect.each([
             ClaudeOrchestratorReplayHarness,
             {
               databaseLayer: database,
+              ...(end === "idle-expire"
+                ? { idleSessionOptions: { idleTimeoutMs: 1_000, maxIdlePinMs: 1_000 } }
+                : {}),
               runEffectWorker: false,
               runContinuationWorker: true,
               replayGate: gate,
@@ -639,6 +751,8 @@ it.effect.each([
                   yield* Deferred.await(allowDispatch);
                   const result = yield* dispatch(command);
                   yield* Deferred.succeed(dispatched, undefined);
+                  if (secondTask && attempts.length === 2)
+                    yield* Deferred.succeed(secondDispatched, undefined);
                   return result;
                 }),
             },
