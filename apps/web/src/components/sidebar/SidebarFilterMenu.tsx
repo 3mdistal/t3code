@@ -178,7 +178,7 @@ export function SidebarFilterMenu(props: SidebarFilterMenuProps) {
           <span
             aria-hidden
             data-testid="sidebar-filter-count"
-            className="pointer-events-none absolute -top-0.5 -right-0.5 grid h-3.5 min-w-3.5 place-items-center rounded-full bg-primary px-0.5 text-2xs leading-none font-medium text-primary-foreground tabular-nums"
+            className="pointer-events-none absolute top-0 right-0 grid h-3.5 min-w-3.5 place-items-center rounded-full bg-primary px-0.5 text-2xs leading-none font-medium text-primary-foreground tabular-nums"
           >
             {props.filterCount}
           </span>

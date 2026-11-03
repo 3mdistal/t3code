@@ -518,6 +518,26 @@ their own button, as upstream v0.1.7's project picker does.
   extends the fork's `threadTags.ts` and `ThreadTagChips.tsx`.
 - Tests: `apps/web/src/components/sidebar/sidebarView.fork.test.ts`.
 
+### Bulk thread actions (`fork:`)
+
+Right-clicking several selected threads offers what a single thread's menu does, so a batch doesn't take one click
+per thread: Pin, Un-settle, Wake, Tags and Archive join upstream's Unpin, Settle, Snooze, Regenerate titles, Mark
+unread and Delete. Each new entry and Settle count only the threads they apply to, and are left out when that's
+none.
+
+- Tags ticks a tag every selected thread has. Native menus have no mixed state, so a tag only some have reads
+  `bugs (2 of 3)`. Picking a tag adds it to all of them, or removes it from all when every one has it. New tag…
+  adds to all. Tagging keeps the selection, so a second tag doesn't need the threads picked again.
+- Pin keeps the listed order and puts the batch above the current pins, by giving each thread its order key up
+  front. One at a time they would each land on top and reverse.
+- Archive leaves out running threads, which the server refuses, and asks first only when the single-thread setting
+  does.
+- Stock compatibility: nothing new is stored. These are the thread commands and the `threadTags` settings patch
+  the single-thread menu already uses.
+- Fork file: `apps/web/src/components/sidebar/bulkThreadActions.ts`. `threadTags.ts` gains the bulk tag handler.
+- Upstream files it changes: `Sidebar.tsx` (the multi-select menu, and `attemptPin` taking an order key).
+- Tests: `apps/web/src/components/sidebar/bulkThreadActions.fork.test.ts`.
+
 ### A delegated thread settles as soon as its task ends (`fork:`)
 
 T3 runs every Codex thread in one shared `codex app-server`, and each loaded thread starts its own MCP helpers. On
