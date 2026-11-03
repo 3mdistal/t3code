@@ -1152,6 +1152,17 @@ export const layer: Layer.Layer<
       const tokenCap = yield* handoffTokenCapConfig.pipe(
         Effect.orElseSucceed(() => DEFAULT_HANDOFF_TOKEN_CAP),
       );
+      // fork: see FORK.md, "A Claude session that was never saved recovers".
+      const nativeThreadHasTurnsIn = (context: {
+        readonly sameNativeThread: boolean;
+        readonly acceptedAttempts: ReadonlyArray<{ readonly nativeThreadId?: string | undefined }>;
+        readonly nativeInputRunIds: ReadonlySet<RunId>;
+        readonly legacyInputRunIds: ReadonlySet<RunId>;
+      }) =>
+        context.nativeInputRunIds.size > 0 ||
+        (context.legacyInputRunIds.size > 0 &&
+          context.sameNativeThread &&
+          !context.acceptedAttempts.some((source) => source.nativeThreadId !== undefined));
       const handoffContextForThread = (loadedProviderThread: OrchestrationV2ProviderThread) => {
         const measuredContext = latestNativeContextUsage(projection, providerThread);
         const previousSelection =
@@ -1747,13 +1758,22 @@ export const layer: Layer.Layer<
                       : "Rejected native history",
                 }),
               )
-            : session.resumeThread({
-                providerThread,
-                threadId: projection.thread.id,
-                modelSelection: run.modelSelection,
-                runtimePolicy: resolvedRuntimePolicy,
-                importedNativeSession,
-              }),
+            : Effect.andThen(
+                // fork: see FORK.md, "A Claude session that was never saved recovers".
+                session.assertNativeThreadResumable?.({
+                  providerThread,
+                  nativeThreadHasTurns: nativeThreadHasTurnsIn(
+                    handoffContextForThread(providerThread),
+                  ),
+                }) ?? Effect.void,
+                session.resumeThread({
+                  providerThread,
+                  threadId: projection.thread.id,
+                  modelSelection: run.modelSelection,
+                  runtimePolicy: resolvedRuntimePolicy,
+                  importedNativeSession,
+                }),
+              ),
         );
         if (resumed._tag === "Success") {
           const context = handoffContextForThread(resumed.success);
@@ -2336,11 +2356,13 @@ export const layer: Layer.Layer<
               .map((turn) => turn.ordinal),
           ) + 1,
         resume: manualResume && unsentResumeMessage === undefined,
-        nativeThreadHasTurns:
-          nativeInputRunIds.size > 0 ||
-          (legacyInputRunIds.size > 0 &&
-            sameNativeThread &&
-            !acceptedAttempts.some((source) => source.nativeThreadId !== undefined)),
+        // fork: shared with the check before resuming; see FORK.md, "A Claude session that was never saved recovers".
+        nativeThreadHasTurns: nativeThreadHasTurnsIn({
+          sameNativeThread,
+          acceptedAttempts,
+          nativeInputRunIds,
+          legacyInputRunIds,
+        }),
         shouldStartProviderTurn: runControls.shouldStartProviderTurn,
         shouldFinalizeRun: runControls.shouldFinalizeRun,
         hasUnpairedRunInterruptRequest: runControls.hasUnpairedRunInterruptRequest,
