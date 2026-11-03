@@ -61,12 +61,22 @@ describe("thread tags", () => {
     expect(applyThreadTagsPatch({}, { [a]: many })[a]).toHaveLength(THREAD_TAGS_PER_THREAD);
   });
 
+  it("removes before it adds, so swapping a tag on a full thread keeps the new one", () => {
+    const full = Array.from({ length: THREAD_TAGS_PER_THREAD }, (_, index) => `t${index}`);
+    const next = applyThreadTagsPatch({ [a]: full }, { [a]: { new: true, t0: false } })[a];
+    expect(next).toHaveLength(THREAD_TAGS_PER_THREAD);
+    expect(next).toContain("new");
+    expect(next).not.toContain("t0");
+  });
+
   it("lists every tag once in order and matches any wanted tag", () => {
     const settings = { [a]: ["zeta", "Alpha"], [b]: ["alpha", "beta"] };
     expect(listThreadTags(settings)).toEqual(["Alpha", "beta", "zeta"]);
     expect(hasAnyThreadTag(settings[a], ["ALPHA", "gamma"])).toBe(true);
     expect(hasAnyThreadTag(settings[b], ["gamma"])).toBe(false);
     expect(hasAnyThreadTag(undefined, ["gamma"])).toBe(false);
+    const spaced = applyThreadTagsPatch({}, { [a]: { "waiting   on review": true } });
+    expect(hasAnyThreadTag(spaced[a], ["waiting   on review"])).toBe(true);
   });
 
   it("is an optional settings key that needs settings write", () => {
