@@ -1,4 +1,5 @@
 import {
+  CommandId, // fork: Claude wake retries use fresh receipts with a stable message; see FORK.md.
   type OrchestrationV2Notification,
   MessageId,
   ProviderDriverKind,
@@ -26,10 +27,12 @@ export interface ProviderContinuationRequest {
   /** adapter_buffered (default) ingests existing CLI output; message_text delivers app-owned wake text. */
   readonly delivery?: "adapter_buffered" | "message_text";
   readonly messageId?: MessageId;
+  readonly commandId?: CommandId; // fork: see FORK.md.
   readonly dispatchIfCurrent?: <A, E, R>(
     effect: Effect.Effect<A, E, R>,
   ) => Effect.Effect<Option.Option<A>, E, R>;
   readonly clearIfCurrent?: () => Effect.Effect<void>;
+  readonly retryOnFailure?: () => Effect.Effect<void>; // fork: Claude owns failed wake delivery too; see FORK.md.
 }
 
 /** The default drops requests; share the live layer with the worker that drains them. */

@@ -1,5 +1,6 @@
 import { makeAssistantStreamingFilter } from "./assistantStreaming.ts";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
+import { claudeAwaitedRosterHoldsIngestion } from "./Adapters/ClaudeWakeOwnership.ts"; // fork: see FORK.md.
 import {
   isOrchestrationV2WorkActive,
   CommandId,
@@ -1338,6 +1339,8 @@ export const layer: Layer.Layer<
           // thread-scoped probe: session-wide pending work (siblings, wake
           // buffers, session subagents) must not pin this root subscription.
           const latestProviderThreadSnapshot = yield* Ref.get(latestProviderThread);
+          // fork: the probe can clear before its queued roster update is consumed; see FORK.md.
+          if (claudeAwaitedRosterHoldsIngestion(latestProviderThreadSnapshot)) return false;
           if (input.session.hasPendingBackgroundWorkForThread !== undefined) {
             const hasPendingWork = yield* input.session
               .hasPendingBackgroundWorkForThread(latestProviderThreadSnapshot)
