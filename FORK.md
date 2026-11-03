@@ -215,6 +215,42 @@ Upstream hasn't been asked yet.
   `RunFinalizationService.test.ts` and `RunFinalizationQueue.test.ts` pass unchanged: the refresh starts before
   the capture effect returns.
 
+### Restarts retry dispatch and stagger provider starts (`fork:`)
+
+A continuation could fail once while a newly enabled account pool was still loading its health. Its next
+four attempts reused the rejected command's receipt and never tried dispatch again, even after the pool
+became ready. A temporary SQLite restart snapshot with fake providers reproduces that sequence. The Mac's
+Nov 2 continuation rows prove the repeated rejection, but compaction and log rotation removed the first
+reason, so the pool-health trigger is reproduced rather than established for that historical attempt.
+
+Each outbox attempt now uses its own dispatch command id and the same continuation message id. A committed
+message still deduplicates delivery, while a rejected command no longer poisons later attempts. Continuation
+retries wait 5, 10, 20 and 40 seconds instead of spending every attempt during startup.
+
+Provider starts for restart continuations and runs requested before this server started are claimed at
+most two at a time, with three seconds between claims. The limit covers provider initialization, not the
+entire agent turn. Pending starts wait in the outbox rather than occupying workers; the existing six-worker
+and four-background-worker reservation stays in place. New work
+requested after startup keeps its ordinary admission. There is no new setting. Memory limits and Pause all
+still run before a provider start is enqueued.
+
+A queue behind a turn that will continue retains its existing holds: recovery does not add a hold to messages
+that were already waiting to run. Messages already held by Stop, Pause all or the governor remain held.
+Idle, stopped, settled and currently snoozed threads retain upstream's restart policy; a restart does not
+unsnooze a thread. Threads queued behind an earlier failure without interrupted work are not revived by
+this patch. No schema, persisted event type or settings format changes.
+
+- `apps/server/src/orchestration-v2/RestartPacing.ts`: admission predicates and retry identity/delays.
+- `EffectOutbox.ts`: applies admission when claiming and calculating the next wake, without sleeping in a worker.
+- `EffectWorker.ts` and `RestartContinuation.ts`: pass the attempt to dispatch and use the longer retry delays.
+- `ProviderRuntimeRecoveryService.ts`: preserves the queue behind a continuing run, including a continuation
+  prepared before a clean shutdown.
+- Tests: `RestartPacing.fork.test.ts` exercises concurrent claims, the gap and control availability on the test
+  clock; `ProviderPoolFailover.integration.fork.test.ts` reopens temporary SQLite snapshots with fake providers
+  to exercise a rejected pool dispatch, six Claude/Codex continuations and ordered queued messages. Upstream's
+  `ProviderRuntimeRecoveryService.test.ts` supplies the new empty-outbox lookup in its queued-work fixture;
+  its assertions are unchanged.
+
 ### A CPU profile of each freeze on Windows (`fork:`)
 
 On the PC the server's event loop freezes for 4 to 13 seconds within a minute after every noon and midnight, and
