@@ -9,6 +9,8 @@ import {
   ProviderTurnId,
   runPoolFailoverCommandId,
   ThreadId,
+  EventId,
+  TurnItemId,
   type OrchestrationV2ProviderSession,
   type OrchestrationV2ProviderThread,
   type OrchestrationV2StoredEvent,
@@ -23,15 +25,25 @@ import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
+import * as SqlClient from "effect/sql/SqlClient";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as EffectWorker from "./EffectWorker.ts";
+import * as EffectOutbox from "./EffectOutbox.ts";
 import * as EventSink from "./EventSink.ts";
+import * as EventStore from "./EventStore.ts";
+import * as ProjectionStore from "./ProjectionStore.ts";
+import * as ProviderRuntimeRecovery from "./ProviderRuntimeRecoveryService.ts";
+import * as ProviderSessionManager from "./ProviderSessionManager.ts";
+import * as ServerSettings from "../serverSettings.ts";
+import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import { ProviderPoolCatalog } from "./ProviderPoolCatalog.ts";
@@ -58,6 +70,7 @@ interface PoolAdapterState {
   readonly started: ReadonlyArray<{
     readonly instanceId: ProviderInstanceId;
     readonly attemptId: string;
+    readonly threadId: ThreadId | null;
     readonly prompt: string;
   }>;
 }
@@ -65,7 +78,10 @@ interface PoolAdapterState {
 function makePoolAdapter(
   instanceId: ProviderInstanceId,
   state: Ref.Ref<PoolAdapterState>,
+  kind = driver,
+  background = false,
 ): ProviderAdapter.ProviderAdapterV2["Service"] {
+  const driver = kind;
   return {
     instanceId,
     driver,
@@ -73,6 +89,7 @@ function makePoolAdapter(
     planSelectionTransition: () => Effect.succeed({ type: "apply_on_next_turn" }),
     openSession: (sessionInput) =>
       Effect.gen(function* () {
+        const sessionScope = yield* Effect.scope;
         const events = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
         const now = yield* DateTime.now;
         const providerSession: OrchestrationV2ProviderSession = {
@@ -125,7 +142,15 @@ function makePoolAdapter(
               const { failNextStart, holdTurn } = yield* Ref.getAndUpdate(state, (current) => ({
                 ...current,
                 failNextStart: null,
-                started: [...current.started, { instanceId, attemptId: input.attemptId, prompt }],
+                started: [
+                  ...current.started,
+                  {
+                    instanceId,
+                    attemptId: input.attemptId,
+                    threadId: input.providerThread.appThreadId,
+                    prompt,
+                  },
+                ],
               }));
               const providerTurnId = ProviderTurnId.make(`provider-turn:${input.attemptId}`);
               const occurredAt = yield* DateTime.now;
@@ -168,37 +193,41 @@ function makePoolAdapter(
                 });
                 return;
               }
-              if (holdTurn !== null) yield* Deferred.await(holdTurn);
-              const completedAt = yield* DateTime.now;
-              yield* Queue.offer(events, {
-                type: "provider_turn.updated",
-                driver,
-                providerTurn: {
-                  id: providerTurnId,
-                  providerThreadId: input.providerThread.id,
-                  nodeId: input.rootNodeId,
-                  runAttemptId: input.attemptId,
-                  nativeTurnRef: {
-                    driver,
-                    nativeId: `native:${providerTurnId}`,
-                    strength: "strong",
+              const finish = Effect.gen(function* () {
+                if (holdTurn !== null) yield* Deferred.await(holdTurn);
+                const completedAt = yield* DateTime.now;
+                yield* Queue.offer(events, {
+                  type: "provider_turn.updated",
+                  driver,
+                  providerTurn: {
+                    id: providerTurnId,
+                    providerThreadId: input.providerThread.id,
+                    nodeId: input.rootNodeId,
+                    runAttemptId: input.attemptId,
+                    nativeTurnRef: {
+                      driver,
+                      nativeId: `native:${providerTurnId}`,
+                      strength: "strong",
+                    },
+                    ordinal: input.providerTurnOrdinal,
+                    status: "completed",
+                    startedAt: occurredAt,
+                    completedAt,
                   },
-                  ordinal: input.providerTurnOrdinal,
+                });
+                yield* Queue.offer(events, {
+                  type: "turn.terminal",
+                  driver,
+                  providerThreadId: input.providerThread.id,
+                  providerTurnId,
+                  runOrdinal: input.runOrdinal,
                   status: "completed",
-                  startedAt: occurredAt,
-                  completedAt,
-                },
+                  failure: null,
+                  threadDisposition: "reusable",
+                });
               });
-              yield* Queue.offer(events, {
-                type: "turn.terminal",
-                driver,
-                providerThreadId: input.providerThread.id,
-                providerTurnId,
-                runOrdinal: input.runOrdinal,
-                status: "completed",
-                failure: null,
-                threadDisposition: "reusable",
-              });
+              if (background) yield* finish.pipe(Effect.forkIn(sessionScope));
+              else yield* finish;
             }),
           steerTurn: () => Effect.void,
           interruptTurn: () => Effect.void,
@@ -216,8 +245,8 @@ const makeInstance = (
   continuationKey: string,
 ): ProviderInstance => ({
   instanceId: adapter.instanceId,
-  driverKind: driver,
-  continuationIdentity: { driverKind: driver, continuationKey },
+  driverKind: adapter.driver,
+  continuationIdentity: { driverKind: adapter.driver, continuationKey },
   displayName: String(adapter.instanceId),
   enabled: true,
   snapshot: {} as ProviderInstance["snapshot"],
@@ -278,10 +307,24 @@ const makeCatalog = (
 const makeRegistry = (
   keys: { readonly first: string; readonly second: string },
   state: Ref.Ref<PoolAdapterState>,
+  mixed = false,
 ) => {
   const instances = [
-    makeInstance(makePoolAdapter(first, state), keys.first),
-    makeInstance(makePoolAdapter(second, state), keys.second),
+    makeInstance(makePoolAdapter(first, state, driver, mixed), keys.first),
+    makeInstance(makePoolAdapter(second, state, driver, mixed), keys.second),
+    ...(mixed
+      ? [
+          makeInstance(
+            makePoolAdapter(
+              ProviderInstanceId.make("codex"),
+              state,
+              ProviderDriverKind.make("codex"),
+              true,
+            ),
+            "codex:test",
+          ),
+        ]
+      : []),
   ];
   return ProviderAdapterRegistry.layerFromProviderInstanceRegistry.pipe(
     Layer.provide(
@@ -1149,4 +1192,293 @@ it.live("leaves a crash between the cooldown and the failover to restart recover
       );
     }),
   ).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.live("retries a pooled restart after its catalog becomes available", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-pool-restart-" });
+      const snapshotPath = path.join(tempDir, "restart.sqlite");
+      const databaseLayer = SqlitePersistence.layerFromPath(
+        path.join(tempDir, "state.sqlite"),
+      ).pipe(Layer.provide(NodeServices.layer));
+      const restartDatabase = SqlitePersistence.layerFromPath(snapshotPath).pipe(
+        Layer.provide(NodeServices.layer),
+      );
+      const cwd = yield* checkpointWorkspace("pool-restart");
+      const threadId = ThreadId.make("thread:pool-restart");
+      const hold = yield* Deferred.make<void>();
+      const state = yield* Ref.make<PoolAdapterState>({
+        failNextStart: null,
+        holdTurn: hold,
+        started: [],
+      });
+      const members = [
+        makeProvider(first, "Claude", "claude:home:first"),
+        makeProvider(second, "Work", "claude:home:second"),
+      ];
+      const providers = yield* Ref.make<ReadonlyArray<ServerProvider>>(members);
+      const runtime = (name: string, recoverOnStartup = false) =>
+        ProviderReplayHarness.layerWithRegistry(
+          { name },
+          makeRegistry({ first: "claude:home:first", second: "claude:home:second" }, state),
+          {
+            databaseLayer: recoverOnStartup ? restartDatabase : databaseLayer,
+            settings,
+            poolCatalog: recoverOnStartup
+              ? Layer.succeed(ProviderPoolCatalog, {
+                  getPublishedProviders: Ref.getAndSet(providers, members).pipe(
+                    Effect.map((current) =>
+                      withProviderPools({ providers: current, providerPools: poolSettings }),
+                    ),
+                  ),
+                  markLimited: () => Effect.void,
+                })
+              : makeCatalog(providers),
+            continueThreadsAfterServerUpdate: true,
+            recoverOnStartup,
+          },
+        );
+      const original = yield* Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        yield* createThread(threadId, cwd, first);
+        const running = yield* awaitProviderTurnRunning(threadId);
+        yield* sendMessage(threadId, "work", first);
+        yield* Fiber.join(running);
+        const sql = yield* SqlClient.SqlClient;
+        yield* sql`VACUUM INTO ${snapshotPath}`;
+        return (yield* orchestrator.getThreadProjection(threadId)).runs[0]!;
+      }).pipe(Effect.provide(Layer.merge(runtime("pool-restart-before"), databaseLayer)));
+      yield* Ref.set(
+        providers,
+        members.map((member) => ({ ...member, installed: false })),
+      );
+      yield* Ref.update(state, (current) => ({ ...current, holdTurn: null }));
+      const result = yield* Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const outbox = yield* EffectOutbox.EffectOutboxV2;
+        const effectId = `effect:restart-continuation:${original.id}`;
+        yield* outbox.awaitSettled(effectId);
+        return {
+          projection: yield* orchestrator.getThreadProjection(threadId),
+          effect: yield* outbox.get(effectId),
+        };
+      }).pipe(
+        Effect.provide(
+          runtime("pool-restart-after", true).pipe(
+            Layer.provideMerge(EffectOutbox.layer.pipe(Layer.provide(restartDatabase))),
+          ),
+        ),
+      );
+      assert.equal(Option.getOrThrow(result.effect).status, "succeeded");
+      assert.equal(result.projection.runs.length, 2);
+      assert.equal(result.projection.runs[1]?.restartContinuationOfRunId, original.id);
+    }),
+  ).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.live.each(["crash", "shutdown"] as const)(
+  "continues six Claude and Codex threads after $0 before draining their queues",
+  (trigger) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const dir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-six-restart-" });
+        const snapshotPath = path.join(dir, "restart.sqlite");
+        const database = SqlitePersistence.layerFromPath(path.join(dir, "before.sqlite")).pipe(
+          Layer.provide(NodeServices.layer),
+        );
+        const restartDatabase = SqlitePersistence.layerFromPath(snapshotPath).pipe(
+          Layer.provide(NodeServices.layer),
+        );
+        const cwd = yield* checkpointWorkspace("six-restart");
+        const hold = yield* Deferred.make<void>();
+        const state = yield* Ref.make<PoolAdapterState>({
+          failNextStart: null,
+          holdTurn: hold,
+          started: [],
+        });
+        const providers = yield* Ref.make<ReadonlyArray<ServerProvider>>([
+          makeProvider(first, "Claude", "claude:first"),
+          makeProvider(second, "Work", "claude:second"),
+        ]);
+        const idleId = ThreadId.make("thread:six-restart:idle");
+        const ids = Array.from({ length: 6 }, (_, i) => ThreadId.make(`thread:six-restart:${i}`));
+        const runtime = (recoverOnStartup: boolean) =>
+          ProviderReplayHarness.layerWithRegistry(
+            { name: "six-restart" },
+            makeRegistry({ first: "claude:first", second: "claude:second" }, state, true),
+            {
+              databaseLayer: recoverOnStartup ? restartDatabase : database,
+              settings,
+              poolCatalog: makeCatalog(providers),
+              continueThreadsAfterServerUpdate: true,
+              recoverOnStartup,
+              runEffectWorker: recoverOnStartup || trigger === "crash",
+            },
+          );
+        const stores = Layer.mergeAll(EventStore.layer, ProjectionStore.layer, EffectOutbox.layer);
+        const recoveryLayer = ProviderRuntimeRecovery.layer.pipe(
+          Layer.provide(
+            Layer.mergeAll(
+              stores,
+              EventSink.layer.pipe(Layer.provide(stores)),
+              IdAllocator.layer,
+              ServerSettings.layerTest({ ...settings, continueThreadsAfterServerUpdate: true }),
+            ),
+          ),
+          Layer.provide(database),
+        );
+        yield* Effect.gen(function* () {
+          const daemon =
+            trigger === "shutdown"
+              ? yield* EffectWorker.runDaemon.pipe(Effect.forkScoped)
+              : undefined;
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          yield* createThread(idleId, cwd, first);
+          for (const [index, id] of ids.entries()) {
+            const member = index % 2 === 0 ? first : ProviderInstanceId.make("codex");
+            yield* createThread(id, cwd, member);
+            const running = yield* awaitProviderTurnRunning(id);
+            yield* sendMessage(id, "original", member);
+            yield* Fiber.join(running);
+          }
+          for (const text of ["queued-one", "queued-two"])
+            yield* orchestrator.dispatch({
+              type: "message.dispatch",
+              commandId: CommandId.make(text),
+              messageId: MessageId.make(text),
+              threadId: ids[0]!,
+              text,
+              attachments: [],
+              createdBy: "user",
+              creationSource: "web",
+              dispatchMode: { type: "queue_after_active" },
+            });
+          const sink = yield* EventSink.EventSinkV2;
+          for (const [index, id] of ids.entries()) {
+            const projection = yield* orchestrator.getThreadProjection(id);
+            const run = projection.runs[0]!;
+            const item = projection.turnItems[0]!;
+            const occurredAt = yield* DateTime.now;
+            if (index % 3 === 0)
+              yield* sink.write({
+                events: [
+                  {
+                    id: EventId.make(`tool:${id}`),
+                    type: "turn-item.updated",
+                    threadId: id,
+                    runId: run.id,
+                    occurredAt,
+                    payload: {
+                      ...item,
+                      providerThreadId: run.providerThreadId,
+                      id: TurnItemId.make(`tool:${id}`),
+                      type: "dynamic_tool",
+                      toolName: "test-tool",
+                      input: {},
+                      status: "running",
+                      completedAt: null,
+                    },
+                  },
+                ],
+              });
+            if (index % 3 === 1)
+              yield* sink.write({
+                events: [
+                  {
+                    id: EventId.make(`stream:${id}`),
+                    type: "message.updated",
+                    threadId: id,
+                    runId: run.id,
+                    occurredAt,
+                    payload: {
+                      ...projection.messages[0]!,
+                      id: MessageId.make(`stream:${id}`),
+                      role: "assistant",
+                      text: "Partial answer",
+                      streaming: true,
+                    },
+                  },
+                ],
+              });
+          }
+          if (daemon !== undefined) {
+            yield* Fiber.interrupt(daemon);
+            const sessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
+            yield* ProviderRuntimeRecovery.ProviderRuntimeRecoveryService.use((recovery) =>
+              recovery.prepareForShutdown.pipe(
+                Effect.andThen(sessions.shutdown),
+                Effect.andThen(recovery.reconcile("shutdown")),
+              ),
+            ).pipe(Effect.provide(recoveryLayer));
+          }
+          const sql = yield* SqlClient.SqlClient;
+          const pending = yield* sql<{
+            readonly effect_type: string;
+            readonly status: string;
+            readonly effect_id: string;
+          }>`SELECT effect_type, status, effect_id FROM orchestration_v2_effect_outbox WHERE effect_type = 'provider-runtime.continue'`;
+          if (trigger === "shutdown") assert.lengthOf(pending, 6);
+          yield* sql`VACUUM INTO ${snapshotPath}`;
+        }).pipe(Effect.provide(Layer.merge(runtime(false), database)));
+        yield* Ref.update(state, (current) => ({ ...current, started: [], holdTurn: null }));
+        const restored = yield* Effect.gen(function* () {
+          const sink = yield* EventSink.EventSinkV2;
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          for (const id of ids)
+            yield* sink.stream({ threadId: id, afterSequence: 0 }).pipe(
+              Stream.filter(
+                (stored) =>
+                  stored.event.type === "run.updated" &&
+                  stored.event.payload.status === "completed" &&
+                  stored.event.payload.restartContinuationOfRunId !== undefined,
+              ),
+              Stream.take(1),
+              Stream.runDrain,
+            );
+          yield* sink.stream({ threadId: ids[0]!, afterSequence: 0 }).pipe(
+            Stream.filter(
+              (stored) =>
+                stored.event.type === "run.updated" &&
+                stored.event.payload.status === "completed" &&
+                stored.event.payload.userMessageId === "queued-two",
+            ),
+            Stream.take(1),
+            Stream.runDrain,
+          );
+          yield* (yield* EffectWorker.OrchestrationEffectWorkerV2).drain();
+          assert.isEmpty((yield* orchestrator.getThreadProjection(idleId)).runs);
+          return yield* Effect.forEach(ids, (id) => orchestrator.getThreadProjection(id));
+        }).pipe(Effect.provide(runtime(true)));
+        for (const projection of restored) {
+          assert.equal(
+            projection.runs.filter((run) => run.restartContinuationOfRunId !== undefined).length,
+            1,
+          );
+          assert.isFalse(projection.runs.some((run) => run.status === "queued"));
+        }
+        const started = (yield* Ref.get(state)).started;
+        assert.equal(started.length, 8);
+        assert.deepEqual(
+          started.filter((entry) => entry.threadId === ids[0]).map((entry) => entry.prompt),
+          [
+            "Continue where you left off. Your last turn was cut short, so a command or other action it started may have finished or may still be running. Before you repeat one that changes state, confirm it did not take effect and is not still running; if you cannot tell, say so instead of repeating it.",
+            "queued-one",
+            "queued-two",
+          ],
+        );
+        assert.deepEqual(
+          new Set(
+            started.map((entry) =>
+              entry.instanceId.startsWith("claudeAgent") ? "claudeAgent" : entry.instanceId,
+            ),
+          ),
+          new Set(["claudeAgent", "codex"]),
+        );
+      }),
+    ).pipe(Effect.provide(NodeServices.layer)),
 );

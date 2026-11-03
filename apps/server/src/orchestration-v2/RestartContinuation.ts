@@ -30,6 +30,8 @@ import {
   restartContinuationNote,
 } from "./RestartBackgroundNote.ts";
 
+import { restartDispatchCommandId } from "./RestartPacing.ts"; // fork: see FORK.md.
+
 const CONTINUE_PROMPT =
   "Continue where you left off. Your last turn was cut short, so a command or other action it started may have finished or may still be running. Before you repeat one that changes state, confirm it did not take effect and is not still running; if you cannot tell, say so instead of repeating it.";
 
@@ -183,7 +185,11 @@ export function restartContinuationRun(
 }
 
 export const continueRestartedRun = Effect.fn("RestartContinuation.continueRestartedRun")(
-  function* (input: { readonly threadId: ThreadId; readonly sourceRunId: RunId }) {
+  function* (input: {
+    readonly threadId: ThreadId;
+    readonly sourceRunId: RunId;
+    readonly attempt?: number;
+  }) {
     const settings = yield* ServerSettings.ServerSettingsService;
     const enabled = yield* settings.getSettings.pipe(Effect.orElseSucceed(() => null));
     if (!enabled) return;
@@ -308,7 +314,7 @@ export const continueRestartedRun = Effect.fn("RestartContinuation.continueResta
     yield* threads
       .dispatch({
         type: "message.dispatch",
-        commandId: CommandId.make(`command:restart-continuation:${input.sourceRunId}`),
+        commandId: CommandId.make(restartDispatchCommandId(input.sourceRunId, input.attempt ?? 1)),
         threadId: input.threadId,
         messageId,
         text,

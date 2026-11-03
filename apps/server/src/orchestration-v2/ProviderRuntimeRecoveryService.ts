@@ -325,7 +325,28 @@ export const make = Effect.gen(function* () {
           cancelledBackgroundNativeIds.add(item.nativeItemRef.nativeId);
         }
       };
+      // fork: queues behind a continued turn keep their existing holds; see FORK.md.
+      const restartCandidate = continueAfterRestart
+        ? restartContinuationRun(
+            { ...projection, providerSessions: sessionsLiveAtStart(projection, stoppedThisPass) },
+            now,
+          )
+        : undefined;
       const queuedRuns = projection.runs.filter((run) => run.status === "queued");
+      const pendingContinuation =
+        continueAfterRestart && restartCandidate === undefined && queuedRuns.length > 0
+          ? yield* outbox.hasPendingRestartContinuation(projection.thread.id).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProviderRuntimeRecoveryError({
+                    operation: "reconcile",
+                    threadId: projection.thread.id,
+                    cause,
+                  }),
+              ),
+            )
+          : false;
+      const continuingQueue = restartCandidate !== undefined || pendingContinuation;
       const queuedMessages =
         queuedRuns.length === 0
           ? []
@@ -351,7 +372,7 @@ export const make = Effect.gen(function* () {
           runs.push(run);
           continue;
         }
-        if (run.queueHeld === true) continue;
+        if (run.queueHeld === true || continuingQueue) continue; // fork: see FORK.md.
         events.push({
           id: yield* allocateEventId(),
           type: "run.updated",
@@ -655,13 +676,7 @@ export const make = Effect.gen(function* () {
           },
         });
       }
-      const continuationRun =
-        continueAfterRestart && trigger === "startup"
-          ? restartContinuationRun(
-              { ...projection, providerSessions: sessionsLiveAtStart(projection, stoppedThisPass) },
-              now,
-            )
-          : undefined;
+      const continuationRun = trigger === "startup" ? restartCandidate : undefined; // fork: see FORK.md.
       const effects: Array<EffectOutbox.PendingOrchestrationEffectV2> = continuationRun
         ? [
             {

@@ -570,6 +570,7 @@ it.effect.each(["queued", "preparing"] as const)("recovers $0 work after restart
           runRecoveryOnce: Effect.succeed(false),
         }),
         Layer.mock(EffectOutbox.EffectOutboxV2)({
+          hasPendingRestartContinuation: () => Effect.succeed(false), // fork: see FORK.md.
           reconcileAfterProcessLoss: Effect.succeed({ requeued: 0, cancelled: 0 }),
         }),
       ),
