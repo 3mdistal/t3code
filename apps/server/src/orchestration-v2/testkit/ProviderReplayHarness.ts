@@ -265,6 +265,10 @@ export function layerProviderReplay<Transcript extends ProviderReplayTranscript,
     readonly providerInstances?: Partial<
       ProviderInstanceRegistry.ProviderInstanceRegistry["Service"]
     >;
+    // fork: gate real continuation dispatch in wake ownership replays; see FORK.md.
+    readonly continuationDispatch?: (
+      dispatch: Orchestrator.OrchestratorV2Shape["dispatch"],
+    ) => Orchestrator.OrchestratorV2Shape["dispatch"];
   } = {},
 ): Layer.Layer<
   | Orchestrator.OrchestratorV2
@@ -306,6 +310,10 @@ export function layerWithRegistry<Error>(
     readonly providerInstances?: Partial<
       ProviderInstanceRegistry.ProviderInstanceRegistry["Service"]
     >;
+    // fork: see FORK.md.
+    readonly continuationDispatch?: (
+      dispatch: Orchestrator.OrchestratorV2Shape["dispatch"],
+    ) => Orchestrator.OrchestratorV2Shape["dispatch"];
     // fork: pool fixtures, see FORK.md.
     readonly settings?: Parameters<typeof ServerSettings.layerTest>[0];
     readonly poolCatalog?: Layer.Layer<never>;
@@ -599,7 +607,8 @@ export function layerWithRegistry<Error>(
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
       return Layer.mock(ThreadManagementService.ThreadManagementService)({
-        dispatch: orchestrator.dispatch,
+        // fork: preserve the real command path behind deterministic replay gates; see FORK.md.
+        dispatch: options.continuationDispatch?.(orchestrator.dispatch) ?? orchestrator.dispatch,
         getThreadRecords: orchestrator.getThreadRecords,
         getThreadProjection: orchestrator.getThreadProjection,
         recoverDelegatedTask: orchestrator.recoverDelegatedTask,

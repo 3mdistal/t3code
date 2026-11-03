@@ -5,6 +5,7 @@ import {
   type ThreadId,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Cause from "effect/Cause"; // fork: see FORK.md.
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
@@ -243,7 +244,8 @@ export const layer = Layer.effectDiscard(
             threadId: request.threadId,
             ordinal: projection.messages.length + 1,
           }));
-        const commandId = CommandId.make(`provider-continuation:${messageId}`);
+        // fork: rejected Claude wakes retry with fresh receipts; see FORK.md.
+        const commandId = request.commandId ?? CommandId.make(`provider-continuation:${messageId}`);
         const dispatch = threads
           .dispatch({
             type: "message.dispatch",
@@ -303,6 +305,11 @@ export const layer = Layer.effectDiscard(
                 providerThreadId: request.providerThreadId,
                 cause,
               });
+              // fork: adapter ownership includes preflight read and dispatch failures; see FORK.md.
+              if (request.retryOnFailure !== undefined && !Cause.hasInterruptsOnly(cause)) {
+                yield* request.retryOnFailure();
+                return;
+              }
               if (request.delegatedCompletion !== undefined) {
                 const completion = request.delegatedCompletion;
                 const retryKey = delegatedCompletionRetryKey(request, completion);

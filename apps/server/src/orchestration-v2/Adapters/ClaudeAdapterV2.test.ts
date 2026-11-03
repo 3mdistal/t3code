@@ -17643,7 +17643,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
 
       yield* harness.offerAndWait(wakeNotification);
       assert.lengthOf(harness.continuationRequests, 0);
-      assert.isFalse(yield* harness.hasPendingBackgroundWork);
+      assert.isTrue(yield* harness.hasPendingBackgroundWork); // fork: buffered wakes retain ownership; see FORK.md.
 
       yield* Queue.offer(harness.sdkMessages, wakeAssistant);
       yield* harness.awaitContinuation(1);
@@ -18532,8 +18532,8 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           yield* harness.offerAndWait(emptyRoster);
         yield* harness.offerAndWait(wakeNotification);
         if (emptyLevel === "after") yield* harness.offerAndWait(emptyRoster);
-        // Query replacement reads the internal roster, which the exit already cleared.
-        assert.isFalse(yield* harness.hasPendingBackgroundWork);
+        // fork: the awaited command keeps owning its wake until the wake run takes it; see FORK.md.
+        assert.isTrue(yield* harness.hasPendingBackgroundWork);
         yield* harness.offerAndWait(wakeTurnInit);
         yield* harness.runtime.startTurn(
           makeClaudeTestTurnInput({
@@ -23476,7 +23476,8 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         yield* changes.until(
           () => events.filter((event) => event.type === "turn.terminal").length === 2,
         );
-        assert.isFalse(yield* hasPendingBackgroundWork);
+        // fork: the retained notification still owns pending work; see FORK.md.
+        assert.isTrue(yield* hasPendingBackgroundWork);
         assert.lengthOf(continuationRequests, 0);
 
         yield* Queue.offer(secondProcess, wakeResult);

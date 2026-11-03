@@ -8996,6 +8996,16 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 WHERE active.thread_id = t.thread_id
                   AND active.status IN ('preparing', 'starting', 'running', 'waiting')
               )
+              -- fork: settling would cancel a background wake held for admission. See FORK.md.
+              AND NOT EXISTS (
+                SELECT 1 FROM orchestration_v2_projection_runs held
+                JOIN orchestration_v2_projection_messages wake
+                  ON wake.message_id = json_extract(held.payload_json, '$.userMessageId')
+                WHERE held.thread_id = t.thread_id AND held.status = 'queued'
+                  AND json_extract(held.payload_json, '$.queueHeld') IS 1
+                  AND json_extract(wake.payload_json, '$.notification.source.kind')
+                    IN ('background_task', 'background_command', 'command', 'monitor', 'subagent')
+              )
               AND NOT EXISTS (
                 SELECT 1 FROM orchestration_v2_projection_runtime_requests request
                 WHERE request.thread_id = t.thread_id AND request.status = 'pending'
