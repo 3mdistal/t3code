@@ -737,6 +737,15 @@ export interface ProviderAdapterV2SessionRuntime {
     /** The native session is the only copy of the thread's imported history: fail when it is gone. */
     readonly importedNativeSession?: boolean;
   }) => Effect.Effect<OrchestrationV2ProviderThread, ProviderAdapterV2Error>;
+  /**
+   * fork: fails when the next turn can't resume this native thread, so the caller replaces it with
+   * a fresh one and a context handoff. Apart from `resumeThread`, which the session manager skips
+   * for a loaded thread. See FORK.md, "A Claude session that was never saved recovers".
+   */
+  readonly assertNativeThreadResumable?: (input: {
+    readonly providerThread: OrchestrationV2ProviderThread;
+    readonly nativeThreadHasTurns: boolean;
+  }) => Effect.Effect<void, ProviderAdapterV2Error>;
   /** False means the native protocol explicitly does not support history injection. */
   readonly injectHistory?: (
     input: ProviderAdapterV2HistoricalContext & {
