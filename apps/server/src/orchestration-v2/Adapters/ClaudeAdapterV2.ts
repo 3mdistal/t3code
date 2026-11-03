@@ -1,6 +1,8 @@
 import * as DocumentText from "../../provider/DocumentText.ts";
 import { makeProviderTextDeltaCoalescer } from "./ProviderTextDeltaCoalescer.ts";
 import { claudeTaskOutputRoot, tailClaudeTaskOutput } from "./ClaudeTaskOutputTail.ts";
+// fork: see FORK.md, "A Claude session that was never saved recovers".
+import { isClaudeTranscriptMissing } from "./ClaudeLostSession.ts";
 import {
   dynamicToolTitle,
   formatReadToolLabel,
@@ -11094,6 +11096,40 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                     }),
                 ),
               ),
+          ),
+          // fork: see FORK.md, "A Claude session that was never saved recovers".
+          assertNativeThreadResumable: Effect.fn("ClaudeAdapterV2.assertNativeThreadResumable")(
+            function* (threadInput: {
+              readonly providerThread: OrchestrationV2ProviderThread;
+              readonly nativeThreadHasTurns: boolean;
+            }) {
+              const nativeThreadId = threadInput.providerThread.nativeThreadRef?.nativeId;
+              if (
+                nativeThreadId === undefined ||
+                nativeThreadId === null ||
+                (yield* Ref.get(queryContext))?.nativeThreadId === nativeThreadId ||
+                // The next query creates the session rather than resuming it.
+                (threadInput.providerThread.nativeConversationHeadRef === null &&
+                  !threadInput.nativeThreadHasTurns &&
+                  !(yield* Ref.get(openedNativeThreads)).has(nativeThreadId))
+              ) {
+                return;
+              }
+              if (
+                yield* isClaudeTranscriptMissing({
+                  fileSystem,
+                  path,
+                  configDir: adapterOptions.environment.CLAUDE_CONFIG_DIR,
+                  cwd: session.cwd,
+                  nativeThreadId,
+                }).pipe(Effect.orElseSucceed(() => false))
+              ) {
+                return yield* new ProviderAdapter.ProviderAdapterProtocolError({
+                  driver: CLAUDE_PROVIDER,
+                  detail: `Claude session ${nativeThreadId} has no transcript to resume.`,
+                });
+              }
+            },
           ),
           resumeThread: Effect.fn("ClaudeAdapterV2.resumeThread")(
             function* (threadInput: { readonly providerThread: OrchestrationV2ProviderThread }) {
