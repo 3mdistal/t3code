@@ -1,10 +1,21 @@
 // fork: sidebar filter and sort, see FORK.md.
-import { CircleDotIcon, FolderIcon, ListFilterIcon, PinIcon, TagIcon, XIcon } from "lucide-react";
+import type { EnvironmentMachineKind } from "@t3tools/contracts";
+import {
+  CircleDotIcon,
+  FolderIcon,
+  ListFilterIcon,
+  MonitorIcon,
+  PinIcon,
+  PinOffIcon,
+  TagIcon,
+  XIcon,
+} from "lucide-react";
 import { type MouseEvent as ReactMouseEvent, type RefObject, useState } from "react";
 
 import { cn } from "~/lib/utils";
+import { EnvironmentMachineIcon } from "../EnvironmentMachineIcon";
 import { ProjectFavicon, type ProjectFaviconProject } from "../ProjectFavicon";
-import { PullRequestGlyph } from "../pullRequest/pullRequestIcons";
+import { PULL_REQUEST_STATE_PRESENTATION, PullRequestGlyph } from "../pullRequest/pullRequestIcons";
 import {
   Menu,
   MenuCheckboxItem,
@@ -21,8 +32,12 @@ import { SidebarHeaderIconButton } from "./SidebarThreadHeader";
 import {
   matchesSidebarFilterQuery,
   type SidebarFilterCount,
+  SIDEBAR_PIN_FILTER_LABELS,
+  SIDEBAR_PR_FILTER_LABELS,
   SIDEBAR_STATUS_FILTERS,
   SIDEBAR_STATUS_LABELS,
+  type SidebarPinFilter,
+  type SidebarPrFilter,
   type SidebarStatusFilter,
   type SidebarView,
 } from "./sidebarView";
@@ -36,6 +51,13 @@ export interface SidebarFilterProject {
   readonly count: number;
 }
 
+export interface SidebarFilterMachine {
+  readonly key: string;
+  readonly label: string;
+  readonly machine: EnvironmentMachineKind;
+  readonly count: number;
+}
+
 interface SidebarFilterMenuProps {
   readonly anchor: RefObject<HTMLElement | null>;
   readonly view: SidebarView;
@@ -46,6 +68,9 @@ interface SidebarFilterMenuProps {
   readonly onProjectSettings: (key: string, event: ReactMouseEvent<HTMLElement>) => void;
   readonly tags: ReadonlyArray<SidebarFilterCount<string>>;
   readonly statuses: ReadonlyArray<SidebarFilterCount<SidebarStatusFilter>>;
+  readonly pinned: ReadonlyArray<SidebarFilterCount<SidebarPinFilter>>;
+  readonly pullRequests: ReadonlyArray<SidebarFilterCount<SidebarPrFilter>>;
+  readonly machines: ReadonlyArray<SidebarFilterMachine>;
   readonly filterCount: number;
   readonly onClear: () => void;
 }
@@ -79,11 +104,12 @@ function SelectedCount(props: { readonly value: number }) {
 }
 
 /**
- * The sidebar's one filter button: projects, tags, statuses and two switches. A badge
- * counts what is on, since no chips show it, and the search finds any project, tag or status.
+ * The sidebar's one filter button. A badge counts what is on, since no chips show it, and the
+ * search finds any option. Machines only show when there is more than one to pick from.
  */
 export function SidebarFilterMenu(props: SidebarFilterMenuProps) {
   const { view, onViewChange, projects, projectKeys, tags, statuses } = props;
+  const { pinned, pullRequests, machines } = props;
   const [query, setQuery] = useState("");
   const [projectQuery, setProjectQuery] = useState("");
   const [tagQuery, setTagQuery] = useState("");
@@ -93,6 +119,15 @@ export function SidebarFilterMenu(props: SidebarFilterMenuProps) {
     onViewChange((current) => ({ ...current, statuses: toggled(current.statuses, status, on) }));
   const setProject = (key: string, on: boolean) =>
     props.onProjectKeysChange(toggled(projectKeys, key, on));
+  const setPinned = (value: SidebarPinFilter, on: boolean) =>
+    onViewChange((current) => ({ ...current, pinned: toggled(current.pinned, value, on) }));
+  const setPullRequest = (value: SidebarPrFilter, on: boolean) =>
+    onViewChange((current) => ({
+      ...current,
+      pullRequests: toggled(current.pullRequests, value, on),
+    }));
+  const setMachine = (key: string, on: boolean) =>
+    onViewChange((current) => ({ ...current, machines: toggled(current.machines, key, on) }));
 
   const projectItem = (project: SidebarFilterProject) => (
     <MenuCheckboxItem
@@ -148,6 +183,63 @@ export function SidebarFilterMenu(props: SidebarFilterMenuProps) {
       </span>
     </MenuCheckboxItem>
   );
+  const pinnedItem = (option: SidebarFilterCount<SidebarPinFilter>) => {
+    const Icon = option.value === "pinned" ? PinIcon : PinOffIcon;
+    return (
+      <MenuCheckboxItem
+        key={`pinned:${option.value}`}
+        checked={view.pinned.includes(option.value)}
+        onCheckedChange={(on) => setPinned(option.value, on)}
+      >
+        <span className="flex min-w-0 items-center gap-2">
+          <Icon aria-hidden className="size-3.5 shrink-0 text-muted-foreground" />
+          <span className="min-w-0 flex-1 truncate">{SIDEBAR_PIN_FILTER_LABELS[option.value]}</span>
+          <Count value={option.count} />
+        </span>
+      </MenuCheckboxItem>
+    );
+  };
+  const pullRequestItem = (option: SidebarFilterCount<SidebarPrFilter>, label: string) => {
+    const presentation =
+      option.value === "none" ? null : PULL_REQUEST_STATE_PRESENTATION[option.value];
+    const Icon = presentation?.Icon ?? PullRequestGlyph.unlink;
+    return (
+      <MenuCheckboxItem
+        key={`pull-request:${option.value}`}
+        checked={view.pullRequests.includes(option.value)}
+        onCheckedChange={(on) => setPullRequest(option.value, on)}
+      >
+        <span className="flex min-w-0 items-center gap-2">
+          <Icon
+            aria-hidden
+            className={cn(
+              "size-3.5 shrink-0",
+              presentation?.toneClassName ?? "text-muted-foreground",
+            )}
+          />
+          <span className="min-w-0 flex-1 truncate">{label}</span>
+          <Count value={option.count} />
+        </span>
+      </MenuCheckboxItem>
+    );
+  };
+  const machineItem = (machine: SidebarFilterMachine) => (
+    <MenuCheckboxItem
+      key={`machine:${machine.key}`}
+      checked={view.machines.includes(machine.key)}
+      onCheckedChange={(on) => setMachine(machine.key, on)}
+    >
+      <span className="flex min-w-0 items-center gap-2">
+        <EnvironmentMachineIcon
+          aria-hidden
+          kind={machine.machine}
+          className="size-3.5 shrink-0 text-muted-foreground"
+        />
+        <span className="min-w-0 flex-1 truncate">{machine.label}</span>
+        <Count value={machine.count} />
+      </span>
+    </MenuCheckboxItem>
+  );
 
   const searching = query.trim().length > 0;
   const projectMatches = projects.filter((project) =>
@@ -156,6 +248,20 @@ export function SidebarFilterMenu(props: SidebarFilterMenuProps) {
   const tagMatches = tags.filter((tag) => matchesSidebarFilterQuery(tag.value, query));
   const statusMatches = statuses.filter((status) =>
     matchesSidebarFilterQuery(SIDEBAR_STATUS_LABELS[status.value], query),
+  );
+  const pinnedMatches = pinned.filter((option) =>
+    matchesSidebarFilterQuery(SIDEBAR_PIN_FILTER_LABELS[option.value], query),
+  );
+  // Spelled out, since "Open" alone says nothing in a list of mixed results.
+  const pullRequestSearchLabel = (value: SidebarPrFilter) =>
+    value === "none" ? SIDEBAR_PR_FILTER_LABELS.none : `${SIDEBAR_PR_FILTER_LABELS[value]} PR`;
+  const pullRequestMatches = pullRequests.filter(
+    (option) =>
+      matchesSidebarFilterQuery(pullRequestSearchLabel(option.value), query) ||
+      matchesSidebarFilterQuery("pull request", query),
+  );
+  const machineMatches = machines.filter((machine) =>
+    matchesSidebarFilterQuery(machine.label, query),
   );
   const label =
     props.filterCount === 0
@@ -191,16 +297,27 @@ export function SidebarFilterMenu(props: SidebarFilterMenuProps) {
           value={query}
           onChange={(event) => setQuery(event.currentTarget.value)}
           placeholder="Filter by…"
-          aria-label="Filter by project, tag or status"
+          aria-label="Filter by project, tag, status, pull request, pin or machine"
         />
         {searching ? (
-          projectMatches.length + tagMatches.length + statusMatches.length === 0 ? (
-            <MenuItem disabled>No matching projects, tags or statuses</MenuItem>
+          projectMatches.length +
+            tagMatches.length +
+            statusMatches.length +
+            pinnedMatches.length +
+            pullRequestMatches.length +
+            machineMatches.length ===
+          0 ? (
+            <MenuItem disabled>No matching filters</MenuItem>
           ) : (
             <>
               {projectMatches.map(projectItem)}
               {tagMatches.map(tagItem)}
               {statusMatches.map(statusItem)}
+              {pullRequestMatches.map((option) =>
+                pullRequestItem(option, pullRequestSearchLabel(option.value)),
+              )}
+              {pinnedMatches.map(pinnedItem)}
+              {machineMatches.map(machineItem)}
             </>
           )
         ) : (
@@ -259,27 +376,36 @@ export function SidebarFilterMenu(props: SidebarFilterMenuProps) {
                 )}
               </MenuSubPopup>
             </MenuSub>
-            <MenuCheckboxItem
-              checked={view.pinnedOnly}
-              onCheckedChange={(on) => onViewChange((current) => ({ ...current, pinnedOnly: on }))}
-            >
-              <span className="flex items-center gap-2">
-                <PinIcon aria-hidden className="size-3.5 text-muted-foreground" />
-                Pinned only
-              </span>
-            </MenuCheckboxItem>
-            <MenuCheckboxItem
-              checked={view.openPrOnly}
-              onCheckedChange={(on) => onViewChange((current) => ({ ...current, openPrOnly: on }))}
-            >
-              <span className="flex items-center gap-2">
-                <PullRequestGlyph.pullRequest
-                  aria-hidden
-                  className="size-3.5 text-muted-foreground"
-                />
-                Has an open PR
-              </span>
-            </MenuCheckboxItem>
+            <MenuSub>
+              <MenuSubTrigger>
+                <PullRequestGlyph.pullRequest aria-hidden className="size-3.5" />
+                <span className="flex-1">Pull request</span>
+                <SelectedCount value={view.pullRequests.length} />
+              </MenuSubTrigger>
+              <MenuSubPopup className="w-56">
+                {pullRequests.map((option) =>
+                  pullRequestItem(option, SIDEBAR_PR_FILTER_LABELS[option.value]),
+                )}
+              </MenuSubPopup>
+            </MenuSub>
+            <MenuSub>
+              <MenuSubTrigger>
+                <PinIcon aria-hidden className="size-3.5" />
+                <span className="flex-1">Pinned</span>
+                <SelectedCount value={view.pinned.length} />
+              </MenuSubTrigger>
+              <MenuSubPopup className="w-56">{pinned.map(pinnedItem)}</MenuSubPopup>
+            </MenuSub>
+            {machines.length > 1 || view.machines.length > 0 ? (
+              <MenuSub>
+                <MenuSubTrigger>
+                  <MonitorIcon aria-hidden className="size-3.5" />
+                  <span className="flex-1">Machine</span>
+                  <SelectedCount value={view.machines.length} />
+                </MenuSubTrigger>
+                <MenuSubPopup className="w-56">{machines.map(machineItem)}</MenuSubPopup>
+              </MenuSub>
+            ) : null}
             <MenuSeparator />
             <MenuItem disabled={props.filterCount === 0} onClick={props.onClear}>
               <XIcon aria-hidden className="size-3.5" />

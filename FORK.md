@@ -484,19 +484,21 @@ thread up to 20 tags.
 ### Sidebar filter and sort (`fork:`)
 
 With the boring sidebar on (Labs, "Boring sidebar (group by project)"), the header's project picker becomes two
-buttons. Filter picks projects, tags and statuses, plus Pinned only and Has an open PR. A thread matches any picked
-tag and any picked status, and each kind of filter applies on top of the others. A badge on the button counts what
-is on, the menu's search finds any project, tag or status, and Clear filters turns them all off. Sort picks the
+buttons. Filter picks projects, tags, statuses, pull requests (open, merged, closed, no PR), pinned or not, and the
+machine, shown when there is more than one. A thread matches any pick within a kind, and each kind of filter applies
+on top of the others; a thread with several pull requests matches if any of them does. A badge on the button counts
+what is on, the menu's search finds any option, and Clear filters turns them all off. Sort picks the
 thread order (my latest message, needs me first, last activity, newest first) and the grouping (project, tag,
 status or none). Project folders follow the sort by their top thread, pinned folders first and archived ones last,
 unless the user has set a manual project order. Filters never change the sort or the grouping.
 
-- Stock compatibility: the view lives in browser storage under `t3code:sidebar-view:v1`, and picked projects stay
-  in the existing project filter. Nothing changes on the server. With the Labs switch off the list and its header
+- Stock compatibility: the view lives in browser storage under `t3code:sidebar-view:v2`, and picked projects stay
+  in the existing project filter. A saved `v1` view carries over once (Pinned only becomes Pinned, Has an open PR
+  becomes Open) and stays in place for older builds. Nothing changes on the server. With the Labs switch off the list and its header
   are stock, project picker included; only the row icon slots below change.
 - Rows keep their icons in fixed slots, in both sidebars: the machine and agent icons sit on the title line whether
   or not the row has a branch, and a pinned card row shows its pin on the title line instead of in the project label.
-- The thread on screen stays listed when it doesn't match a tag, status or switch filter. Picking projects hides
+- The thread on screen stays listed when it doesn't match a tag, status, pull request, pinned or machine filter. Picking projects hides
   other projects' threads, as the stock picker does. A tagged thread sits in one tag folder, a picked tag first,
   then the first by name. A thread with no run counts as Done. The Settled count adds older settled threads that
   haven't loaded yet, which the filters can't see. Right-click a project in the menu to open its settings; pinning
