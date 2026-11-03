@@ -17,6 +17,7 @@ import { environmentServerConfigsAtom, serverEnvironment } from "~/state/server"
 import { useAtomCommand } from "~/state/use-atom-command";
 import type { ThreadActionMenuId, ThreadTagMenuState } from "../threadActionMenu.logic";
 import { stackedThreadToast, toastManager } from "../ui/toast";
+import { type BulkTagMenuId, buildBulkTagPatches, bulkTagAdds } from "./bulkThreadActions";
 import { requestNewThreadTag } from "./NewThreadTagDialog";
 
 const NO_TAGS: ReadonlyArray<string> = [];
@@ -117,5 +118,50 @@ export function useThreadTagMenuActions() {
       !selected.some((candidate) => candidate.toLocaleLowerCase() === key),
     );
     return true;
+  };
+}
+
+/** Handles the Tags submenu's clicks when several threads are selected. */
+export function useBulkThreadTagMenuActions() {
+  const persist = useAtomCommand(serverEnvironment.updateSettings, {
+    label: "thread tags update",
+    reportFailure: false,
+  });
+  const write = async (threadRefs: ReadonlyArray<ScopedThreadRef>, tag: string, add: boolean) => {
+    const results = await Promise.all(
+      buildBulkTagPatches(threadRefs, tag, add).map(({ environmentId, threadTags }) =>
+        persist({ environmentId, input: { patch: { threadTags } } }),
+      ),
+    );
+    for (const result of results) {
+      if (result._tag !== "Failure" || isAtomCommandInterrupted(result)) continue;
+      const error = squashAtomCommandFailure(result);
+      toastManager.add(
+        stackedThreadToast({
+          type: "error",
+          title: add ? "Could not tag threads" : "Could not remove tag",
+          description: error instanceof Error ? error.message : "An error occurred.",
+        }),
+      );
+      return;
+    }
+  };
+  return async (threadRefs: ReadonlyArray<ScopedThreadRef>, action: BulkTagMenuId) => {
+    const menus = threadRefs.flatMap((threadRef) => readThreadTagMenu(threadRef) ?? []);
+    if (action === "tag-new") {
+      const tag = await requestNewThreadTag(menus.flatMap((menu) => menu.all));
+      if (tag !== null) await write(threadRefs, tag, true);
+      return;
+    }
+    if (action === "tags") return;
+    const tag = action.slice("tag:".length);
+    await write(
+      threadRefs,
+      tag,
+      bulkTagAdds(
+        menus.map((menu) => menu.selected),
+        tag,
+      ),
+    );
   };
 }
