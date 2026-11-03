@@ -1,4 +1,4 @@
-import type { ContextMenuItem } from "@t3tools/contracts";
+import { type ContextMenuItem, hasAnyThreadTag } from "@t3tools/contracts"; // fork: thread tags, see FORK.md.
 import type { SnoozePreset } from "@t3tools/client-runtime/state/thread-settled";
 
 export type ThreadActionMenuId =
@@ -17,6 +17,10 @@ export type ThreadActionMenuId =
   | "snooze"
   | `snooze:${string}`
   | "unsnooze"
+  // fork: thread tags, see FORK.md.
+  | "tags"
+  | `tag:${string}`
+  | "tag-new"
   | "rename"
   | "regenerate-title"
   | "mark-unread"
@@ -67,6 +71,14 @@ export function buildDraftActionMenuItems(options: {
   ];
 }
 
+// fork: thread tags, see FORK.md.
+export interface ThreadTagMenuState {
+  /** Every tag in use on the thread's server. */
+  readonly all: ReadonlyArray<string>;
+  readonly selected: ReadonlyArray<string>;
+  readonly canEdit: boolean;
+}
+
 export interface ThreadActionMenuState {
   readonly canOperate: boolean;
   readonly canFind?: boolean;
@@ -95,6 +107,8 @@ export interface ThreadActionMenuState {
   readonly canShareWithGuest?: boolean;
   /** A No project thread with its own folder, on a server that can promote it. */
   readonly canTurnIntoProject?: boolean;
+  /** Null when the thread's server can't hold tags. */
+  readonly tags?: ThreadTagMenuState | null; // fork: thread tags, see FORK.md.
 }
 
 /** Local navigation, read markers, and copying remain available to read-only clients. */
@@ -111,6 +125,29 @@ export function threadActionRequiresOperate(action: ThreadActionMenuId): boolean
     "copy-thread",
     "copy-thread-id",
   ].includes(action);
+}
+
+// fork: thread tags, see FORK.md.
+function threadTagMenuItems(
+  tags: ThreadTagMenuState | null | undefined,
+): ReadonlyArray<ContextMenuItem<ThreadActionMenuId>> {
+  if (!tags) return [];
+  return [
+    {
+      id: "tags",
+      label: "Tags",
+      icon: "tag",
+      disabled: !tags.canEdit,
+      children: [
+        ...tags.all.map((tag) => ({
+          id: `tag:${tag}` as const,
+          label: tag,
+          checked: hasAnyThreadTag(tags.selected, [tag]),
+        })),
+        { id: "tag-new", label: "New tag…", separatorBefore: tags.all.length > 0 },
+      ],
+    },
+  ];
 }
 
 export function buildThreadActionMenuItems(
@@ -166,6 +203,7 @@ export function buildThreadActionMenuItems(
               },
         ]
       : []),
+    ...threadTagMenuItems(state.tags), // fork: thread tags, see FORK.md.
     { id: "rename", label: "Rename thread", icon: "pencil", separatorBefore: true },
     ...(state.supports.titleRegeneration
       ? [

@@ -21,6 +21,10 @@ import {
   threadActionRequiresOperate,
   type ThreadActionMenuId,
 } from "../components/threadActionMenu.logic";
+import {
+  readThreadTagMenu, // fork: thread tags, see FORK.md.
+  useThreadTagMenuActions, // fork: thread tags, see FORK.md.
+} from "../components/sidebar/threadTags";
 import { stackedThreadToast, toastManager } from "../components/ui/toast";
 import { copyThreadReference } from "../lib/copyThreadReference";
 import { threadChipCopyTarget } from "@t3tools/client-runtime/thread-reference";
@@ -92,6 +96,7 @@ export function useThreadActionMenu(input: {
     reportFailure: false,
   });
   const handleNewThread = useNewThreadHandler();
+  const handleThreadTagAction = useThreadTagMenuActions(); // fork: thread tags, see FORK.md.
   const confirmThreadDelete = useClientSettings((s) => s.confirmThreadDelete);
   const confirmThreadArchive = useClientSettings((s) => s.confirmThreadArchive);
   const timestampFormat = useClientSettings((s) => s.timestampFormat);
@@ -149,6 +154,7 @@ export function useThreadActionMenu(input: {
         snoozePresets,
         canShareWithGuest,
         canTurnIntoProject: canTurnThreadIntoProject(threadRef),
+        tags: readThreadTagMenu(threadRef), // fork: thread tags, see FORK.md.
       });
       const clicked = await settlePromise(() => api.contextMenu.show(items, position));
       if (clicked._tag === "Failure" || clicked.value === null) return;
@@ -163,6 +169,7 @@ export function useThreadActionMenu(input: {
         );
         return;
       }
+      if (handleThreadTagAction(threadRef, action)) return; // fork: thread tags, see FORK.md.
       if (action.startsWith("snooze:")) {
         const preset =
           action === "snooze:custom"

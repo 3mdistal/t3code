@@ -117,6 +117,7 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   usageModelAliases: Schema.optionalKey(Schema.Boolean),
   providerPools: Schema.optionalKey(Schema.Boolean), // fork: see FORK.md.
   resourceLimits: Schema.optionalKey(Schema.Boolean), // fork: limits, see FORK.md.
+  threadTags: Schema.optionalKey(Schema.Boolean), // fork: thread tags, see FORK.md.
   threadPinning: Schema.optionalKey(Schema.Boolean),
   threadPinReorder: Schema.optionalKey(Schema.Boolean),
   threadActiveReorder: Schema.optionalKey(Schema.Boolean),
