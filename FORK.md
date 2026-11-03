@@ -818,14 +818,22 @@ commands in the existing pending-work roster, and its runtime probes retain both
 notifications. The hold ends after a committed continuation attaches and consumes the buffer. Offering an
 in-memory request or queueing a run does not end it. Empty roster levels cannot erase the hold.
 
-Missing native wake evidence expires after two minutes, with a warning. Once native evidence arrives, admission
-can wait for the governor without expiring. Failed reads or dispatches retry with capped backoff, fresh command
-receipts and a stable message ID. Stop, disabled-provider cancellation and process replacement retire the owning
-query's state; restart uses the existing awaited-work recovery. An unexpected provider exit cancels an
-undeliverable native wake with a visible notice. There is no migration, event type or setting.
+Missing native wake evidence expires after two minutes, with a warning. Native evidence claims only the task IDs
+in its notifications; consuming one wake leaves other tasks held under their original deadlines. Failed reads or
+dispatches retry with capped backoff, fresh command receipts and a stable message ID. Admission can wait for the
+governor up to the existing idle pin limit (four hours by default). At that limit the manager persists a visible
+"Background wake cancelled" notice before closing the session, then retries a failed notice write with the other
+release records. This bounds memory retention without silently losing a wake. The existing restart reconciler
+operates on the whole server; using it for one idle session would affect unrelated work.
+
+Stop, disabled-provider cancellation and process replacement retire the owning query's state; restart uses the
+existing awaited-work recovery. An unexpected provider exit also cancels an undeliverable native wake with a
+visible notice. Intentional Stop stays quiet. There is no migration, event type or setting.
 
 - `apps/server/src/orchestration-v2/Adapters/ClaudeWakeOwnership.ts` owns the query-scoped deadline and handoff;
   `ClaudeAdapterV2.ts` publishes and probes it at the existing roster and continuation seams.
+- `ProviderSessionManager.ts`, `ClaudeWakeCancellation.ts` and the optional in-memory adapter callback persist
+  cancellation at bounded idle release independently of the closing reader, using existing turn-item events.
 - `RunExecutionService.ts` consumes the final awaited roster before ending the old run's event reader, so a
   cleared runtime probe cannot race ahead of queued cancellation or roster events.
 - `packages/provider-core/src/server/ProviderContinuationRequests.ts` and

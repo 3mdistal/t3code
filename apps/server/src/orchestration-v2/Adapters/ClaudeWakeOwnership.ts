@@ -5,8 +5,15 @@ import type {
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import type * as Scope from "effect/Scope";
+import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 
 export const CLAUDE_WAKE_OWNERSHIP_TIMEOUT_MS = 120_000;
+
+export function claudeWakeTaskIds(messages: ReadonlyArray<SDKMessage>) {
+  return messages.flatMap((message) =>
+    message.type === "system" && message.subtype === "task_notification" ? [message.task_id] : [],
+  );
+}
 
 export function claudeAwaitedRosterHoldsIngestion(thread: OrchestrationV2ProviderThread): boolean {
   return (
@@ -67,16 +74,19 @@ export function makeClaudeWakeOwnership(input: {
         );
       }
     }),
-    markWaking: (nativeThreadId: string, owner: object) => {
-      for (const lease of leases.get(nativeThreadId)?.values() ?? []) {
-        if (lease.owner === owner) lease.waking = true;
+    markWaking: (nativeThreadId: string, owner: object, taskIds: ReadonlyArray<string>) => {
+      for (const taskId of taskIds) {
+        const lease = leases.get(nativeThreadId)?.get(taskId);
+        if (lease?.owner === owner) lease.waking = true;
       }
     },
-    consumeWake: (nativeThreadId: string, owner: object) => {
+    consumeWake: (nativeThreadId: string, owner: object, taskIds: ReadonlyArray<string>) => {
       remove(
         nativeThreadId,
         Array.from(leases.get(nativeThreadId)?.values() ?? [])
-          .filter((lease) => lease.owner === owner && lease.waking)
+          .filter(
+            (lease) => lease.owner === owner && lease.waking && taskIds.includes(lease.task.taskId),
+          )
           .map((lease) => lease.task.taskId),
         owner,
       );
