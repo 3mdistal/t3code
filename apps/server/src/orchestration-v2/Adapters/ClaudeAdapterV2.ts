@@ -15577,15 +15577,33 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                 yield* Ref.get(pendingBackgroundTasksByNativeThread),
                 nativeThreadId,
               );
-              const matched = [...new Set(taskIds)].filter((taskId) => roster.has(taskId));
+              // fork: clearing Waiting must also match tasks retained across an SDK roster gap; see FORK.md.
+              const knownTaskIds = new Set([
+                ...roster.keys(),
+                ...wakeOwnership.tasks(nativeThreadId).map((task) => task.taskId),
+              ]);
+              const matched = [...new Set(taskIds)].filter((taskId) => knownTaskIds.has(taskId));
               if (matched.length === 0) return { matched };
               if (awaited) {
                 yield* addTaskIdsToNativeThreadSet(
                   awaitedBackgroundTasksByNativeThread,
                   nativeThreadId,
-                  matched,
+                  matched.filter((taskId) => roster.has(taskId)), // fork: leases already own their await mark; see FORK.md.
                 );
               } else {
+                wakeOwnership.consume(nativeThreadId, matched); // fork: clear only the requested holds; see FORK.md.
+                // fork: nor is a cleared task that left the roster carried forward as an owed wake.
+                const cleared = new Set(matched.filter((taskId) => !roster.has(taskId)));
+                yield* Ref.update(lastProviderThreadByNativeThread, (current) => {
+                  const previous = current.get(nativeThreadId);
+                  if (previous?.pendingBackgroundTasks === undefined) return current;
+                  return new Map(current).set(nativeThreadId, {
+                    ...previous,
+                    pendingBackgroundTasks: previous.pendingBackgroundTasks.filter(
+                      (task) => !cleared.has(task.taskId),
+                    ),
+                  });
+                });
                 for (const taskId of matched) {
                   yield* clearTaskIdFromNativeThreadSet(
                     awaitedBackgroundTasksByNativeThread,
