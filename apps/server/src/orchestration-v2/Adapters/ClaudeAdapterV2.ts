@@ -3,7 +3,7 @@ import { makeProviderTextDeltaCoalescer } from "./ProviderTextDeltaCoalescer.ts"
 import { claudeTaskOutputRoot, tailClaudeTaskOutput } from "./ClaudeTaskOutputTail.ts";
 // fork: see FORK.md, "A Claude session that was never saved recovers".
 import { isClaudeTranscriptMissing } from "./ClaudeLostSession.ts";
-import { makeClaudeWakeOwnership } from "./ClaudeWakeOwnership.ts"; // fork: see FORK.md.
+import { makeClaudeWakeOwnership, claudeWakeTaskIds } from "./ClaudeWakeOwnership.ts"; // fork: see FORK.md.
 import {
   dynamicToolTitle,
   formatReadToolLabel,
@@ -5387,7 +5387,13 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                 ).filter((task) => !listedIds.has(task.taskId)),
               );
               if ((yield* Ref.get(requestedContinuations)).has(nativeThreadId))
-                wakeOwnership.markWaking(nativeThreadId, live.query);
+                wakeOwnership.markWaking(
+                  nativeThreadId,
+                  live.query,
+                  claudeWakeTaskIds(
+                    (yield* Ref.get(wakeBuffers)).get(nativeThreadId)?.messages ?? [],
+                  ),
+                );
             }
             const returningAwaited = wakeOwnership
               .tasks(nativeThreadId)
@@ -5475,7 +5481,13 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               { ...task, ...(awaited ? { awaited: true } : {}) },
             ]);
             if ((yield* Ref.get(requestedContinuations)).has(nativeThreadId))
-              wakeOwnership.markWaking(nativeThreadId, live.query);
+              wakeOwnership.markWaking(
+                nativeThreadId,
+                live.query,
+                claudeWakeTaskIds(
+                  (yield* Ref.get(wakeBuffers)).get(nativeThreadId)?.messages ?? [],
+                ),
+              );
           }
           return yield* Ref.modify(pendingBackgroundTasksByNativeThread, (current) => {
             const roster = rosterForNativeThread(current, nativeThreadId);
@@ -6635,7 +6647,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                 title:
                   workflowWithThreads === undefined
                     ? task.title
-                    : `Workflow · ${workflowWithThreads.name ?? task.title ?? "Untitled"}`,
+                    : `Workflow ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â· ${workflowWithThreads.name ?? task.title ?? "Untitled"}`,
                 ordinal: input.context.subagentsByTaskId.size,
               }),
               now,
@@ -7800,6 +7812,37 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           );
         });
 
+        // fork: construct the same durable notice for process loss and idle-budget cancellation; see FORK.md.
+        const makeWakeCancellationNotice = Effect.fn("ClaudeAdapterV2.makeWakeCancellationNotice")(
+          function* (
+            context: ActiveClaudeTurnContext,
+            message = "Claude exited before its background wake could be delivered. The pending native wake was cancelled.",
+          ) {
+            const now = yield* DateTime.now;
+            return {
+              id: idAllocator.derive.turnItemFromProviderItem({
+                driver: CLAUDE_PROVIDER,
+                nativeItemId: `wake-cancelled:${context.providerTurnId}`,
+              }),
+              threadId: context.input.threadId,
+              runId: context.input.runId,
+              nodeId: context.input.rootNodeId,
+              providerThreadId: context.input.providerThread.id,
+              providerTurnId: context.providerTurnId,
+              nativeItemRef: null,
+              parentItemId: null,
+              ordinal: yield* resolveItemOrdinal(context, "wake-cancelled"),
+              type: "system_notice",
+              status: "completed",
+              title: "Background wake cancelled",
+              message,
+              startedAt: now,
+              completedAt: now,
+              updatedAt: now,
+            } satisfies OrchestrationV2TurnItem;
+          },
+        );
+
         const finalizeActiveTurnAfterQueryExit = Effect.fnUntraced(function* (
           closedQuery: ClaudeLiveQueryContext,
           cause?: Cause.Cause<ClaudeAgentSdkQueryRunnerError>,
@@ -7820,32 +7863,10 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             wakeOwnership.has(closedQuery.nativeThreadId)
           ) {
             if (!interrupted) {
-              const now = yield* DateTime.now;
               yield* emitProviderEvent({
                 type: "turn_item.updated",
                 driver: CLAUDE_PROVIDER,
-                turnItem: {
-                  id: idAllocator.derive.turnItemFromProviderItem({
-                    driver: CLAUDE_PROVIDER,
-                    nativeItemId: `wake-cancelled:${context.providerTurnId}`,
-                  }),
-                  threadId: context.input.threadId,
-                  runId: context.input.runId,
-                  nodeId: context.input.rootNodeId,
-                  providerThreadId: context.input.providerThread.id,
-                  providerTurnId: context.providerTurnId,
-                  nativeItemRef: null,
-                  parentItemId: null,
-                  ordinal: yield* resolveItemOrdinal(context, "wake-cancelled"),
-                  type: "system_notice",
-                  status: "completed",
-                  title: "Background wake cancelled",
-                  message:
-                    "Claude exited before its background wake could be delivered. The pending native wake was cancelled.",
-                  startedAt: now,
-                  completedAt: now,
-                  updatedAt: now,
-                },
+                turnItem: yield* makeWakeCancellationNotice(context),
               });
             }
             yield* clearWakeStateForNativeThread(closedQuery.nativeThreadId);
@@ -8092,6 +8113,16 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           // Open continuations only after root init, user, assistant, or result frames prove a wake began.
           // Background child frames can stream while the root is idle.
           const buffered = (yield* Ref.get(wakeBuffers)).get(wakeInput.nativeThreadId);
+          // fork: an already requested wake owns only its buffered task notifications; see FORK.md.
+          const owner = yield* Ref.get(queryContext);
+          if (owner === null || owner.nativeThreadId !== wakeInput.nativeThreadId || owner.stopping)
+            return;
+          if (
+            message.type === "system" &&
+            message.subtype === "task_notification" &&
+            (yield* Ref.get(requestedContinuations)).has(wakeInput.nativeThreadId)
+          )
+            wakeOwnership.markWaking(wakeInput.nativeThreadId, owner.query, [message.task_id]);
           const hasBufferedNotification =
             buffered?.messages.some(
               (entry) => entry.type === "system" && entry.subtype === "task_notification",
@@ -8128,10 +8159,11 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             return;
           }
           // fork: deadline only covers missing native evidence, never queued admission; see FORK.md.
-          const owner = yield* Ref.get(queryContext);
-          if (owner === null || owner.nativeThreadId !== wakeInput.nativeThreadId || owner.stopping)
-            return;
-          wakeOwnership.markWaking(wakeInput.nativeThreadId, owner.query);
+          wakeOwnership.markWaking(
+            wakeInput.nativeThreadId,
+            owner.query,
+            claudeWakeTaskIds(buffered?.messages ?? []),
+          );
           const detail =
             (yield* Ref.get(wakeBuffers)).get(wakeInput.nativeThreadId)?.detail ?? null;
           const reports = yield* takeWakeReports(wakeInput.nativeThreadId);
@@ -10860,7 +10892,11 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                   });
                 }
                 // fork: transfer only after attachment and buffer consumption; see FORK.md.
-                wakeOwnership.consumeWake(nativeThreadId, querySession.query);
+                wakeOwnership.consumeWake(
+                  nativeThreadId,
+                  querySession.query,
+                  claudeWakeTaskIds(drained),
+                );
                 yield* emitRosterUpdate(nativeThreadId, context);
                 if (lastResult !== undefined && !emptyTurnBeforeNextTurn) {
                   yield* handleSdkMessage({ query: querySession.query, message: lastResult });
@@ -11241,6 +11277,16 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             resolveClaudeCatalogContextWindowTokens(BUNDLED_CLAUDE_MODEL_CATALOG, selection),
           events: Stream.fromEffectRepeat(Queue.take(events)),
           backgroundTasksEndWithProcess: true,
+          // fork: the manager persists this before bounded idle release closes the event pump; see FORK.md.
+          backgroundWakeCancellationNotice: Effect.gen(function* () {
+            const live = yield* Ref.get(queryContext);
+            if (live === null || !wakeOwnership.has(live.nativeThreadId) || live.lastTurn === null)
+              return null;
+            return yield* makeWakeCancellationNotice(
+              live.lastTurn,
+              "Claude's idle pin limit was reached before its background wake could be delivered. The pending wake was cancelled.",
+            );
+          }),
           hasPendingBackgroundWork: Effect.gen(function* () {
             if (wakeOwnership.has()) return true; // fork: see FORK.md.
             for (const roster of (yield* Ref.get(pendingBackgroundTasksByNativeThread)).values()) {
