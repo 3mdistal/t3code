@@ -57,6 +57,7 @@ it.effect.each([
   { emptyFirst: false, end: "restart" },
   { emptyFirst: false, end: "top-level" },
   { emptyFirst: true, end: "second-task" },
+  { emptyFirst: true, end: "unawait-second-task" },
   { emptyFirst: false, end: "idle-expire" },
 ])("owns an awaited Claude wake ($emptyFirst, $end)", ({ emptyFirst, end }) =>
   Effect.gen(function* () {
@@ -67,9 +68,11 @@ it.effect.each([
       "stop-retry",
       "top-level",
       "second-task",
+      "unawait-second-task",
       "idle-expire",
     ].includes(end);
-    const secondTask = end === "second-task";
+    const clearSecondTask = end === "unawait-second-task";
+    const secondTask = end === "second-task" || clearSecondTask;
     const workspace = yield* checkpointWorkspace(scenarioName);
     const nativeId = "00000000-0000-4000-8000-000000000001";
     let ordinal = 10;
@@ -239,33 +242,35 @@ it.effect.each([
                       },
                     },
                     { type: "emit_inbound" as const, frame: result("Follow-up received") },
-                    ...(secondTask
-                      ? [
-                          {
-                            type: "emit_inbound" as const,
-                            label: "second-wake",
-                            frame: frame({
-                              type: "system",
-                              subtype: "task_notification",
-                              task_id: "other",
-                              tool_use_id: "tool_other",
-                              task_type: "local_bash",
-                              status: "completed",
-                              output_file: "/tmp/other.output",
-                              summary: "Second waiter exited",
-                            }),
-                          },
-                          {
-                            type: "emit_inbound" as const,
-                            frame: assistant("Second wake received", "second-wake"),
-                          },
-                          {
-                            type: "emit_inbound" as const,
-                            label: "second-result",
-                            frame: result("Second wake received"),
-                          },
-                        ]
-                      : []),
+                    ...(clearSecondTask
+                      ? [{ type: "expect_outbound" as const, frame: { type: "query.close" } }]
+                      : secondTask
+                        ? [
+                            {
+                              type: "emit_inbound" as const,
+                              label: "second-wake",
+                              frame: frame({
+                                type: "system",
+                                subtype: "task_notification",
+                                task_id: "other",
+                                tool_use_id: "tool_other",
+                                task_type: "local_bash",
+                                status: "completed",
+                                output_file: "/tmp/other.output",
+                                summary: "Second waiter exited",
+                              }),
+                            },
+                            {
+                              type: "emit_inbound" as const,
+                              frame: assistant("Second wake received", "second-wake"),
+                            },
+                            {
+                              type: "emit_inbound" as const,
+                              label: "second-result",
+                              frame: result("Second wake received"),
+                            },
+                          ]
+                        : []),
                   ]),
             ]),
       ],
@@ -514,6 +519,42 @@ it.effect.each([
         );
       }, Effect.scoped);
       yield* cleanup("waiter");
+      if (clearSecondTask) {
+        const cleared = yield* sink
+          .stream({ threadId, afterSequence: yield* orchestrator.getThreadEventSequence(threadId) })
+          .pipe(
+            Stream.filter(
+              ({ event }) =>
+                event.type === "provider-thread.updated" &&
+                event.payload.pendingBackgroundTasks?.length === 1 &&
+                event.payload.pendingBackgroundTasks[0]?.taskId === "waiter",
+            ),
+            Stream.runHead,
+            Effect.forkScoped({ startImmediately: true }),
+          );
+        const unawaited = yield* runtime.awaitBackgroundTasks!({
+          providerThread,
+          taskIds: ["other", "missing", "other"],
+          awaited: false,
+        });
+        assert.deepEqual(unawaited.matched, ["other"]);
+        yield* Fiber.join(cleared);
+        assert.deepEqual(
+          (yield* orchestrator.getThreadProjection(
+            threadId,
+          )).providerThreads[0]!.pendingBackgroundTasks?.map((task) => task.taskId),
+          ["waiter"],
+        );
+        assert.deepEqual(
+          (yield* runtime.awaitBackgroundTasks!({
+            providerThread,
+            taskIds: ["other"],
+            awaited: false,
+          })).matched,
+          [],
+        );
+        yield* cleanup("waiter");
+      }
       if (end === "restart") {
         yield* Fiber.interrupt(effectDaemon);
         yield* Effect.gen(function* () {
@@ -678,7 +719,7 @@ it.effect.each([
             item.text.includes("Wake received"),
         ),
       );
-      if (secondTask) {
+      if (secondTask && !clearSecondTask) {
         assert.deepEqual(
           completed.providerThreads[0]!.pendingBackgroundTasks?.map((task) => task.taskId),
           ["other"],

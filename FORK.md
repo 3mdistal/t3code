@@ -819,7 +819,8 @@ notifications. The hold ends after a committed continuation attaches and consume
 in-memory request or queueing a run does not end it. Empty roster levels cannot erase the hold.
 
 Missing native wake evidence expires after two minutes, with a warning. Native evidence claims only the task IDs
-in its notifications; consuming one wake leaves other tasks held under their original deadlines. Failed reads or
+in its notifications; consuming one wake leaves other tasks held under their original deadlines. Clearing Waiting
+also matches retained task IDs and releases only the requested holds. Failed reads or
 dispatches retry with capped backoff, fresh command receipts and a stable message ID. Admission can wait for the
 governor up to the existing idle pin limit (four hours by default). At that limit the manager persists a visible
 "Background wake cancelled" notice before closing the session, then retries a failed notice write with the other
