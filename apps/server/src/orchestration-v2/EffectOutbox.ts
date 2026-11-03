@@ -16,6 +16,7 @@ import {
   RuntimeRequestId,
   ThreadId,
 } from "@t3tools/contracts";
+import * as RestartPacing from "./RestartPacing.ts"; // fork: see FORK.md.
 import * as Context from "effect/Context";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import * as DateTime from "effect/DateTime";
@@ -233,6 +234,10 @@ export interface EffectOutboxV2Shape {
   readonly get: (
     effectId: string,
   ) => Effect.Effect<Option.Option<OrchestrationEffectV2>, EffectOutboxError>;
+  // fork: a clean shutdown can leave only queued runs in the recovery projection; see FORK.md.
+  readonly hasPendingRestartContinuation: (
+    threadId: ThreadId,
+  ) => Effect.Effect<boolean, EffectOutboxError>;
   readonly listByCommandId: (
     commandId: CommandId,
   ) => Effect.Effect<ReadonlyArray<OrchestrationEffectV2>, EffectOutboxError>;
@@ -333,6 +338,7 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
   EffectOutboxV2,
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
+    const startPacing = yield* RestartPacing.makeStartPacing; // fork: see FORK.md.
     const available = yield* Queue.dropping<void>(64);
     const cancellationSignals = new Map<string, Deferred.Deferred<void>>();
     const settledSignals = new Map<string, Deferred.Deferred<void>>();
@@ -511,6 +517,16 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
               : new EffectOutboxError({ operation: "first-steer", cause }),
           ),
         ),
+      // fork: see FORK.md.
+      hasPendingRestartContinuation: Effect.fn("EffectOutbox.hasPendingRestartContinuation")(
+        function* (threadId) {
+          const rows = yield* sql`SELECT 1 FROM orchestration_v2_effect_outbox
+          WHERE status IN ('pending', 'running') AND effect_type = 'provider-runtime.continue'
+            AND thread_id = ${threadId} LIMIT 1`.pipe(NodeSqliteClient.readOnly);
+          return rows.length > 0;
+        },
+        Effect.mapError((cause) => new EffectOutboxError({ operation: "pending-restart", cause })),
+      ),
       cancelUnsettled: Effect.fn("EffectOutbox.cancelUnsettled")(
         function* ({ threadId, effectTypes, reason }) {
           if (effectTypes.length === 0) return [];
@@ -619,6 +635,7 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
                 excludeRestartContinuations,
                 maxRunningTitleGenerations,
               )}
+                AND (${startPacing.ready(now)}) -- fork: see FORK.md.
                 AND ${excludeRestartContinuations ? sql`candidate.effect_type != 'provider-runtime.continue'` : sql`1 = 1`}
                 AND ${effectTypes === undefined ? sql`1 = 1` : sql`candidate.effect_type IN ${sql.in(effectTypes)}`} -- fork: see FORK.md.
               ORDER BY candidate.available_at ASC, candidate.created_at ASC, candidate.effect_id ASC
@@ -632,6 +649,7 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
             if (row === undefined) return Option.none();
             const decoded = yield* Effect.result(rowToEffect(row));
             if (Result.isSuccess(decoded)) {
+              yield* startPacing.claimed(decoded.success.request, now); // fork: see FORK.md.
               cancellationSignals.set(row.effect_id, Deferred.makeUnsafe<void>());
               return Option.some(decoded.success);
             }
@@ -648,6 +666,7 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
             });
           }
         },
+        startPacing.withClaimLock, // fork: see FORK.md.
         Effect.mapError((cause) =>
           isEffectOutboxError(cause) ? cause : new EffectOutboxError({ operation: "claim", cause }),
         ),
@@ -657,9 +676,10 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
           maxRunningTitleGenerations,
         }: { readonly maxRunningTitleGenerations?: number } = {}) {
           const rows = yield* sql<{ readonly available_at: string | null }>`
-            SELECT MIN(candidate.available_at) AS available_at
+            SELECT MIN(${startPacing.deadline()}) AS available_at -- fork: see FORK.md.
             FROM orchestration_v2_effect_outbox AS candidate
             WHERE ${claimableCandidatePredicate(undefined, false, maxRunningTitleGenerations)}
+              AND (${startPacing.capacity()}) -- fork: see FORK.md.
           `.pipe(NodeSqliteClient.readOnly, Effect.withTracerEnabled(false));
           const availableAt = rows[0]?.available_at;
           if (availableAt === undefined || availableAt === null) return Option.none();
@@ -682,9 +702,10 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
       nextClaimableAtFor: Effect.fnUntraced(
         function* (effectTypes) {
           const rows = yield* sql<{ readonly available_at: string | null }>`
-            SELECT MIN(candidate.available_at) AS available_at
+            SELECT MIN(${startPacing.deadline()}) AS available_at -- fork: see FORK.md.
             FROM orchestration_v2_effect_outbox AS candidate
             WHERE ${claimableCandidatePredicate()}
+            AND (${startPacing.capacity()}) -- fork: see FORK.md.
               AND candidate.effect_type IN ${sql.in(effectTypes)}
           `.pipe(NodeSqliteClient.readOnly, Effect.withTracerEnabled(false));
           const availableAt = rows[0]?.available_at;

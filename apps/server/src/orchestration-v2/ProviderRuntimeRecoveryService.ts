@@ -404,8 +404,29 @@ export const make = Effect.gen(function* () {
               projection.nodes.some((node) => node.id === request.nodeId && node.runId === run.id),
           ),
       );
+      // fork: queues behind a continued turn keep their existing holds; see FORK.md.
+      const restartCandidate = continueAfterRestart
+        ? restartContinuationRun(
+            { ...projection, providerSessions: sessionsLiveAtStart(projection, stoppedThisPass) },
+            now,
+          )
+        : undefined;
       const queuedRuns = projection.runs.filter((run) => run.status === "queued");
       const pendingRuns = [...unstartedRuns, ...queuedRuns];
+      const pendingContinuation =
+        continueAfterRestart && restartCandidate === undefined && queuedRuns.length > 0
+          ? yield* outbox.hasPendingRestartContinuation(projection.thread.id).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProviderRuntimeRecoveryError({
+                    operation: "reconcile",
+                    threadId: projection.thread.id,
+                    cause,
+                  }),
+              ),
+            )
+          : false;
+      const continuingQueue = restartCandidate !== undefined || pendingContinuation;
       const queuedMessages =
         pendingRuns.length === 0
           ? []
@@ -590,6 +611,8 @@ export const make = Effect.gen(function* () {
           continue;
         }
         if (run.queueHeld === true && retryableRuns.length === 0) continue;
+        // fork: a queue behind a continued turn keeps its holds, see FORK.md.
+        if (continuingQueue && !retryableRuns.includes(run)) continue;
         events.push({
           id: yield* allocateEventId(),
           type: "run.updated",
@@ -1002,13 +1025,7 @@ export const make = Effect.gen(function* () {
           },
         });
       }
-      const continuationRun =
-        continueAfterRestart && trigger === "startup"
-          ? restartContinuationRun(
-              { ...projection, providerSessions: sessionsLiveAtStart(projection, stoppedThisPass) },
-              now,
-            )
-          : undefined;
+      const continuationRun = trigger === "startup" ? restartCandidate : undefined; // fork: see FORK.md.
       let processLossCount = 1;
       // Normal upgrades must not exhaust an unfinished turn's crash allowance.
       if (
