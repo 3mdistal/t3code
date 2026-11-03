@@ -9,7 +9,7 @@ import { useUiStateStore } from "../../uiStateStore";
 import { resolveSidebarFolderDot, resolveThreadLastVisitedAt } from "../Sidebar.logic";
 import { sidebarFolderRowId } from "./SidebarProjectFolderHeader";
 import type { SidebarStatusFilter, SidebarViewGroup } from "./sidebarView";
-import { threadTagDotStyle } from "./ThreadTagChips";
+import { threadTagDotClassName, threadTagDotStyle } from "./ThreadTagChips";
 
 /** A status's dot color, the same on folders and in the filter menu. */
 export const SIDEBAR_STATUS_DOT_CLASS_NAME: Record<SidebarStatusFilter, string> = {
@@ -33,6 +33,7 @@ const FOLDER_DOT_CLASS_NAME = {
  */
 export const SidebarViewFolderHeader = memo(function SidebarViewFolderHeader(props: {
   group: SidebarViewGroup<EnvironmentThreadShell>;
+  threadCount: number;
   collapsed: boolean;
   hiddenThreads: readonly EnvironmentThreadShell[];
   onToggle: (key: string) => void;
@@ -55,7 +56,7 @@ export const SidebarViewFolderHeader = memo(function SidebarViewFolderHeader(pro
         )
       : null;
   return (
-    <li data-testid="sidebar-view-folder" className="relative mt-2 list-none first:mt-0">
+    <li data-testid="sidebar-view-folder" className="relative mt-3 list-none first:mt-0">
       <button
         type="button"
         role="treeitem"
@@ -71,7 +72,7 @@ export const SidebarViewFolderHeader = memo(function SidebarViewFolderHeader(pro
               className={cn("size-2 rounded-full", SIDEBAR_STATUS_DOT_CLASS_NAME[group.status])}
             />
           ) : group.tag !== null ? (
-            <span className="size-2 rounded-full" style={threadTagDotStyle(group.tag)} />
+            <span className={threadTagDotClassName} style={threadTagDotStyle(group.tag)} />
           ) : (
             <TagIcon className="size-3.5 text-sidebar-muted-foreground" />
           )}
@@ -81,7 +82,7 @@ export const SidebarViewFolderHeader = memo(function SidebarViewFolderHeader(pro
             "min-w-0 flex-1 truncate text-sm font-medium",
             group.tag === null && group.status === null
               ? "text-sidebar-muted-foreground"
-              : "text-sidebar-foreground/90",
+              : "text-sidebar-foreground/70",
           )}
         >
           {group.label}
@@ -92,9 +93,9 @@ export const SidebarViewFolderHeader = memo(function SidebarViewFolderHeader(pro
             className={cn("size-1.5 shrink-0 rounded-full", FOLDER_DOT_CLASS_NAME[dot])}
           />
         ) : null}
-        {collapsed && hiddenThreads.length > 0 ? (
+        {props.threadCount > 0 ? (
           <span className="shrink-0 text-xs tabular-nums text-sidebar-muted-foreground">
-            {hiddenThreads.length}
+            {props.threadCount}
           </span>
         ) : null}
         <ChevronDownIcon

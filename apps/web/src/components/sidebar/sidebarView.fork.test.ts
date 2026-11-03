@@ -16,6 +16,8 @@ import {
   type SidebarView,
   type SidebarViewThreadFacts,
   sidebarStatusFilterOf,
+  sidebarGroupNamesRowStatus,
+  sidebarViewAllowsWorkingShelf,
   sortSidebarViewThreads,
 } from "./sidebarView";
 
@@ -205,5 +207,35 @@ describe("sidebar view grouping", () => {
       ["Failed", ["c"]],
       ["Done", ["a", "b"]],
     ]);
+  });
+});
+
+describe("sidebarGroupNamesRowStatus", () => {
+  it("leaves the status to the heading when the heading says it", () => {
+    expect(sidebarGroupNamesRowStatus({ status: "waiting" })).toBe(true);
+    expect(sidebarGroupNamesRowStatus({ status: "done" })).toBe(true);
+  });
+
+  it("keeps it on the row when the heading covers several kinds, or none", () => {
+    expect(sidebarGroupNamesRowStatus({ status: "needs-you" })).toBe(false);
+    expect(sidebarGroupNamesRowStatus({ status: null })).toBe(false);
+  });
+});
+
+describe("sidebarViewAllowsWorkingShelf", () => {
+  it("keeps the Working section when grouping by project, tag or nothing", () => {
+    for (const groupBy of ["project", "tag", "none"] as const) {
+      expect(sidebarViewAllowsWorkingShelf({ groupBy, statuses: [] })).toBe(true);
+    }
+  });
+
+  it("steps aside for status folders", () => {
+    expect(sidebarViewAllowsWorkingShelf({ groupBy: "status", statuses: [] })).toBe(false);
+  });
+
+  it("steps aside for a status filter, so its matches aren't hidden in a closed shelf", () => {
+    expect(sidebarViewAllowsWorkingShelf({ groupBy: "project", statuses: ["working"] })).toBe(
+      false,
+    );
   });
 });

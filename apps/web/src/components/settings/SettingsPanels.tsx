@@ -880,7 +880,7 @@ export function GeneralSettingsPanel() {
         />
         <SettingsRow
           {...searchableSetting("working-shelf")}
-          description="Fold working and monitoring threads into a Working section. They return to the top of the inbox when they need you. The boring sidebar in Labs has no Working section."
+          description="Fold working and monitoring threads into a Working section. They return to the top of the inbox when they need you. Grouping or filtering the boring sidebar by status shows them there instead."
           resetAction={
             settings.sidebarWorkingShelfEnabled !==
             DEFAULT_UNIFIED_SETTINGS.sidebarWorkingShelfEnabled ? (
