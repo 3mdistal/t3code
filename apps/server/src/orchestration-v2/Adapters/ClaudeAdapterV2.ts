@@ -3,6 +3,7 @@ import { makeProviderTextDeltaCoalescer } from "./ProviderTextDeltaCoalescer.ts"
 import { claudeTaskOutputRoot, tailClaudeTaskOutput } from "./ClaudeTaskOutputTail.ts";
 // fork: see FORK.md, "A Claude session that was never saved recovers".
 import { isClaudeTranscriptMissing } from "./ClaudeLostSession.ts";
+import { makeClaudeWakeOwnership } from "./ClaudeWakeOwnership.ts"; // fork: see FORK.md.
 import {
   dynamicToolTitle,
   formatReadToolLabel,
@@ -74,6 +75,7 @@ import {
   type ChatAttachment,
   PROVIDER_SEND_TURN_MAX_FILE_BYTES,
   ClaudeSettings,
+  CommandId, // fork: retry rejected wakes without reusing rejected receipts; see FORK.md.
   TrimmedNonEmptyString,
   defaultInstanceIdForDriver,
   isCompactionCommandMessage,
@@ -4739,6 +4741,44 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
         const interruptedTurns = yield* Ref.make(new Set<OrchestrationV2ProviderTurn["id"]>());
         const steeredTurns = yield* Ref.make(new Set<OrchestrationV2ProviderTurn["id"]>());
         const queryContext = yield* Ref.make<ClaudeLiveQueryContext | null>(null);
+        // fork: ownership covers roster removal through native wake attachment; see FORK.md.
+        const wakeOwnership = makeClaudeWakeOwnership({
+          scope: sessionScope,
+          onDeadline: (lease) =>
+            sdkMessageLock.withPermits(1)(
+              Effect.gen(function* () {
+                const live = yield* Ref.get(queryContext);
+                if (live?.query !== lease.owner || live.stopping || !wakeOwnership.expire(lease))
+                  return;
+                yield* clearTaskIdFromNativeThreadSet(
+                  wakeEligibleBackgroundTasksByNativeThread,
+                  lease.nativeThreadId,
+                  lease.task.taskId,
+                );
+                yield* Ref.update(wakeBuffers, (current) => {
+                  const buffered = current.get(lease.nativeThreadId);
+                  if (buffered === undefined) return current;
+                  const messages = buffered.messages.filter(
+                    (message) =>
+                      !(
+                        message.type === "system" &&
+                        message.subtype === "task_notification" &&
+                        message.task_id === lease.task.taskId
+                      ),
+                  );
+                  const next = new Map(current);
+                  if (messages.length === 0) next.delete(lease.nativeThreadId);
+                  else next.set(lease.nativeThreadId, { ...buffered, messages });
+                  return next;
+                });
+                yield* Effect.logWarning("orchestration-v2.claude-background-wake-expired", {
+                  nativeThreadId: lease.nativeThreadId,
+                  taskId: lease.task.taskId,
+                });
+                yield* emitRosterUpdate(lease.nativeThreadId, yield* Ref.get(activeTurn));
+              }),
+            ),
+        });
         // A worktree handoff changes the project settings even within one session.
         let bypassCache: { cwd: string | null; availability: ClaudeBypassAvailability } | null =
           null;
@@ -5261,7 +5301,11 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             ...input.providerThread,
             providerSessionId: session.id,
             ...(input.status === undefined ? {} : { status: input.status }),
-            pendingBackgroundTasks: claudePendingBackgroundTasksFromRoster(roster, awaitedTaskIds),
+            // fork: publish the wake owner before the SDK's empty roster; see FORK.md.
+            pendingBackgroundTasks: wakeOwnership.merge(
+              input.nativeThreadId,
+              claudePendingBackgroundTasksFromRoster(roster, awaitedTaskIds),
+            ),
             ...(goalsByNativeThread.has(input.nativeThreadId)
               ? { goal: goalsByNativeThread.get(input.nativeThreadId) ?? null }
               : {}),
@@ -5324,6 +5368,37 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             nativeThreadId: string,
             tasks: ReadonlyArray<OrchestrationV2PendingBackgroundTask>,
           ) {
+            // fork: empty SDK levels do not transfer wake ownership; see FORK.md.
+            const live = yield* Ref.get(queryContext);
+            const listedIds = new Set(tasks.map((task) => task.taskId));
+            if (live?.nativeThreadId === nativeThreadId && !live.stopping) {
+              yield* wakeOwnership.acquire(
+                nativeThreadId,
+                live.query,
+                claudePendingBackgroundTasksFromRoster(
+                  rosterForNativeThread(
+                    yield* Ref.get(pendingBackgroundTasksByNativeThread),
+                    nativeThreadId,
+                  ),
+                  taskIdSetForNativeThread(
+                    yield* Ref.get(awaitedBackgroundTasksByNativeThread),
+                    nativeThreadId,
+                  ),
+                ).filter((task) => !listedIds.has(task.taskId)),
+              );
+              if ((yield* Ref.get(requestedContinuations)).has(nativeThreadId))
+                wakeOwnership.markWaking(nativeThreadId, live.query);
+            }
+            const returningAwaited = wakeOwnership
+              .tasks(nativeThreadId)
+              .filter((task) => listedIds.has(task.taskId) && task.awaited === true)
+              .map((task) => task.taskId);
+            yield* addTaskIdsToNativeThreadSet(
+              awaitedBackgroundTasksByNativeThread,
+              nativeThreadId,
+              returningAwaited,
+            );
+            wakeOwnership.consume(nativeThreadId, [...listedIds]);
             yield* Ref.update(pendingBackgroundTasksByNativeThread, (current) => {
               const updated = new Map(current);
               if (tasks.length === 0) {
@@ -5362,6 +5437,15 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             nativeThreadId: string,
             task: OrchestrationV2PendingBackgroundTask,
           ) {
+            // fork: a new task_started with a reused id owns a new lifetime; see FORK.md.
+            if (wakeOwnership.tasks(nativeThreadId).some((held) => held.taskId === task.taskId)) {
+              wakeOwnership.consume(nativeThreadId, [task.taskId]);
+              yield* clearTaskIdFromNativeThreadSet(
+                awaitedBackgroundTasksByNativeThread,
+                nativeThreadId,
+                task.taskId,
+              );
+            }
             yield* Ref.update(pendingBackgroundTasksByNativeThread, (current) => {
               const roster = new Map(rosterForNativeThread(current, nativeThreadId));
               roster.set(task.taskId, task);
@@ -5371,8 +5455,29 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             yield* markWakeEligibleOpaqueBackgroundTasks(nativeThreadId, [task.taskId]);
           });
 
-        const clearPendingBackgroundTask = (nativeThreadId: string, taskId: string) =>
-          Ref.modify(pendingBackgroundTasksByNativeThread, (current) => {
+        // fork: per-frame roster handling stays untraced; acquire before removal; see FORK.md.
+        const clearPendingBackgroundTask = Effect.fnUntraced(function* (
+          nativeThreadId: string,
+          taskId: string,
+        ) {
+          const live = yield* Ref.get(queryContext);
+          const roster = rosterForNativeThread(
+            yield* Ref.get(pendingBackgroundTasksByNativeThread),
+            nativeThreadId,
+          );
+          const task = roster.get(taskId);
+          if (task !== undefined && live?.nativeThreadId === nativeThreadId && !live.stopping) {
+            const awaited = taskIdSetForNativeThread(
+              yield* Ref.get(awaitedBackgroundTasksByNativeThread),
+              nativeThreadId,
+            ).has(taskId);
+            yield* wakeOwnership.acquire(nativeThreadId, live.query, [
+              { ...task, ...(awaited ? { awaited: true } : {}) },
+            ]);
+            if ((yield* Ref.get(requestedContinuations)).has(nativeThreadId))
+              wakeOwnership.markWaking(nativeThreadId, live.query);
+          }
+          return yield* Ref.modify(pendingBackgroundTasksByNativeThread, (current) => {
             const roster = rosterForNativeThread(current, nativeThreadId);
             if (!roster.has(taskId)) {
               return [false, current] as const;
@@ -5395,10 +5500,12 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               ),
             ),
           );
+        });
 
         const clearPendingBackgroundTasksForNativeThread =
           /* Provider events include streaming deltas; avoid a span for each update. */
           Effect.fnUntraced(function* (nativeThreadId: string) {
+            wakeOwnership.clear(nativeThreadId); // fork: Stop and process replacement cancel ownership; see FORK.md.
             yield* Ref.update(pendingBackgroundTasksByNativeThread, (current) => {
               if (!current.has(nativeThreadId)) {
                 return current;
@@ -5414,6 +5521,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
         const clearWakeStateForNativeThread =
           /* Provider events include streaming deltas; avoid a span for each update. */
           Effect.fnUntraced(function* (nativeThreadId: string) {
+            wakeOwnership.clear(nativeThreadId); // fork: see FORK.md.
             yield* clearWakeReports(nativeThreadId);
             yield* Ref.update(wakeBuffers, (current) => {
               if (!current.has(nativeThreadId)) {
@@ -7615,9 +7723,10 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                     input.context.input.providerThread.firstRunOrdinal ??
                     input.context.input.runOrdinal,
                   lastRunOrdinal: input.context.input.runOrdinal,
-                  pendingBackgroundTasks: claudePendingBackgroundTasksFromRoster(
-                    roster,
-                    awaitedTaskIds,
+                  // fork: terminal publication must retain unattached wakes; see FORK.md.
+                  pendingBackgroundTasks: wakeOwnership.merge(
+                    nativeThreadId ?? "",
+                    claudePendingBackgroundTasksFromRoster(roster, awaitedTaskIds),
                   ),
                   status: input.status === "completed" ? "active" : "idle",
                   updatedAt: input.completedAt,
@@ -7704,6 +7813,43 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           // Finalization can yield to a replacement process; capture ownership and outcomes first.
           const subagents = yield* Ref.get(sessionSubagentsByTaskId);
           const buffered = (yield* Ref.get(wakeBuffers)).get(closedQuery.nativeThreadId)?.messages;
+          // fork: process loss cancels the old generation's undeliverable wake; see FORK.md.
+          const replacement = yield* Ref.get(queryContext);
+          if (
+            (replacement === null || replacement === closedQuery) &&
+            wakeOwnership.has(closedQuery.nativeThreadId)
+          ) {
+            if (!interrupted) {
+              const now = yield* DateTime.now;
+              yield* emitProviderEvent({
+                type: "turn_item.updated",
+                driver: CLAUDE_PROVIDER,
+                turnItem: {
+                  id: idAllocator.derive.turnItemFromProviderItem({
+                    driver: CLAUDE_PROVIDER,
+                    nativeItemId: `wake-cancelled:${context.providerTurnId}`,
+                  }),
+                  threadId: context.input.threadId,
+                  runId: context.input.runId,
+                  nodeId: context.input.rootNodeId,
+                  providerThreadId: context.input.providerThread.id,
+                  providerTurnId: context.providerTurnId,
+                  nativeItemRef: null,
+                  parentItemId: null,
+                  ordinal: yield* resolveItemOrdinal(context, "wake-cancelled"),
+                  type: "system_notice",
+                  status: "completed",
+                  title: "Background wake cancelled",
+                  message:
+                    "Claude exited before its background wake could be delivered. The pending native wake was cancelled.",
+                  startedAt: now,
+                  completedAt: now,
+                  updatedAt: now,
+                },
+              });
+            }
+            yield* clearWakeStateForNativeThread(closedQuery.nativeThreadId);
+          }
           if (current === context) {
             yield* finalizeActiveTurn({
               context,
@@ -7981,6 +8127,11 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           if (!shouldOffer) {
             return;
           }
+          // fork: deadline only covers missing native evidence, never queued admission; see FORK.md.
+          const owner = yield* Ref.get(queryContext);
+          if (owner === null || owner.nativeThreadId !== wakeInput.nativeThreadId || owner.stopping)
+            return;
+          wakeOwnership.markWaking(wakeInput.nativeThreadId, owner.query);
           const detail =
             (yield* Ref.get(wakeBuffers)).get(wakeInput.nativeThreadId)?.detail ?? null;
           const reports = yield* takeWakeReports(wakeInput.nativeThreadId);
@@ -7992,13 +8143,63 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             threadId: route.threadId,
             providerThreadId: route.providerThreadId,
           });
-          yield* continuationRequests.offer({
-            threadId: route.threadId,
-            providerThreadId: route.providerThreadId,
+          // fork: retries retain ownership and deduplicate a possibly committed message; see FORK.md.
+          const messageId = idAllocator.derive.messageFromProviderItem({
             driver: CLAUDE_PROVIDER,
-            detail,
-            ...(notification === null ? {} : { notification }),
+            nativeItemId: `wake:${session.id}:${wakeInput.nativeThreadId}:${message.uuid}`,
           });
+          let attempt = 0;
+          const isCurrent = Effect.gen(function* () {
+            return (
+              (yield* Ref.get(queryContext)) === owner &&
+              !owner.stopping &&
+              (yield* Ref.get(requestedContinuations)).has(wakeInput.nativeThreadId)
+            );
+          });
+          const offer: Effect.Effect<void> = Effect.suspend(() =>
+            continuationRequests.offer({
+              threadId: route.threadId,
+              providerThreadId: route.providerThreadId,
+              driver: CLAUDE_PROVIDER,
+              detail,
+              ...(notification === null ? {} : { notification }),
+              messageId,
+              commandId: CommandId.make(`claude-wake:${messageId}:${attempt}`),
+              dispatchIfCurrent: (dispatch) =>
+                sdkMessageLock.withPermits(1)(
+                  Effect.gen(function* () {
+                    if (!(yield* isCurrent)) return Option.none();
+                    return yield* dispatch.pipe(Effect.asSome);
+                  }),
+                ),
+              clearIfCurrent: () =>
+                sdkMessageLock.withPermits(1)(
+                  Effect.gen(function* () {
+                    if (!(yield* isCurrent)) return;
+                    yield* clearWakeStateForNativeThread(wakeInput.nativeThreadId);
+                    yield* emitRosterUpdate(wakeInput.nativeThreadId, yield* Ref.get(activeTurn));
+                  }),
+                ),
+              retryOnFailure: Effect.fn("ClaudeAdapterV2.retryWake")(function* () {
+                if (!(yield* isCurrent)) return;
+                const delay = Math.min(1_000 * 2 ** Math.min(attempt++, 6), 60_000);
+                yield* Effect.logWarning("orchestration-v2.claude-wake-dispatch-retry", {
+                  threadId: route.threadId,
+                  attempt,
+                  delay,
+                });
+                yield* Effect.sleep(delay).pipe(
+                  Effect.andThen(
+                    Effect.gen(function* () {
+                      if (yield* isCurrent) yield* offer;
+                    }),
+                  ),
+                  Effect.forkIn(sessionScope),
+                );
+              }),
+            }),
+          );
+          yield* offer;
         });
 
         // Untraced like the roster message handling: it runs for every streamed roster change.
@@ -8082,6 +8283,14 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               input.nativeThreadId,
               message.task_id,
             );
+            // fork: an attached turn already owns this notification; see FORK.md.
+            const owner = yield* Ref.get(queryContext);
+            if (
+              owner !== null &&
+              input.activeContext !== null &&
+              (yield* Ref.get(activeTurn)) === input.activeContext
+            )
+              wakeOwnership.consumeObserved(input.nativeThreadId, owner.query, message.task_id);
             yield* clearTaskIdFromNativeThreadSet(
               wakeEligibleBackgroundTasksByNativeThread,
               input.nativeThreadId,
@@ -10060,6 +10269,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           live: ClaudeLiveQueryContext,
           options?: { readonly forGoalCheck?: boolean },
         ) {
+          if (wakeOwnership.has(live.nativeThreadId)) return true; // fork: see FORK.md.
           if (
             rosterForNativeThread(
               yield* Ref.get(pendingBackgroundTasksByNativeThread),
@@ -10649,6 +10859,9 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                     return next;
                   });
                 }
+                // fork: transfer only after attachment and buffer consumption; see FORK.md.
+                wakeOwnership.consumeWake(nativeThreadId, querySession.query);
+                yield* emitRosterUpdate(nativeThreadId, context);
                 if (lastResult !== undefined && !emptyTurnBeforeNextTurn) {
                   yield* handleSdkMessage({ query: querySession.query, message: lastResult });
                   return;
@@ -10938,6 +11151,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
         const closeSession = Effect.fnUntraced(function* () {
           const existing = yield* Ref.get(queryContext);
           if (existing !== null) {
+            existing.stopping = true; // fork: intentional teardown is not an unexpected wake loss; see FORK.md.
             yield* existing.query.close.pipe(Effect.ignore);
           }
           yield* Effect.yieldNow;
@@ -11028,6 +11242,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           events: Stream.fromEffectRepeat(Queue.take(events)),
           backgroundTasksEndWithProcess: true,
           hasPendingBackgroundWork: Effect.gen(function* () {
+            if (wakeOwnership.has()) return true; // fork: see FORK.md.
             for (const roster of (yield* Ref.get(pendingBackgroundTasksByNativeThread)).values()) {
               if (roster.size > 0) {
                 return true;
@@ -11045,7 +11260,8 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                   (message) =>
                     message.type === "user" ||
                     message.type === "assistant" ||
-                    message.type === "result",
+                    message.type === "result" ||
+                    (message.type === "system" && message.subtype === "task_notification"), // fork: see FORK.md.
                 )
               ) {
                 return true;
@@ -11060,6 +11276,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             if (nativeThreadId === undefined || nativeThreadId === null) {
               return false;
             }
+            if (wakeOwnership.has(nativeThreadId)) return true; // fork: see FORK.md.
             if (options?.includeSubagents) {
               const live = yield* Ref.get(queryContext);
               if (

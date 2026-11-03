@@ -244,6 +244,7 @@ interface ClaudeSubagentFoundFrame {
 }
 
 type ClaudeOutboundFrame =
+  | { readonly type: "query.close" } // fork: assert real process cleanup in wake replays; see FORK.md.
   | { readonly type: "query.stop_task"; readonly taskId: string }
   | { readonly type: "query.background_tasks"; readonly toolUseId: string }
   | ClaudeQueryOpenFrame
@@ -847,7 +848,19 @@ function makeReplayQueryRunner(
         interrupt: replayEffect(() => {
           assertNextOutboundFrame({ type: "query.interrupt" });
         }),
-        close: Effect.void,
+        // fork: close-fenced replays stop their live stream like the real SDK; see FORK.md.
+        close: Effect.sync(() => {
+          const next = transcript.entries[cursor];
+          if (
+            next?.type !== "expect_outbound" ||
+            typeof next.frame !== "object" ||
+            next.frame === null ||
+            Reflect.get(next.frame, "type") !== "query.close"
+          )
+            return;
+          assertNextOutboundFrame({ type: "query.close" });
+          for (const controller of iteratorAbortControllers) controller.abort();
+        }),
       };
     },
     forkSession: (input) => {

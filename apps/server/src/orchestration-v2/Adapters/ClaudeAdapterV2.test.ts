@@ -8428,12 +8428,17 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           ],
         );
 
-        // Once the task leaves the roster, a reused id starts unmarked.
+        // fork: an empty level retains ownership; task_started proves a reused id; see FORK.md.
         yield* Queue.offer(
           harness.sdkMessages,
           roster(["dev-server"], "00000000-0000-4000-8000-000000000303"),
         );
-        yield* nextRoster((tasks) => tasks.length === 1);
+        yield* nextRoster((tasks) => tasks.length === 2 && tasks.some((task) => task.awaited));
+        yield* Queue.offer(harness.sdkMessages, {
+          ...wakeTaskStarted,
+          uuid: "00000000-0000-4000-8000-000000000305",
+        });
+        yield* nextRoster((tasks) => !tasks.some((task) => task.awaited));
         yield* Queue.offer(
           harness.sdkMessages,
           roster(["dev-server", WAKE_TASK_ID], "00000000-0000-4000-8000-000000000304"),
@@ -10155,7 +10160,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
 
         yield* harness.offerAndWait(wakeNotification);
         assert.lengthOf(harness.continuationRequests, 0);
-        assert.isFalse(yield* harness.hasPendingBackgroundWork);
+        assert.isTrue(yield* harness.hasPendingBackgroundWork); // fork: buffered wakes retain ownership; see FORK.md.
 
         yield* Queue.offer(harness.sdkMessages, wakeAssistant);
         yield* harness.awaitContinuation(1);
@@ -13354,7 +13359,8 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           yield* changes.until(
             () => events.filter((event) => event.type === "turn.terminal").length === 2,
           );
-          assert.isFalse(yield* hasPendingBackgroundWork);
+          // fork: the retained notification still owns pending work; see FORK.md.
+          assert.isTrue(yield* hasPendingBackgroundWork);
           assert.lengthOf(continuationRequests, 0);
 
           yield* Queue.offer(secondProcess, wakeResult);
