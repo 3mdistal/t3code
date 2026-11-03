@@ -193,6 +193,10 @@ describe("sidebar view grouping", () => {
     expect(
       groupSidebarThreadsByTag([a, b], (entry) => entry.tags, []).map((group) => group.key),
     ).toEqual(["tag:backend", "tag:frontend"]);
+    const late = thread("late", { created: "2026-01-01T00:00:00Z" }, { tags: ["zebra", "alpha"] });
+    expect(
+      groupSidebarThreadsByTag([late], (entry) => entry.tags, []).map((group) => group.key),
+    ).toEqual(["tag:alpha"]);
   });
 
   it("groups by status, most urgent first, without empty folders", () => {
