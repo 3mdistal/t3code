@@ -9,12 +9,15 @@ import {
   groupSidebarThreadsByTag,
   matchesSidebarFilterQuery,
   matchesSidebarViewFilters,
+  migrateSidebarViewV1,
   needsMeRank,
   NO_TAG_GROUP_KEY,
   orderSidebarFoldersByThreads,
   type SidebarStatusFilter,
   type SidebarView,
   type SidebarViewThreadFacts,
+  countSidebarFilterFacets,
+  sidebarPrFiltersOf,
   sidebarStatusFilterOf,
   sidebarGroupNamesRowStatus,
   sidebarViewAllowsWorkingShelf,
@@ -27,7 +30,8 @@ const facts = (overrides: Partial<SidebarViewThreadFacts> = {}): SidebarViewThre
   tags: [],
   status: "done",
   pinned: false,
-  openPullRequest: false,
+  pullRequests: ["none"],
+  machine: "pc",
   ...overrides,
 });
 
@@ -69,7 +73,7 @@ const thread = (
   }) as unknown as EnvironmentThreadShell & TestThread;
 
 describe("sidebar view filters", () => {
-  it("matches any picked tag, any picked status, and every switch", () => {
+  it("matches any pick within a kind of filter, and every kind with picks", () => {
     const tagged = facts({ tags: ["Frontend"], status: "working", pinned: true });
     expect(matchesSidebarViewFilters(view(), facts())).toBe(true);
     expect(matchesSidebarViewFilters(view({ tags: ["frontend", "backend"] }), tagged)).toBe(true);
@@ -79,26 +83,131 @@ describe("sidebar view filters", () => {
     ).toBe(false);
     expect(
       matchesSidebarViewFilters(
-        view({ statuses: ["failed", "working"], pinnedOnly: true }),
+        view({ statuses: ["failed", "working"], pinned: ["pinned"] }),
         tagged,
       ),
     ).toBe(true);
-    expect(matchesSidebarViewFilters(view({ openPrOnly: true }), tagged)).toBe(false);
+    expect(matchesSidebarViewFilters(view({ pullRequests: ["open"] }), tagged)).toBe(false);
     expect(
-      matchesSidebarViewFilters(view({ openPrOnly: true }), facts({ openPullRequest: true })),
+      matchesSidebarViewFilters(
+        view({ pullRequests: ["open"] }),
+        facts({ pullRequests: ["open"] }),
+      ),
     ).toBe(true);
+  });
+
+  it("filters by pinned, not pinned, or both", () => {
+    const pinned = facts({ pinned: true });
+    const loose = facts();
+    expect(matchesSidebarViewFilters(view({ pinned: ["pinned"] }), pinned)).toBe(true);
+    expect(matchesSidebarViewFilters(view({ pinned: ["pinned"] }), loose)).toBe(false);
+    expect(matchesSidebarViewFilters(view({ pinned: ["not-pinned"] }), pinned)).toBe(false);
+    expect(matchesSidebarViewFilters(view({ pinned: ["not-pinned"] }), loose)).toBe(true);
+    expect(matchesSidebarViewFilters(view({ pinned: ["pinned", "not-pinned"] }), loose)).toBe(true);
+  });
+
+  it("keeps only threads on a picked machine", () => {
+    const onMac = facts({ machine: "mac" });
+    expect(matchesSidebarViewFilters(view({ machines: ["mac"] }), onMac)).toBe(true);
+    expect(matchesSidebarViewFilters(view({ machines: ["pc"] }), onMac)).toBe(false);
+    expect(matchesSidebarViewFilters(view({ machines: ["pc", "mac"] }), onMac)).toBe(true);
+  });
+
+  it("matches a thread with several pull requests if any of them matches", () => {
+    const several = facts({ pullRequests: ["open", "merged"] });
+    expect(matchesSidebarViewFilters(view({ pullRequests: ["merged"] }), several)).toBe(true);
+    expect(matchesSidebarViewFilters(view({ pullRequests: ["closed"] }), several)).toBe(false);
+    expect(matchesSidebarViewFilters(view({ pullRequests: ["none"] }), several)).toBe(false);
+    expect(matchesSidebarViewFilters(view({ pullRequests: ["none"] }), facts())).toBe(true);
+  });
+
+  it("reads a thread's pull request states, skipping ones dismissed from a stack", () => {
+    const link = (state: string | null, source = "manual") => ({
+      source,
+      snapshot: state === null ? null : { state },
+    });
+    const prs = (...pullRequests: ReadonlyArray<ReturnType<typeof link>>) =>
+      sidebarPrFiltersOf({
+        pullRequests,
+      } as unknown as Parameters<typeof sidebarPrFiltersOf>[0]);
+    expect(prs()).toEqual(["none"]);
+    expect(prs(link("merged"), link("open"))).toEqual(["open", "merged"]);
+    expect(prs(link("open", "stack-dismissed"))).toEqual(["none"]);
+    // Still has a pull request, just not one whose state has loaded.
+    expect(prs(link(null))).toEqual([]);
+  });
+
+  it("counts threads for the Pinned, Pull request and Machine menus", () => {
+    const threads = [
+      { pinnedAt: "2026-01-01", environmentId: "pc", pullRequests: [] },
+      {
+        pinnedAt: null,
+        environmentId: "mac",
+        pullRequests: [
+          { source: "manual", snapshot: { state: "open" } },
+          { source: "manual", snapshot: { state: "merged" } },
+        ],
+      },
+      { pinnedAt: null, environmentId: "pc", pullRequests: [] },
+    ].map((extra, index) => ({
+      ...thread(`t${index}`, { created: "2026-01-01T00:00:00Z" }),
+      runtime: null,
+      ...extra,
+    })) as unknown as ReadonlyArray<EnvironmentThreadShell>;
+    const facets = countSidebarFilterFacets(threads, () => []);
+    expect(facets.pinned).toEqual([
+      { value: "pinned", count: 1 },
+      { value: "not-pinned", count: 2 },
+    ]);
+    expect(facets.pullRequests).toEqual([
+      { value: "open", count: 1 },
+      { value: "merged", count: 1 },
+      { value: "closed", count: 0 },
+      { value: "none", count: 2 },
+    ]);
+    expect([...facets.machines]).toEqual([
+      ["pc", 2],
+      ["mac", 1],
+    ]);
+  });
+
+  it("carries a saved view over from before the Pinned and Pull request menus", () => {
+    const {
+      pinned: _pinned,
+      pullRequests: _pullRequests,
+      machines: _machines,
+      ...rest
+    } = view({
+      tags: ["a"],
+      sort: "newest",
+      groupBy: "tag",
+    });
+    expect(migrateSidebarViewV1({ ...rest, pinnedOnly: true, openPrOnly: true })).toEqual(
+      view({
+        tags: ["a"],
+        sort: "newest",
+        groupBy: "tag",
+        pinned: ["pinned"],
+        pullRequests: ["open"],
+      }),
+    );
+    expect(migrateSidebarViewV1({ ...rest, pinnedOnly: false, openPrOnly: false })).toEqual(
+      view({ tags: ["a"], sort: "newest", groupBy: "tag" }),
+    );
   });
 
   it("counts each picked value for the badge, and clearing keeps sort and grouping", () => {
     const busy = view({
       tags: ["a", "b"],
       statuses: ["failed"],
-      pinnedOnly: true,
+      pinned: ["pinned"],
+      pullRequests: ["open", "none"],
+      machines: ["mac"],
       sort: "newest",
       groupBy: "tag",
       collapsedGroups: ["tag:a"],
     });
-    expect(countSidebarViewFilters(busy, 2)).toBe(6);
+    expect(countSidebarViewFilters(busy, 2)).toBe(9);
     expect(clearSidebarViewFilters(busy)).toEqual(
       view({ sort: "newest", groupBy: "tag", collapsedGroups: ["tag:a"] }),
     );
