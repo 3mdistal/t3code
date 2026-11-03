@@ -26,15 +26,8 @@ import {
   type SidebarStatusFilter,
   type SidebarView,
 } from "./sidebarView";
+import { SIDEBAR_STATUS_DOT_CLASS_NAME } from "./SidebarViewFolderHeader";
 import { threadTagDotClassName, threadTagDotStyle } from "./ThreadTagChips";
-
-const STATUS_DOT_CLASS_NAME: Record<SidebarStatusFilter, string> = {
-  "needs-you": "bg-warning",
-  failed: "bg-error",
-  working: "bg-info",
-  waiting: "bg-muted-foreground/50",
-  done: "bg-success",
-};
 
 export interface SidebarFilterProject {
   readonly key: string;
@@ -144,7 +137,10 @@ export function SidebarFilterMenu(props: SidebarFilterMenuProps) {
       <span className="flex min-w-0 items-center gap-2">
         <span
           aria-hidden
-          className={cn("size-2 shrink-0 rounded-full", STATUS_DOT_CLASS_NAME[status.value])}
+          className={cn(
+            "size-2 shrink-0 rounded-full",
+            SIDEBAR_STATUS_DOT_CLASS_NAME[status.value],
+          )}
         />
         <span className="min-w-0 flex-1 truncate">{SIDEBAR_STATUS_LABELS[status.value]}</span>
         <Count value={status.count} />
