@@ -753,6 +753,7 @@ it.effect.each([
                 ? ([1, 1, 1].map((attemptCount) => ({ attemptCount })) as never)
                 : [],
             ),
+          hasPendingRestartContinuation: () => Effect.succeed(false), // fork: see FORK.md.
           reconcileAfterProcessLoss: Effect.succeed({ requeued: 0, cancelled: 0 }),
         }),
       ),
