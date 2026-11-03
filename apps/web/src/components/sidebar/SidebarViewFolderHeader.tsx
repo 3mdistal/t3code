@@ -11,7 +11,8 @@ import { sidebarFolderRowId } from "./SidebarProjectFolderHeader";
 import type { SidebarStatusFilter, SidebarViewGroup } from "./sidebarView";
 import { threadTagDotStyle } from "./ThreadTagChips";
 
-const STATUS_ICON_CLASS_NAME: Record<SidebarStatusFilter, string> = {
+/** A status's dot color, the same on folders and in the filter menu. */
+export const SIDEBAR_STATUS_DOT_CLASS_NAME: Record<SidebarStatusFilter, string> = {
   "needs-you": "bg-warning",
   failed: "bg-error",
   working: "bg-info",
@@ -66,7 +67,9 @@ export const SidebarViewFolderHeader = memo(function SidebarViewFolderHeader(pro
       >
         <span aria-hidden className="grid size-4 shrink-0 place-items-center">
           {group.status !== null ? (
-            <span className={cn("size-2 rounded-full", STATUS_ICON_CLASS_NAME[group.status])} />
+            <span
+              className={cn("size-2 rounded-full", SIDEBAR_STATUS_DOT_CLASS_NAME[group.status])}
+            />
           ) : group.tag !== null ? (
             <span className="size-2 rounded-full" style={threadTagDotStyle(group.tag)} />
           ) : (
