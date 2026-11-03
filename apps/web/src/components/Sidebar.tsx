@@ -11,7 +11,19 @@ import {
 } from "./chat/threadContextDrag";
 import { discardComposerDraft } from "../lib/discardComposerDraft";
 import { requestCustomSnooze } from "./CustomSnoozeDialog";
-import { readThreadTagMenu, useThreadTagMenuActions } from "./sidebar/threadTags"; // fork: thread tags, see FORK.md.
+import {
+  readThreadTagMenu,
+  useBulkThreadTagMenuActions,
+  useThreadTagMenuActions,
+} from "./sidebar/threadTags"; // fork: thread tags, see FORK.md.
+// fork: bulk thread actions, see FORK.md.
+import {
+  buildBulkMenuItem,
+  type BulkTagMenuId,
+  buildBulkTagMenuItem,
+  planBulkPinOrderKeys,
+  sortByListedOrder,
+} from "./sidebar/bulkThreadActions";
 // fork: sidebar filter and sort, see FORK.md.
 import { useThreadTagsByEnvironment } from "./sidebar/threadTags";
 import { SidebarFilterMenu } from "./sidebar/SidebarFilterMenu";
@@ -1067,6 +1079,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     reportFailure: false,
   });
   const handleThreadTagAction = useThreadTagMenuActions(); // fork: thread tags, see FORK.md.
+  const handleBulkThreadTagAction = useBulkThreadTagMenuActions(); // fork: bulk thread actions, see FORK.md.
   const { copyToClipboard: copyPathToClipboard } = useCopyToClipboard<{ path: string }>({
     onError: (error) => {
       toastManager.add(
@@ -2080,9 +2093,10 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   ) {
     setOptimisticDrop(null);
   }
-  const attemptPin = (threadRef: ScopedThreadRef) => {
+  // fork: bulk thread actions, see FORK.md. A bulk pin picks each thread's place.
+  const attemptPin = (threadRef: ScopedThreadRef, orderKey?: string) => {
     void (async () => {
-      const result = await pinThread(threadRef);
+      const result = await pinThread(threadRef, orderKey === undefined ? {} : { orderKey });
       if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
         const error = squashAtomCommandFailure(result);
         toastManager.add(
@@ -2548,6 +2562,33 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
       const unpinMenuItem = buildBulkUnpinContextMenuItem({
         pinnedCount: pinnedSelectedThreads.length,
       });
+      // fork: bulk thread actions, see FORK.md. Each action counts only the threads it applies to.
+      const pinningThreads = sortByListedOrder(
+        selectedThreads.filter(
+          (thread) => serverConfigs.has(thread.environmentId) && thread.pinnedAt == null,
+        ),
+        threadShellKey,
+        orderedThreadKeysRef.current,
+      );
+      const unsettlingThreads = selectedThreads.filter(
+        (thread) =>
+          serverConfigs.has(thread.environmentId) &&
+          settledThreadKeysRef.current.has(threadShellKey(thread)),
+      );
+      const wakingThreads = selectedThreads.filter(
+        (thread) =>
+          serverConfigs.has(thread.environmentId) &&
+          snoozedThreadKeysRef.current.has(threadShellKey(thread)),
+      );
+      const archivingThreads = selectedThreads.filter((thread) =>
+        threadRuntimeCanArchive(thread.runtime),
+      );
+      const taggingThreads = selectedThreads.flatMap((thread) => {
+        const threadRef = scopeThreadRef(thread.environmentId, thread.id);
+        const menu = readThreadTagMenu(threadRef);
+        return menu?.canEdit ? [{ thread, threadRef, menu }] : [];
+      });
+      const tagsMenuItem = buildBulkTagMenuItem(taggingThreads.map(({ menu }) => menu));
       // Presets sync across environments, so the first selected thread's stand for all.
       const menuOpenedAt = new Date();
       const snoozePresets = resolveSnoozePresets(
@@ -2558,14 +2599,32 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
       const clicked = await settlePromise(() =>
         api.contextMenu.show(
           [
+            // fork: bulk thread actions, see FORK.md.
+            ...buildBulkMenuItem(
+              "pin",
+              "Pin",
+              pinningThreads.length,
+              canOperateThreads(pinningThreads),
+            ),
             ...(unpinMenuItem
               ? [{ ...unpinMenuItem, disabled: !canOperateThreads(pinnedSelectedThreads) }]
               : []),
-            {
-              id: "settle",
-              label: gt("Settle ({count})", { count }),
-              disabled: settlingThreads.length === 0 || !canOperateThreads(settlingThreads, true),
-            },
+            // fork: bulk thread actions count only the threads each applies to, see FORK.md.
+            ...(settlingThreads.length === 0
+              ? []
+              : [
+                  {
+                    id: "settle" as const,
+                    label: gt("Settle ({count})", { count: settlingThreads.length }),
+                    disabled: !canOperateThreads(settlingThreads, true),
+                  },
+                ]),
+            ...buildBulkMenuItem(
+              "unsettle",
+              "Un-settle",
+              unsettlingThreads.length,
+              canOperateThreads(unsettlingThreads, true),
+            ),
             ...(canSnoozeSelection
               ? [
                   {
@@ -2589,6 +2648,14 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                   },
                 ]
               : []),
+            // fork: bulk thread actions, see FORK.md.
+            ...buildBulkMenuItem(
+              "unsnooze",
+              "Wake",
+              wakingThreads.length,
+              canOperateThreads(wakingThreads, true),
+            ),
+            ...(tagsMenuItem ? [tagsMenuItem] : []),
             ...(titleRegenerationMenuItem
               ? [
                   {
@@ -2600,6 +2667,13 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                 ]
               : []),
             { id: "mark-unread", label: gt("Mark unread ({count})", { count }) },
+            // fork: bulk thread actions, see FORK.md.
+            ...buildBulkMenuItem(
+              "archive",
+              "Archive",
+              archivingThreads.length,
+              canOperateThreads(archivingThreads),
+            ),
             {
               id: "delete",
               label: gt("Delete ({count})", { count }),
@@ -2612,19 +2686,30 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
         ),
       );
       if (clicked._tag === "Failure" || clicked.value === null) return;
-      const actionTargets =
-        clicked.value === "unpin"
-          ? pinnedSelectedThreads
-          : clicked.value === "regenerate-title"
-            ? regeneratableTitleThreads
-            : clicked.value === "settle"
-              ? settlingThreads.flatMap((thread) => {
-                  const current = threadByKeyRef.current.get(
-                    scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
-                  );
-                  return current && current.settledOverride !== "settled" ? [current] : [];
-                })
-              : selectedThreads;
+      // fork: bulk thread actions, see FORK.md.
+      const isTagAction = clicked.value === "tag-new" || clicked.value.startsWith("tag:");
+      const actionTargets = isTagAction
+        ? taggingThreads.map(({ thread }) => thread)
+        : clicked.value === "pin"
+          ? pinningThreads
+          : clicked.value === "unsettle"
+            ? unsettlingThreads
+            : clicked.value === "unsnooze"
+              ? wakingThreads
+              : clicked.value === "archive"
+                ? archivingThreads
+                : clicked.value === "unpin"
+                  ? pinnedSelectedThreads
+                  : clicked.value === "regenerate-title"
+                    ? regeneratableTitleThreads
+                    : clicked.value === "settle"
+                      ? settlingThreads.flatMap((thread) => {
+                          const current = threadByKeyRef.current.get(
+                            scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
+                          );
+                          return current && current.settledOverride !== "settled" ? [current] : [];
+                        })
+                      : selectedThreads;
       if (clicked.value === "settle" && actionTargets.length === 0) return;
       if (
         clicked.value !== "mark-unread" &&
@@ -2682,6 +2767,77 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
           attemptUnpin(scopeThreadRef(thread.environmentId, thread.id));
         }
         clearSelection();
+        return;
+      }
+      // fork: bulk thread actions, see FORK.md.
+      if (isTagAction) {
+        // The selection stays, so a second tag doesn't need the threads picked again.
+        await handleBulkThreadTagAction(
+          taggingThreads.map(({ threadRef }) => threadRef),
+          clicked.value as BulkTagMenuId,
+        );
+        return;
+      }
+      if (clicked.value === "pin") {
+        const orderKeys = planBulkPinOrderKeys(pinningThreads.length, pinnedKeysById.values());
+        for (const [index, thread] of pinningThreads.entries()) {
+          attemptPin(scopeThreadRef(thread.environmentId, thread.id), orderKeys[index]);
+        }
+        clearSelection();
+        return;
+      }
+      if (clicked.value === "unsettle") {
+        for (const thread of unsettlingThreads) {
+          attemptUnsettle(scopeThreadRef(thread.environmentId, thread.id));
+        }
+        clearSelection();
+        return;
+      }
+      if (clicked.value === "unsnooze") {
+        for (const thread of wakingThreads) {
+          attemptUnsnooze(scopeThreadRef(thread.environmentId, thread.id));
+        }
+        clearSelection();
+        return;
+      }
+      if (clicked.value === "archive") {
+        if (confirmThreadArchive) {
+          const archiveCount = archivingThreads.length;
+          const confirmed = await settlePromise(() =>
+            api.dialogs.confirm(
+              gt(
+                "{count, plural, one {Archive {count} thread?} other {Archive {count} threads?}}",
+                {
+                  count: archiveCount,
+                },
+              ),
+            ),
+          );
+          if (confirmed._tag === "Failure" || !confirmed.value) return;
+        }
+        clearSelection();
+        // One at a time, since archiving the open thread also navigates away from it.
+        const failures = [];
+        for (const thread of archivingThreads) {
+          const result = await archiveThread(scopeThreadRef(thread.environmentId, thread.id));
+          if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+            failures.push(squashAtomCommandFailure(result));
+          }
+        }
+        const firstFailure = failures[0];
+        if (firstFailure !== undefined) {
+          toastManager.add(
+            stackedThreadToast({
+              type: "error",
+              title: gt(
+                "{count, plural, one {Failed to archive {count} thread} other {Failed to archive {count} threads}}",
+                { count: failures.length },
+              ),
+              description:
+                firstFailure instanceof Error ? firstFailure.message : gt("An error occurred."),
+            }),
+          );
+        }
         return;
       }
       if (clicked.value === "regenerate-title") {
