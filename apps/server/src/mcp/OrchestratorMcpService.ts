@@ -66,6 +66,8 @@ import {
   latestProviderTurnForAttempt,
   resolveProjectProviderInstanceEnabled,
   SECRET_REQUEST_UNSAVED_NOTE,
+  hasAnyThreadTag, // fork: thread tags, see FORK.md.
+  type ThreadTagSettings, // fork: thread tags, see FORK.md.
 } from "@t3tools/contracts";
 import { getProviderOptionCurrentValue, withLegacyUltracodeEffort } from "@t3tools/shared/model";
 import { backgroundWorkHoldsCompletion } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
@@ -3570,6 +3572,12 @@ const make = Effect.gen(function* () {
           ? null
           : new Set(input.statuses);
       const titleContains = input.titleContains?.toLocaleLowerCase();
+      // fork: thread tags, see FORK.md. Unreadable settings list threads untagged.
+      const threadTags = yield* serverSettings.getSettings.pipe(
+        Effect.map((settings) => settings.threadTags),
+        Effect.orElseSucceed(() => ({}) as ThreadTagSettings),
+      );
+      const wantedTags = input.tags === undefined || input.tags.length === 0 ? null : input.tags;
       // A live status needs a source the index's mayBeLive covers, so a live-only filter
       // skips building shells for every thread that cannot match.
       const mayBeLiveIds =
@@ -3598,6 +3606,10 @@ const make = Effect.gen(function* () {
           (thread) =>
             input.snoozed !== true ||
             (thread.snoozedUntil != null && DateTime.toEpochMillis(thread.snoozedUntil) > nowMs),
+        )
+        .filter(
+          // fork: thread tags, see FORK.md.
+          (thread) => wantedTags === null || hasAnyThreadTag(threadTags[thread.id], wantedTags),
         );
       // Shells are the costly part, so build them only for the threads the page needs.
       const shellsOf = (threads: ReadonlyArray<{ readonly id: ThreadId }>) =>
@@ -3633,7 +3645,11 @@ const make = Effect.gen(function* () {
       return {
         projectId,
         currentThreadId: parent?.thread.id ?? null,
-        threads: page.map((shell) => listItemFromShell(scope, shell, nowMs)),
+        // fork: thread tags, see FORK.md.
+        threads: page.map((shell) => {
+          const tags = threadTags[shell.id];
+          return { ...listItemFromShell(scope, shell, nowMs), ...(tags ? { tags } : {}) };
+        }),
         nextCursor,
         total,
       } satisfies OrchestratorMcpThreadListResult;

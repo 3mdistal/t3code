@@ -1,4 +1,4 @@
-import type { ContextMenuItem } from "@t3tools/contracts";
+import { type ContextMenuItem, hasAnyThreadTag } from "@t3tools/contracts"; // fork: thread tags, see FORK.md.
 import type { SnoozePreset } from "@t3tools/client-runtime/state/thread-settled";
 import { msg } from "gt-react";
 
@@ -20,6 +20,10 @@ export type ThreadActionMenuId =
   | "snooze"
   | `snooze:${string}`
   | "unsnooze"
+  // fork: thread tags, see FORK.md.
+  | "tags"
+  | `tag:${string}`
+  | "tag-new"
   | "rename"
   | "regenerate-title"
   | "mark-unread"
@@ -93,6 +97,14 @@ export function buildDraftActionMenuItems(
   ];
 }
 
+// fork: thread tags, see FORK.md.
+export interface ThreadTagMenuState {
+  /** Every tag in use on the thread's server. */
+  readonly all: ReadonlyArray<string>;
+  readonly selected: ReadonlyArray<string>;
+  readonly canEdit: boolean;
+}
+
 export interface ThreadActionMenuState {
   readonly canOperate: boolean;
   /** Settle, snooze and their undo stay available until the host denies the operate scope. */
@@ -127,6 +139,8 @@ export interface ThreadActionMenuState {
   readonly canShareWithGuest?: boolean;
   /** A No project thread with its own folder, on a server that can promote it. */
   readonly canTurnIntoProject?: boolean;
+  /** Null when the thread's server can't hold tags. */
+  readonly tags?: ThreadTagMenuState | null; // fork: thread tags, see FORK.md.
 }
 
 /** Local navigation, read markers, and copying remain available to read-only clients. */
@@ -153,6 +167,30 @@ export function isThreadTriageAction(action: string): boolean {
     action === "unsnooze" ||
     action.startsWith("snooze:")
   );
+}
+
+// fork: thread tags, see FORK.md.
+function threadTagMenuItems(
+  tags: ThreadTagMenuState | null | undefined,
+  resolve: MessageResolver,
+): ReadonlyArray<ContextMenuItem<ThreadActionMenuId>> {
+  if (!tags) return [];
+  return [
+    {
+      id: "tags",
+      label: resolve(msg("Tags")),
+      icon: "tag",
+      disabled: !tags.canEdit,
+      children: [
+        ...tags.all.map((tag) => ({
+          id: `tag:${tag}` as const,
+          label: tag,
+          checked: hasAnyThreadTag(tags.selected, [tag]),
+        })),
+        { id: "tag-new", label: resolve(msg("New tag…")), separatorBefore: tags.all.length > 0 },
+      ],
+    },
+  ];
 }
 
 export function buildThreadActionMenuItems(
@@ -214,6 +252,7 @@ export function buildThreadActionMenuItems(
               },
         ]
       : []),
+    ...threadTagMenuItems(state.tags, resolve), // fork: thread tags, see FORK.md.
     {
       id: "rename",
       label: resolve(msg("Rename thread")),
