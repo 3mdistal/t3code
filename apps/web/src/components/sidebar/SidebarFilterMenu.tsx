@@ -41,6 +41,7 @@ import {
   type SidebarPrFilter,
   type SidebarStatusFilter,
   type SidebarView,
+  unlistedSidebarFilterPicks,
 } from "./sidebarView";
 import { SIDEBAR_STATUS_DOT_CLASS_NAME } from "./SidebarViewFolderHeader";
 import { threadTagDotClassName, threadTagDotStyle } from "./ThreadTagChips";
@@ -109,8 +110,28 @@ function SelectedCount(props: { readonly value: number }) {
  * search finds any option. Machines only show when there is more than one to pick from.
  */
 export function SidebarFilterMenu(props: SidebarFilterMenuProps) {
-  const { view, onViewChange, projects, projectKeys, tags, statuses } = props;
-  const { pinned, pullRequests, machines } = props;
+  const { view, onViewChange, projects, projectKeys, statuses } = props;
+  const { pinned, pullRequests } = props;
+  const gt = useGT();
+  const tags: ReadonlyArray<SidebarFilterCount<string>> = [
+    ...props.tags,
+    ...unlistedSidebarFilterPicks(
+      view.tags,
+      props.tags.map((tag) => tag.value),
+    ).map((value) => ({ value, count: 0 })),
+  ];
+  const machines: ReadonlyArray<SidebarFilterMachine> = [
+    ...props.machines,
+    ...unlistedSidebarFilterPicks(
+      view.machines,
+      props.machines.map((machine) => machine.key),
+    ).map((key) => ({
+      key,
+      label: gt("Removed machine"),
+      machine: "server" as const,
+      count: 0,
+    })),
+  ];
   const [query, setQuery] = useState("");
   const [projectQuery, setProjectQuery] = useState("");
   const [tagQuery, setTagQuery] = useState("");

@@ -18,6 +18,7 @@ import {
   type SidebarViewThreadFacts,
   countSidebarFilterFacets,
   sidebarPrFiltersOf,
+  unlistedSidebarFilterPicks,
   sidebarStatusFilterOf,
   sidebarGroupNamesRowStatus,
   sidebarViewAllowsWorkingShelf,
@@ -220,6 +221,13 @@ describe("sidebar view filters", () => {
     expect(sidebarStatusFilterOf("ready")).toBe("done");
     expect(matchesSidebarFilterQuery("Needs you", " need")).toBe(true);
     expect(matchesSidebarFilterQuery("frontend", "back")).toBe(false);
+  });
+});
+
+describe("unlistedSidebarFilterPicks", () => {
+  it("keeps a pick the menu no longer lists, so it can be unticked", () => {
+    expect(unlistedSidebarFilterPicks(["Bugs", "gone"], ["bugs", "docs"])).toEqual(["gone"]);
+    expect(unlistedSidebarFilterPicks([], ["bugs"])).toEqual([]);
   });
 });
 
