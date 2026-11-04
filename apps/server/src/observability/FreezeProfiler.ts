@@ -157,11 +157,12 @@ export function startFreezeProfiler(
   };
 }
 
-const disabled = () => process.env.T3CODE_FREEZE_PROFILES?.trim() === "0";
+// Off unless asked for: each profile start walks the heap on the main thread, every two minutes.
+const enabled = () => process.env.T3CODE_FREEZE_PROFILES?.trim() === "1";
 
 export const layer = Layer.effectDiscard(
   Effect.gen(function* () {
-    if (!(yield* HostProcess.isWindows) || disabled()) return;
+    if (!(yield* HostProcess.isWindows) || !enabled()) return;
     const { serverTracePath } = yield* ServerConfig.ServerConfig;
     const path = yield* Path.Path;
     const dir = path.join(path.dirname(serverTracePath), "freeze-profiles");
