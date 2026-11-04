@@ -758,10 +758,11 @@ Users read about it in the Memory and CPU limits section of `docs/user/remote-ac
     while paused starts nothing.
   - `followPause` also saves the waiting list to `state.json` when it changes, because a pass saves only every 15
     seconds and "Stop now, then shut down" would otherwise lose the threads it just held.
-  - The waiting list is the only thing that releases a held run, so a pass takes a thread off it only when it knows
-    the thread has nothing held. Admission records a thread a moment before its run is written, so a thread held in
-    the last minute (`holdWriteMs`) stays even with nothing queued. A thread held again since the pass read the list
-    stays too (`lastHeldAt`), and so does one whose records couldn't be read.
+  - The waiting list is the only thing that releases a held run, so a pass mustn't take off a thread that's about to
+    have one. Admission records a thread a moment before its run is written, so a thread held in the last minute
+    (`holdWriteMs`) stays even with nothing queued. A thread held again since the pass read the list stays too
+    (`lastHeldAt`). A thread whose records can't be read is still dropped, because keeping it could hold all new work
+    behind one thread for as long as the read keeps failing.
   - A subagent launch the hook refused can reach the inbox after its turn ended, so the inbox is matched against
     idle sessions as well as running ones.
 - teenylilconfig's memory gate and task wake share the governor's files under `<stateDir>/resource-limits/`:
