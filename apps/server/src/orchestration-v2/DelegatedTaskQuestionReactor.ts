@@ -16,6 +16,7 @@ import { reportLabel } from "@t3tools/provider-core/server/notification";
 import { forkParked } from "../serverActivation.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
+import { isDelegatedAttentionEvent, makeDelegatedAttention } from "./DelegatedAttention.ts"; // fork: see FORK.md.
 
 export class DelegatedTaskQuestionReactor extends Context.Service<
   DelegatedTaskQuestionReactor,
@@ -28,6 +29,7 @@ export class DelegatedTaskQuestionReactor extends Context.Service<
 const make = Effect.gen(function* () {
   const engine = yield* Orchestrator.OrchestratorV2;
   const projections = yield* ProjectionStore.ProjectionStoreV2;
+  const attention = yield* makeDelegatedAttention(); // fork: see FORK.md.
 
   const wakeParent = Effect.fnUntraced(function* (
     task: OrchestrationV2Subagent,
@@ -61,6 +63,8 @@ const make = Effect.gen(function* () {
   // Runs for every domain event; most events return before any work is needed.
   const handle: DelegatedTaskQuestionReactor["Service"]["handle"] = Effect.fnUntraced(
     function* (event) {
+      // fork: approvals and wake loss reach the owner without granting approval rights; see FORK.md.
+      if (isDelegatedAttentionEvent(event)) return yield* attention(event);
       if (event.type === "run.updated") {
         if (!["completed", "failed", "waiting"].includes(event.payload.status)) return;
         const parent = yield* projections.getThreadRecords(event.threadId, ["subagents"]);

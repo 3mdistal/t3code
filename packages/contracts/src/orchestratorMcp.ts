@@ -527,6 +527,8 @@ export const OrchestratorMcpThreadWaitInput = Schema.Struct({
   threadId: ThreadId,
   runId: Schema.optional(RunId),
   timeoutMs: Schema.optional(Schema.Finite),
+  // fork: long-lived followers can wait for the next unanswered prompt or wake loss; see FORK.md.
+  seenAttentionIds: Schema.optional(Schema.Array(Schema.String)),
   untilDelegatedWorkSettled: Schema.optional(
     Schema.Boolean.annotate({
       description:
@@ -536,11 +538,20 @@ export const OrchestratorMcpThreadWaitInput = Schema.Struct({
 });
 export type OrchestratorMcpThreadWaitInput = typeof OrchestratorMcpThreadWaitInput.Type;
 
+// fork: wire-only attention summaries carry no approval capability; see FORK.md.
+export const OrchestratorMcpThreadAttention = Schema.Struct({
+  id: Schema.String,
+  kind: Schema.Literals(["approval", "question", "wake_cancelled"]),
+  summary: Schema.String,
+});
+export type OrchestratorMcpThreadAttention = typeof OrchestratorMcpThreadAttention.Type;
+
 export const OrchestratorMcpThreadWaitResult = Schema.Struct({
   threadId: ThreadId,
   runId: Schema.NullOr(RunId),
   status: OrchestratorMcpThreadStatus,
   timedOut: Schema.Boolean,
+  attention: Schema.optional(Schema.Array(OrchestratorMcpThreadAttention)), // fork: see FORK.md.
   next: Schema.optional(OrchestratorMcpRunningTaskNext),
   /** With untilDelegatedWorkSettled, once settled: the run whose reply is the thread's result. */
   resultRun: Schema.optional(Schema.Struct({ runId: RunId, status: OrchestrationV2RunStatus })),

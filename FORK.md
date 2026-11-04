@@ -865,6 +865,36 @@ visible notice. Intentional Stop stays quiet. There is no migration, event type 
 - `CodexWakeGap.fork.test.ts` asserts delivery and a new run as an expected failure for the known Codex gap below.
   Its completed-command handler can still be interrupted before enqueueing; Codex code is unchanged.
 
+### Delegated attention reaches its owner (`fork:`)
+
+Local delegated questions already notified their parent, but approvals did not. Linked-environment followers
+waited only for completion, and a lost background wake remained only a transcript notice. The question reactor
+now also relays approvals and wake cancellation to the parent. An approval relay tells the parent to inform the
+user; it grants no approval capability. Resolving an approval cancels a still-queued local relay. Notifications
+use ordinary queued messages and keep the existing pause and resource-governor holds.
+
+Peer thread waits opt in to attention summaries with `seenAttentionIds`. The remote follower acknowledges each
+request or notice after delivery, with stable message IDs for deduplication across retries and restarts. An
+attention-only return never substitutes for the final delegated result, even when its run has ended. Old
+peers retain their completion-only behavior. There is no persisted schema, event type or setting change.
+
+Web and desktop notifications identify the newest pending request, including linked children, so a second prompt
+in one run alerts again without re-alerting when an older prompt is exposed. For a root thread's lost wake, the
+client reads a bounded recent projection when an idle thread gains items or loses awaited work. Reads are
+coalesced, limited and retried. A wake warning replaces a pending completion alert; existing notification settings
+and focused-thread suppression apply. Historical notices remain quiet after reload. Mobile notification behavior
+is unchanged. The title `Background wake cancelled` is shared by the Claude adapter, relay and client tracker;
+changing it requires updating all three.
+
+- Server seams: `DelegatedTaskQuestionReactor.ts`, `DelegatedAttention.ts`, `ThreadAttention.ts`,
+  `ThreadManagementService.ts`, `OrchestratorMcpService.ts`, `PeerForwarding.ts` and `RemoteDelegation.ts`.
+- Client seams: `ThreadNotificationCoordinator.tsx` and its gate, with fork files `ThreadAttentionRequests`,
+  `ThreadWakeNotices` and `ThreadWakeNoticeRead`. The wait additions in `packages/contracts/src/orchestratorMcp.ts`
+  are optional wire fields.
+- Tests: `DelegatedAttention.fork.test.ts` exercises SQLite and the real question reactor and thread wait;
+  `RemoteAttention.fork.test.ts` covers the remote follower; `PeerAttention.fork.test.ts` drives an authenticated
+  peer HTTP wait. The three client fork suites cover request identity, wake reads and notification wiring.
+
 ## Versions
 
 A release is `vX.Y.Z-alice.N`. `X.Y.Z` is the upstream stable tag the stack sits on, and `N` counts the fork's
