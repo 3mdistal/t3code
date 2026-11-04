@@ -521,30 +521,28 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
   });
 
   const inspect = Effect.fn("ResourceLimitsGovernor.inspect")(function* (entry: WaitingThread) {
-    // A read that failed says nothing about the thread, so it counts as queued and stays for the next pass.
-    const unread = {
-      entry,
-      shell: null,
-      queued: true,
-      held: false,
-      blocked: false,
-      snoozable: false,
-    } satisfies Inspected;
-    const shell = yield* projections.getThreadShell(entry.threadId).pipe(Effect.option);
-    if (Option.isNone(shell)) return unread;
-    if (shell.value === null || shell.value.archivedAt !== null || shell.value.deletedAt !== null) {
-      return { ...unread, queued: false } satisfies Inspected;
+    const shell = yield* projections
+      .getThreadShell(entry.threadId)
+      .pipe(Effect.orElseSucceed(() => null));
+    if (shell === null || shell.archivedAt !== null || shell.deletedAt !== null) {
+      return {
+        entry,
+        shell: null,
+        queued: false,
+        held: false,
+        blocked: false,
+        snoozable: false,
+      } satisfies Inspected;
     }
-    const records = yield* projections
-      .getThreadRecords(entry.threadId, ["runs"])
-      .pipe(Effect.option);
-    if (Option.isNone(records)) return unread;
-    const runs = records.value.runs;
+    const runs = yield* projections.getThreadRecords(entry.threadId, ["runs"]).pipe(
+      Effect.map((records) => records.runs),
+      Effect.orElseSucceed(() => []),
+    );
     const queued = runs.filter((run) => run.status === "queued");
     const snoozable =
       queued.length > 0 &&
       !entry.snoozeTried &&
-      shell.value.snoozedUntil == null &&
+      shell.snoozedUntil == null &&
       (yield* projections
         .getThreadRecords(entry.threadId, ["messages"], {
           messageIds: queued.map((run) => run.userMessageId),
@@ -562,7 +560,7 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
         ));
     return {
       entry,
-      shell: shell.value,
+      shell,
       queued: queued.length > 0,
       held: queued.some((run) => run.queueHeld === true),
       blocked: runs.some((run) =>
@@ -795,7 +793,7 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
     const dropped = new Set<ThreadId>();
     const changed = new Map<ThreadId, WaitingThread>();
     for (const item of inspected) {
-      if (!item.queued) {
+      if (item.shell === null || !item.queued) {
         // A wake the restart dropped comes back as a note, so the thread keeps its place in the line.
         if (
           item.shell !== null &&
