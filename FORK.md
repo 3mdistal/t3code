@@ -51,6 +51,8 @@ already retired.
 - `apps/server/src/orchestration-v2/ClaudeApprovalLifecycle.fork.test.ts` covers steer, SDK abort (upstream's
   cancel), questions, a parallel subagent permission, late Cancel, and shutdown/startup against a temporary
   SQLite database.
+- `Adapters/ClaudeRuntimeRequests.fork.test.ts` covers interrupted or failed offers after enqueue acceptance,
+  rejection before acceptance, and offers that return without an acceptance callback.
 
 ### Releases come from this fork (`fork:`)
 
