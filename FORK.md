@@ -890,11 +890,15 @@ peers retain their completion-only behavior. There is no persisted schema, event
 
 Web and desktop notifications identify the newest pending request, including linked children, so a second prompt
 in one run alerts again without re-alerting when an older prompt is exposed. For a root thread's lost wake, the
-client reads a bounded recent projection when an idle thread gains items or loses awaited work. Reads are
-coalesced, limited and retried. A wake warning replaces a pending completion alert; existing notification settings
-and focused-thread suppression apply. Upstream v0.1.7 (#29146) sends completions without its old two-second wait,
-so the coordinator queues the read before the notification gate sees the same update, and only a completion that
-read could replace waits for it. Historical notices remain quiet after reload. Mobile notification behavior
+client reads a bounded recent projection when a run settles, or an idle thread gains items or loses awaited
+work. This includes completion and wake loss coalesced into one shell update. Deferred completions retain their
+run identity and are discarded when work resumes; a late wake warning supersedes only its own run's completion.
+Completion deferral expires after fifteen seconds even behind stalled transport reads. Upstream v0.1.7 (#29146)
+sends completions without its old two-second wait, so the coordinator queues the read before the notification gate
+sees the same update, and a completion waits for that read instead. A disconnect keeps a held completion for the
+read after reconnecting, still within those fifteen seconds.
+Reads are coalesced, limited and retried. A wake warning replaces a pending completion alert; existing notification settings
+and focused-thread suppression apply. Historical notices remain quiet after reload. Mobile notification behavior
 is unchanged. The title `Background wake cancelled` is shared by the Claude adapter, relay and client tracker;
 changing it requires updating all three.
 

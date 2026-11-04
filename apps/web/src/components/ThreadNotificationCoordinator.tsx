@@ -327,9 +327,24 @@ export function startThreadNotifications(
       reconnecting: false,
       unsubscribe: () => {},
       gate: createThreadNotificationGate<ThreadId>((threadId, kind) => {
+        const captured = entry.previous.get(threadId);
+        if (!captured) return;
         const deliver = () => {
           const state = entry.previous.get(threadId);
-          if (state) present(environmentId, state, kind);
+          if (!state) return;
+          // fork: a deferred completion belongs to one settled run; see FORK.md.
+          if (
+            kind === "completion" &&
+            (!state.settled ||
+              state.raw.latestRunId !== captured.raw.latestRunId ||
+              state.completedAt !== captured.completedAt ||
+              state.raw.archivedAt !== null ||
+              state.raw.deletedAt !== null ||
+              state.raw.latestRunStopRequested === true)
+          ) {
+            return;
+          }
+          present(environmentId, state, kind);
         };
         // fork: a read in flight may replace this completion with a wake alert; see FORK.md.
         if (kind !== "completion" || !entry.wakeNotices.holdCompletion(threadId, deliver)) {
@@ -338,13 +353,16 @@ export function startThreadNotifications(
       }),
       wakeNotices: createThreadWakeNotices({
         read: (threadId) => readWakeNoticeItems(registry, environmentId, threadId),
-        notify: (threadId) => {
+        notify: (threadId, runIds) => {
           const state = entry.previous.get(threadId);
           if (!state) return;
-          entry.gate.supersedeCompletion(
-            threadId,
-            Date.parse(state.thread.latestRun?.completedAt ?? ""),
-          );
+          if (
+            state.completedAt !== null &&
+            state.raw.latestRunId !== null &&
+            runIds.has(state.raw.latestRunId)
+          ) {
+            entry.gate.supersedeCompletion(threadId, state.completedAt);
+          }
           present(environmentId, state, "input", true);
         },
       }),

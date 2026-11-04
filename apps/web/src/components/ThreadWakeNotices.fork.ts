@@ -1,8 +1,9 @@
 // fork: a root thread's lost background wake only reaches its transcript, so the shell cannot say
-// it happened. Read recent items when an idle thread changes in a way a loss would; see FORK.md.
+// it happened. Check settling work and later idle changes for a loss; see FORK.md.
 import type {
   OrchestrationV2ThreadProjection,
   OrchestrationV2ThreadShell,
+  RunId,
   ThreadId,
 } from "@t3tools/contracts";
 import { backgroundWorkHoldsCompletion } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
@@ -22,6 +23,8 @@ export type WakeNoticeShell = Pick<
   | "itemCount"
   | "updatedAt"
   | "latestRunStopRequested"
+  | "latestRunId"
+  | "latestRunCompletedAt"
   | "archivedAt"
   | "deletedAt"
   | "pendingBackgroundTasks"
@@ -39,9 +42,23 @@ const awaitedWork = (shell: WakeNoticeShell) =>
     .length;
 
 const mayHaveLostWake = (prior: WakeNoticeShell, next: WakeNoticeShell) =>
-  isIdle(prior) &&
   isIdle(next) &&
-  (next.itemCount > prior.itemCount || awaitedWork(next) < awaitedWork(prior));
+  (!isIdle(prior) || next.itemCount > prior.itemCount || awaitedWork(next) < awaitedWork(prior));
+
+const completedRun = (shell: WakeNoticeShell) =>
+  !isIdle(shell) || shell.latestRunId === null || shell.latestRunCompletedAt == null
+    ? null
+    : {
+        runId: shell.latestRunId,
+        completedAt: DateTime.toEpochMillis(shell.latestRunCompletedAt),
+      };
+
+interface HeldCompletion {
+  readonly runId: RunId;
+  readonly completedAt: number;
+  readonly deliver: () => void;
+  readonly timeout: ReturnType<typeof setTimeout>;
+}
 
 interface TrackedThread {
   shell: WakeNoticeShell;
@@ -52,13 +69,18 @@ interface TrackedThread {
   stale: boolean;
   failures: number;
   retry: ReturnType<typeof setTimeout> | undefined;
-  heldCompletion: (() => void) | undefined;
+  heldCompletion: HeldCompletion | undefined;
 }
+
+const completionStillCurrent = (tracked: TrackedThread, held: HeldCompletion) => {
+  const current = completedRun(tracked.shell);
+  return current?.runId === held.runId && current.completedAt === held.completedAt;
+};
 
 export function createThreadWakeNotices(options: {
   /** One bounded read of the thread's recent items. Null or a rejection means it failed. */
   readonly read: (threadId: ThreadId) => Promise<WakeNoticeItems | null>;
-  readonly notify: (threadId: ThreadId) => void;
+  readonly notify: (threadId: ThreadId, runIds: ReadonlySet<RunId>) => void;
 }) {
   const threads = new Map<ThreadId, TrackedThread>();
   const queue = new Set<ThreadId>();
@@ -66,10 +88,18 @@ export function createThreadWakeNotices(options: {
   let inFlight = 0;
   let paused = false;
 
-  const releaseCompletion = (tracked: TrackedThread) => {
+  const dropCompletion = (tracked: TrackedThread) => {
     const completion = tracked.heldCompletion;
     tracked.heldCompletion = undefined;
-    if (!isQuiet(tracked.shell)) completion?.();
+    clearTimeout(completion?.timeout);
+    return completion;
+  };
+
+  const releaseCompletion = (tracked: TrackedThread) => {
+    const completion = dropCompletion(tracked);
+    if (completion && !isQuiet(tracked.shell) && completionStillCurrent(tracked, completion)) {
+      completion.deliver();
+    }
   };
 
   const isNewNotice = (threadId: ThreadId, tracked: TrackedThread, row: WakeNoticeItems[number]) =>
@@ -91,7 +121,7 @@ export function createThreadWakeNotices(options: {
 
   const onFailure = (threadId: ThreadId, tracked: TrackedThread) => {
     tracked.stale = true;
-    // The completion already waited out its grace, and a retry can take much longer.
+    // A retry can take much longer than the completion should wait.
     releaseCompletion(tracked);
     const delay = RETRY_DELAYS_MS[tracked.failures];
     tracked.failures += 1;
@@ -103,8 +133,13 @@ export function createThreadWakeNotices(options: {
     const notices = items.filter((row) => isNewNotice(threadId, tracked, row));
     for (const row of notices) tracked.seen.add(row.item.id);
     if (notices.length > 0 && !isQuiet(tracked.shell)) {
-      tracked.heldCompletion = undefined;
-      options.notify(threadId);
+      const runIds = new Set(
+        notices.flatMap(({ item }) => (item.runId === null ? [] : [item.runId])),
+      );
+      if (tracked.heldCompletion && runIds.has(tracked.heldCompletion.runId)) {
+        dropCompletion(tracked);
+      }
+      options.notify(threadId, runIds);
     }
     if (tracked.stale) enqueue(threadId, tracked);
     else releaseCompletion(tracked);
@@ -149,6 +184,7 @@ export function createThreadWakeNotices(options: {
 
   const forget = (threadId: ThreadId, tracked: TrackedThread) => {
     clearTimeout(tracked.retry);
+    dropCompletion(tracked);
     abandonRead(threadId);
     queue.delete(threadId);
     threads.delete(threadId);
@@ -171,11 +207,14 @@ export function createThreadWakeNotices(options: {
       }
       const prior = tracked.shell;
       tracked.shell = shell;
+      if (tracked.heldCompletion && !completionStillCurrent(tracked, tracked.heldCompletion)) {
+        dropCompletion(tracked);
+      }
       if (isQuiet(shell)) {
         // What happens while it is archived or stopped is never announced later.
         tracked.baseline = shell.updatedAt;
         tracked.stale = false;
-        tracked.heldCompletion = undefined;
+        dropCompletion(tracked);
         clearTimeout(tracked.retry);
         tracked.retry = undefined;
         queue.delete(threadId);
@@ -190,7 +229,14 @@ export function createThreadWakeNotices(options: {
     holdCompletion(threadId: ThreadId, completion: () => void): boolean {
       const tracked = threads.get(threadId);
       if (tracked === undefined || (!reads.has(threadId) && !queue.has(threadId))) return false;
-      tracked.heldCompletion = completion;
+      const current = completedRun(tracked.shell);
+      if (current === null) return false;
+      dropCompletion(tracked);
+      tracked.heldCompletion = {
+        ...current,
+        deliver: completion,
+        timeout: setTimeout(() => releaseCompletion(tracked), READ_TIMEOUT_MS),
+      };
       return true;
     },
     /** Forgets threads that left the snapshot. */
@@ -200,7 +246,10 @@ export function createThreadWakeNotices(options: {
       }
       pump();
     },
-    /** No reads while the environment is away; what they would have covered waits for resume. */
+    /**
+     * No reads while the environment is away; what they would have covered waits for resume.
+     * A held completion waits for that read too, still within its time limit.
+     */
     pause(): void {
       if (paused) return;
       paused = true;
@@ -212,7 +261,6 @@ export function createThreadWakeNotices(options: {
           abandonRead(threadId);
           tracked.stale = true;
         }
-        releaseCompletion(tracked);
       }
     },
     resume(): void {

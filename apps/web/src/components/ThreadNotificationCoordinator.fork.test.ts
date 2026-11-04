@@ -127,7 +127,7 @@ const thread = (overrides: Record<string, unknown> = {}) => ({
 });
 const working = { status: "running", activeRunId: "run", latestRunCompletedAt: undefined };
 
-const wakeNotice = (seconds: number) =>
+const wakeNotice = (seconds: number, runId = "run") =>
   [
     {
       position: 1,
@@ -136,6 +136,7 @@ const wakeNotice = (seconds: number) =>
       sourceItemId: "notice",
       item: {
         id: "notice",
+        runId,
         type: "system_notice",
         title: "Background wake cancelled",
         message: "Lost.",
@@ -264,6 +265,54 @@ it("leaves an ordinary end of awaited work as a completion", async () => {
   await vi.advanceTimersByTimeAsync(SETTLE_MS);
   expect(titles()).toEqual(["Thread completed"]);
 });
+
+it("detects completion and wake loss in one coalesced shell update", async () => {
+  showThreads(thread(working));
+  start();
+  showThreads(thread({ itemCount: 2, updatedAt: at(5), latestRunCompletedAt: at(5) }));
+  expect(state.read).toHaveBeenCalledTimes(1);
+  await answerRead(wakeNotice(5));
+  await vi.advanceTimersByTimeAsync(SETTLE_MS * 2);
+  expect(titles()).toEqual(["Background wake cancelled"]);
+});
+
+it.each(["no notice", "failed read"])(
+  "drops a held completion after another run starts, even with %s",
+  async (result) => {
+    showThreads(thread({ pendingBackgroundTasks: [awaitedTask] }));
+    start();
+    showThreads(thread({ itemCount: 2, updatedAt: at(5), latestRunCompletedAt: at(5) }));
+    await vi.advanceTimersByTimeAsync(SETTLE_MS);
+    showThreads(thread({ ...working, latestRunId: "next-run", activeRunId: "next-run" }));
+    await answerRead(result === "no notice" ? [] : null);
+    expect(titles()).toEqual([]);
+  },
+);
+
+it.each(["pending", "held"])(
+  "preserves a later run's %s completion when an older wake read returns",
+  async (phase) => {
+    showThreads(thread({ pendingBackgroundTasks: [awaitedTask] }));
+    start();
+    showThreads(thread({ itemCount: 2, updatedAt: at(5), latestRunCompletedAt: at(5) }));
+    await vi.advanceTimersByTimeAsync(SETTLE_MS);
+    showThreads(thread({ ...working, latestRunId: "next-run", activeRunId: "next-run" }));
+    const later = {
+      latestRunId: "next-run",
+      latestRunCompletedAt: at(9),
+      itemCount: 3,
+      updatedAt: at(9),
+    };
+    showThreads(thread(later));
+    showThreads(thread({ ...later, itemCount: 4, updatedAt: at(10) }));
+    if (phase === "held") await vi.advanceTimersByTimeAsync(SETTLE_MS);
+    await answerRead(wakeNotice(5));
+    expect(state.read).toHaveBeenCalledTimes(2);
+    await answerRead([]);
+    await vi.advanceTimersByTimeAsync(SETTLE_MS);
+    expect(titles()).toEqual(["Background wake cancelled", "Thread completed"]);
+  },
+);
 
 it("does not read for a historical notice on first sight, or while a run streams", () => {
   showThreads(thread({ itemCount: 9 }));
