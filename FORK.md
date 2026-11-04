@@ -910,6 +910,8 @@ changing it requires updating all three.
 - Tests: `DelegatedAttention.fork.test.ts` exercises SQLite and the real question reactor and thread wait;
   `RemoteAttention.fork.test.ts` covers the remote follower; `PeerAttention.fork.test.ts` drives an authenticated
   peer HTTP wait. The three client fork suites cover request identity, wake reads and notification wiring.
+  The existing badge browser fixture returns an explicit empty projection; fork tests control delayed reads
+  across reconnects, so completion assertions do not depend on a missing fixture server's response timing.
 
 ## Versions
 
