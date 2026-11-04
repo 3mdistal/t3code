@@ -6,6 +6,7 @@ import {
   buildBulkTagMenuItem,
   buildBulkTagPatches,
   bulkTagAdds,
+  currentPinOrderKeys,
   planBulkPinOrderKeys,
   sortByListedOrder,
 } from "./bulkThreadActions";
@@ -104,6 +105,20 @@ describe("sortByListedOrder", () => {
       "c",
       "x",
     ]);
+  });
+});
+
+describe("currentPinOrderKeys", () => {
+  it("reads pins only, so a batch still goes above a pin a filter hides", () => {
+    const keys = currentPinOrderKeys([
+      { pinnedAt: "2026-11-03T00:00:00.000Z", pinOrderKey: "b" },
+      { pinnedAt: null, pinOrderKey: "a" },
+      { pinnedAt: null, pinOrderKey: null },
+    ]);
+    expect(keys).toEqual(["b", null, null]);
+    const [first, second] = planBulkPinOrderKeys(2, keys) as [string, string];
+    expect(first < second).toBe(true);
+    expect(second < "b").toBe(true);
   });
 });
 
