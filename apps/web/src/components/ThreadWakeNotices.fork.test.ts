@@ -1,5 +1,5 @@
 import { WORKING_EXIT_GRACE_MS } from "@t3tools/client-runtime/state/thread-inbox";
-import { ThreadId, type OrchestrationV2ThreadProjection } from "@t3tools/contracts";
+import { RunId, ThreadId, type OrchestrationV2ThreadProjection } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
@@ -17,6 +17,7 @@ const at = (seconds: number) => DateTime.makeUnsafe(1_800_000_000_000 + seconds 
 
 const THREAD = ThreadId.make("thread");
 const OTHER = ThreadId.make("other");
+const RUN = RunId.make("run");
 
 const idle = (overrides: Partial<WakeNoticeShell> = {}): WakeNoticeShell => ({
   status: "completed",
@@ -24,6 +25,8 @@ const idle = (overrides: Partial<WakeNoticeShell> = {}): WakeNoticeShell => ({
   itemCount: 1,
   updatedAt: at(0),
   latestRunStopRequested: false,
+  latestRunId: RUN,
+  latestRunCompletedAt: at(0),
   archivedAt: null,
   deletedAt: null,
   pendingBackgroundTasks: [],
@@ -48,6 +51,7 @@ const notice = (
     sourceItemId: id,
     item: {
       id,
+      runId: RUN,
       type: "system_notice",
       title: overrides.title ?? WAKE_CANCELLED_NOTICE_TITLE,
       message: "Lost.",
@@ -95,7 +99,7 @@ describe("createThreadWakeNotices", () => {
     );
     expect(reads.map((read) => read.threadId)).toEqual([THREAD]);
     await answer([notice("notice", 5)]);
-    expect(notify.mock.calls).toEqual([[THREAD]]);
+    expect(notify.mock.calls).toEqual([[THREAD, new Set([RUN])]]);
     // The retried write keeps its id and a later unrelated item finds nothing new.
     notices.observe(
       THREAD,
@@ -108,7 +112,6 @@ describe("createThreadWakeNotices", () => {
   const running = { status: "running" as const, activeRunId: "run" as never };
   it.each([
     ["items streaming in a run", running, { ...running, itemCount: 2 }],
-    ["the checkpoint that ends a run", running, { itemCount: 2 }],
     ["a run that starts", {}, { ...running, itemCount: 2 }],
     ["an update with no new items or lost work", {}, { updatedAt: at(9) }],
     ["a failed run", { status: "failed" as const }, { status: "failed" as const, itemCount: 2 }],
@@ -184,7 +187,7 @@ describe("createThreadWakeNotices", () => {
     notices.observe(THREAD, idle({ itemCount: 2, updatedAt: at(5) }));
     notices.observe(THREAD, idle({ status: "running", activeRunId: "run" as never, itemCount: 2 }));
     await answer([notice("notice", 5)]);
-    expect(notify.mock.calls).toEqual([[THREAD]]);
+    expect(notify.mock.calls).toEqual([[THREAD, new Set([RUN])]]);
   });
 
   it("coalesces changes during a read into one further read", async () => {
@@ -198,7 +201,7 @@ describe("createThreadWakeNotices", () => {
     expect(reads).toHaveLength(2);
     await answer([notice("notice", 5)]);
     expect(reads).toHaveLength(2);
-    expect(notify.mock.calls).toEqual([[THREAD]]);
+    expect(notify.mock.calls).toEqual([[THREAD, new Set([RUN])]]);
   });
 
   it("limits reads at once and runs the rest in turn", async () => {
@@ -233,6 +236,20 @@ describe("createThreadWakeNotices", () => {
     },
   );
 
+  it("bounds completion deferral even when transport slots remain stalled", async () => {
+    const { notices, reads } = harness();
+    const threads = ["a", "b", "c"].map((id) => ThreadId.make(id));
+    for (const id of threads) {
+      notices.observe(id, idle());
+      notices.observe(id, idle({ itemCount: 2 }));
+    }
+    const completion = vi.fn();
+    expect(notices.holdCompletion(threads[2]!, completion)).toBe(true);
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(reads).toHaveLength(2);
+    expect(completion).toHaveBeenCalledTimes(1);
+  });
+
   it.each([
     ["answers null", (read: { resolve: (items: null) => void }) => read.resolve(null)],
     ["rejects", (read: { reject: (cause: unknown) => void }) => read.reject(new Error("offline"))],
@@ -246,7 +263,7 @@ describe("createThreadWakeNotices", () => {
     await vi.advanceTimersByTimeAsync(2_000);
     expect(reads).toHaveLength(2);
     await answer([notice("notice", 5)]);
-    expect(notify.mock.calls).toEqual([[THREAD]]);
+    expect(notify.mock.calls).toEqual([[THREAD, new Set([RUN])]]);
   });
 
   it("stops retrying after its limit but reads again on the next change", async () => {
@@ -263,7 +280,7 @@ describe("createThreadWakeNotices", () => {
     notices.observe(THREAD, idle({ itemCount: 3, updatedAt: at(6) }));
     expect(reads).toHaveLength(5);
     await answer([notice("notice", 5)]);
-    expect(notify.mock.calls).toEqual([[THREAD]]);
+    expect(notify.mock.calls).toEqual([[THREAD, new Set([RUN])]]);
   });
 
   it("treats a read that never answers as failed and ignores its late answer", async () => {
@@ -291,7 +308,7 @@ describe("createThreadWakeNotices", () => {
     notices.resume();
     expect(reads).toHaveLength(2);
     await answer([notice("notice", 5)]);
-    expect(notify.mock.calls).toEqual([[THREAD]]);
+    expect(notify.mock.calls).toEqual([[THREAD, new Set([RUN])]]);
   });
 
   it("queues changes seen while paused until it resumes", () => {
@@ -422,14 +439,15 @@ describe("a wake alert and the thread's completion", () => {
     expect(sent).toEqual([]);
   });
 
-  it("does not delay a completion when no read is outstanding", async () => {
-    const { sent, gate, wake } = alerts();
+  it("keeps an ordinary completion after checking a coalesced end", async () => {
+    const { sent, gate, wake, answer } = alerts();
     const parked = { attention: null, settled: false, completedAt: null };
     const ready = { attention: null, settled: true, completedAt: COMPLETED_AT };
     wake.notices.observe(THREAD, idle({ status: "running", activeRunId: "run" as never }));
     gate.observe(THREAD, undefined, parked, { archived: false, quiet: false });
     wake.notices.observe(THREAD, idle({ itemCount: 2 }));
     gate.observe(THREAD, parked, ready, { archived: false, quiet: false });
+    await answer([]);
     await vi.advanceTimersByTimeAsync(WORKING_EXIT_GRACE_MS);
     expect(sent).toEqual(["completion"]);
   });
