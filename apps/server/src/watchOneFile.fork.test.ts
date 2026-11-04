@@ -7,6 +7,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as PlatformError from "effect/PlatformError";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
 
@@ -71,6 +72,44 @@ describe.runIf(onWindowsHost)("watchOneFile on Windows", () => {
       const { file, fs, next } = yield* watched("win32", "missing");
       yield* fs.writeFileString(file, "{}");
       assert.equal(Option.getOrThrow(yield* next(5000)), "settings.json");
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+});
+
+describe.runIf(onWindowsHost)("watchOneFile when the file's watch fails", () => {
+  it.live("carries on from the directory", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const directory = yield* fs.makeTempDirectoryScoped();
+      const file = path.join(directory, "settings.json");
+      yield* fs.writeFileString(file, "{}");
+      const failing: FileSystem.FileSystem = {
+        ...fs,
+        watch: (target, options) =>
+          target === file
+            ? Stream.fail(
+                PlatformError.systemError({
+                  module: "FileSystem",
+                  _tag: "NotFound",
+                  method: "watch",
+                  pathOrDescriptor: target,
+                }),
+              )
+            : fs.watch(target, options),
+      };
+      const events = yield* Queue.unbounded<string>();
+      const ready = yield* Deferred.make<void>();
+      yield* watchOneFile(failing, file, directory, {
+        onReady: () => Deferred.doneUnsafe(ready, Effect.void),
+      }).pipe(
+        Stream.runForEach((event) => Queue.offer(events, event.path)),
+        Effect.provideService(HostProcess.Platform, "win32"),
+        Effect.forkScoped,
+      );
+      yield* Deferred.await(ready);
+      yield* fs.writeFileString(file, "{ }");
+      assert.equal(yield* Queue.take(events), "settings.json");
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 });
