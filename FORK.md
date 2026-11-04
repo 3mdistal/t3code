@@ -528,8 +528,8 @@ none.
 - Tags ticks a tag every selected thread has. Native menus have no mixed state, so a tag only some have reads
   `bugs (2 of 3)`. Picking a tag adds it to all of them, or removes it from all when every one has it. New tag…
   adds to all. Tagging keeps the selection, so a second tag doesn't need the threads picked again.
-- Pin keeps the listed order and puts the batch above the current pins, by giving each thread its order key up
-  front. One at a time they would each land on top and reverse.
+- Pin keeps the listed order and puts the batch above the current pins, including any a filter hides, by giving
+  each thread its order key up front. One at a time they would each land on top and reverse.
 - Archive leaves out running threads, which the server refuses, and asks first only when the single-thread setting
   does.
 - Stock compatibility: nothing new is stored. These are the thread commands and the `threadTags` settings patch

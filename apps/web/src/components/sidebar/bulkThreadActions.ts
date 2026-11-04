@@ -1,4 +1,5 @@
 // fork: bulk thread actions, see FORK.md.
+import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/models";
 import { pinOrderKeyBetween } from "@t3tools/client-runtime/state/thread-sort";
 import {
   type ContextMenuItem,
@@ -89,6 +90,13 @@ export function sortByListedOrder<T>(
   const positions = new Map(listedKeys.map((key, index) => [key, index] as const));
   const positionOf = (item: T) => positions.get(keyOf(item)) ?? listedKeys.length;
   return items.toSorted((a, b) => positionOf(a) - positionOf(b));
+}
+
+/** Every current pin's order key, from all threads: a batch goes above a pin a filter hides too. */
+export function currentPinOrderKeys(
+  threads: ReadonlyArray<Pick<EnvironmentThreadShell, "pinnedAt" | "pinOrderKey">>,
+): ReadonlyArray<string | null> {
+  return threads.map((thread) => (thread.pinnedAt == null ? null : (thread.pinOrderKey ?? null)));
 }
 
 /**

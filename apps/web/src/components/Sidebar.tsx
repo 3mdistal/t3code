@@ -20,6 +20,7 @@ import {
   buildBulkMenuItem,
   type BulkTagMenuId,
   buildBulkTagMenuItem,
+  currentPinOrderKeys,
   planBulkPinOrderKeys,
   sortByListedOrder,
 } from "./sidebar/bulkThreadActions";
@@ -2683,7 +2684,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
         return;
       }
       if (clicked.value === "pin") {
-        const orderKeys = planBulkPinOrderKeys(pinningThreads.length, pinnedKeysById.values());
+        const orderKeys = planBulkPinOrderKeys(pinningThreads.length, currentPinOrderKeys(threads));
         for (const [index, thread] of pinningThreads.entries()) {
           attemptPin(scopeThreadRef(thread.environmentId, thread.id), orderKeys[index]);
         }
