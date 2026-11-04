@@ -33,6 +33,7 @@ import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as Semaphore from "effect/Semaphore";
 import * as ServerConfig from "./config.ts";
+import { watchOneFile } from "./watchOneFile.ts"; // fork: see FORK.md.
 import { writeFileStringAtomically } from "@t3tools/shared/atomicWrite";
 import { fromJsonStringPretty, fromLenientJson } from "@t3tools/shared/schemaJson";
 import {
@@ -588,7 +589,11 @@ const make = Effect.gen(function* () {
     const revalidateAndEmitSafely = revalidateAndEmit.pipe(Effect.ignoreCause({ log: true }));
 
     // Saves emit multiple events; fs.watch may fire before content is flushed.
-    const debouncedKeybindingsEvents = fs.watch(keybindingsConfigDir).pipe(
+    const debouncedKeybindingsEvents = watchOneFile(
+      fs,
+      keybindingsConfigPath,
+      keybindingsConfigDir,
+    ).pipe(
       Stream.filter((event) => {
         return (
           event.path === keybindingsConfigFile ||
