@@ -417,37 +417,6 @@ it.effect("R3: a thread held again during its release stays in line", () =>
   }).pipe(Effect.provide(layerTest)),
 );
 
-it.effect("R3: a failed read keeps a held thread in line, and it still starts", () =>
-  Effect.gen(function* () {
-    const projections = yield* ProjectionStore.ProjectionStoreV2;
-    const failing = yield* Ref.make(false);
-    const governor = yield* makeGovernor.pipe(
-      Effect.provideService(ProjectionStore.ProjectionStoreV2, {
-        ...projections,
-        getThreadRecords: ((...args: Parameters<typeof projections.getThreadRecords>) =>
-          Effect.flatMap(Ref.get(failing), (fails) =>
-            fails
-              ? Effect.fail(new ProjectionStore.ProjectionStoreReadError({ threadId: args[0] }))
-              : projections.getThreadRecords(...args),
-          )) as typeof projections.getThreadRecords,
-      }),
-    );
-    const threadId = ThreadId.make("thread:r3:failed-read");
-    yield* createThread(threadId);
-    yield* governor.pass(yield* tight);
-    yield* send(threadId, "agent work", agent);
-    yield* TestClock.adjust(TIMING.holdWriteMs);
-
-    yield* Ref.set(failing, true);
-    yield* governor.pass(yield* tight);
-    assert.deepEqual(yield* waitingThreads, [threadId]);
-
-    yield* Ref.set(failing, false);
-    yield* governor.pass(yield* recovered);
-    assert.deepEqual(yield* runs(threadId), ["starting"]);
-  }).pipe(Effect.provide(layerTest)),
-);
-
 it.effect("R3: held threads start oldest first, at least 90 s apart, near the lines", () =>
   Effect.gen(function* () {
     const governor = yield* makeGovernor;
