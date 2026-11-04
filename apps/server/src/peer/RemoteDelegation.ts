@@ -40,6 +40,7 @@ import * as RepositoryIdentityResolver from "../project/RepositoryIdentityResolv
 import { forkParked } from "../serverActivation.ts";
 import * as PeerForwarding from "./PeerForwarding.ts";
 import * as PeerLinks from "./PeerLinks.ts";
+import { delegatedAttentionCommand } from "../orchestration-v2/DelegatedAttention.ts"; // fork: see FORK.md.
 
 /** How long one follow of a remote task waits on its thread there before checking again. */
 const FOLLOW_WAIT_MS = 10 * 60 * 1_000;
@@ -127,6 +128,7 @@ const make = Effect.gen(function* () {
   );
   // Followers live as long as this service, so shutting down stops them.
   const followers = yield* Scope.Scope;
+  const seenAttention = new Map<NodeId, Set<string>>(); // fork: wire acknowledgements live with the follower; see FORK.md.
 
   // One follower runs per open task and holds what it read across a wait of
   // up to FOLLOW_WAIT_MS, so it reads its own task, never the parent's whole
@@ -596,6 +598,9 @@ const make = Effect.gen(function* () {
           Option.isSome(ended) ? Effect.succeed({ endedHere: true } as const) : Effect.never,
         ),
       );
+    // fork: prompts and wake loss finish the peer wait without finishing the delegated task; see FORK.md.
+    const seen = seenAttention.get(taskId) ?? new Set<string>();
+    seenAttention.set(taskId, seen);
     const waited = yield* forwarding
       .waitForThread(scope, remote.environmentId, {
         threadId: remote.threadId,
@@ -605,11 +610,41 @@ const make = Effect.gen(function* () {
         // tasks to wake it for the answer, which a task here waits for too.
         // An older peer ignores this and reports the run alone.
         untilDelegatedWorkSettled: true,
+        seenAttentionIds: [...seen], // fork: see FORK.md.
       })
       .pipe(Effect.raceFirst(endedHere));
     // The next look reads the result and stops it there.
     if ("endedHere" in waited) return false;
-    if (waited.timedOut) return false;
+    // fork: stable message ids deduplicate restart/retry delivery; rejected dispatch attempts get fresh ids; see FORK.md.
+    for (const attention of waited.attention ?? []) {
+      if (seen.has(attention.id)) continue;
+      const current = yield* readTask(parentThreadId, taskId);
+      if (
+        current.task?.result !== null ||
+        current.task.status === "cancelled" ||
+        current.task.status === "interrupted"
+      )
+        return false;
+      if (current.thread.archivedAt === null && current.thread.deletedAt === null) {
+        const command = delegatedAttentionCommand({
+          task: current.task,
+          childThreadId: remote.threadId,
+          environmentId: remote.environmentId,
+          attention,
+        });
+        const delivered = yield* threads.getThreadRecords(parentThreadId, ["messages"], {
+          messageIds: [command.messageId],
+        });
+        if (delivered.messages.length === 0)
+          yield* threads.dispatch({
+            ...command,
+            commandId: CommandId.make(`${command.commandId}:${yield* random.uuidV4()}`),
+          });
+      }
+      seen.add(attention.id);
+    }
+    // fork: an attention-only return may name a terminal run whose delegated work is still pending; see FORK.md.
+    if (waited.timedOut || (waited.attention?.length ?? 0) > 0) return false;
     // A task recorded without its run waits on the thread's latest; a
     // thread there with none has nothing left to wait for.
     if (waited.runId === null) {
@@ -681,6 +716,7 @@ const make = Effect.gen(function* () {
         Effect.ensuring(
           Effect.sync(() => {
             if (following.get(taskId) === state) following.delete(taskId);
+            seenAttention.delete(taskId); // fork: see FORK.md.
           }),
         ),
       );

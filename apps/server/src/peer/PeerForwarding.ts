@@ -202,6 +202,9 @@ const make = Effect.gen(function* () {
           ...(input.untilDelegatedWorkSettled === undefined
             ? {}
             : { untilDelegatedWorkSettled: input.untilDelegatedWorkSettled }),
+          ...(input.seenAttentionIds === undefined
+            ? {}
+            : { seenAttentionIds: input.seenAttentionIds }), // fork: see FORK.md.
         },
       );
       remaining -= chunk;

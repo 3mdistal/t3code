@@ -1,7 +1,7 @@
 export type ThreadNotificationKind = "input" | "completion";
 
 export interface ThreadNotificationObservation {
-  /** Run and status key while the thread needs attention, otherwise null. */
+  /** Run, status and pending request key while the thread needs attention, otherwise null. */
   readonly attention: string | null;
   /** The thread is idle and its latest run completed. */
   readonly settled: boolean;
@@ -39,6 +39,10 @@ export function createThreadNotificationGate<Key>(
     /** Forgets threads that left the snapshot. */
     retain(keys: ReadonlySet<Key>): void {
       for (const key of handled.keys()) if (!keys.has(key)) handled.delete(key);
+    },
+    // fork: a lost background wake's alert stands in for its run's completion; see FORK.md.
+    supersedeCompletion(key: Key, at: number): void {
+      skip(key, at);
     },
     clear(): void {
       handled.clear();

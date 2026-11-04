@@ -32,15 +32,28 @@ import {
 } from "../threadNotifications";
 import { resolveSidebarThreadStatus, type SidebarThreadStatus } from "./Sidebar.logic";
 import {
+  announcedRequest,
+  type AttentionRequest,
+  createPendingChildRequestsAtom,
+  newerAttentionRequest,
+  ownAttentionRequest,
+  threadAttentionKey,
+} from "./ThreadAttentionRequests.fork";
+import {
   createThreadNotificationGate,
   type ThreadNotificationKind,
   type ThreadNotificationObservation,
 } from "./ThreadNotificationCoordinator.logic";
+import { readWakeNoticeItems } from "./ThreadWakeNoticeRead.fork";
+import { createThreadWakeNotices, WAKE_CANCELLED_NOTICE_TITLE } from "./ThreadWakeNotices.fork";
 import { toastManager } from "./ui/toast";
 
 interface NotificationState extends ThreadNotificationObservation {
   readonly raw: OrchestrationV2ThreadShell;
   readonly subagentRequest: PendingSubagentRequest | null;
+  // fork: tell a new request from an older one still waiting; see FORK.md.
+  readonly childRequest: AttentionRequest | null;
+  readonly announcedRequest: AttentionRequest | null;
   readonly thread: EnvironmentThreadShell;
   readonly status: SidebarThreadStatus;
 }
@@ -52,7 +65,10 @@ interface WatchedEnvironment {
   previous: Map<ThreadId, NotificationState>;
   reconnecting: boolean;
   readonly gate: ReturnType<typeof createThreadNotificationGate<ThreadId>>;
+  readonly wakeNotices: ReturnType<typeof createThreadWakeNotices>;
 }
+
+const pendingChildRequestsAtom = createPendingChildRequestsAtom(environmentThreadShells);
 
 /**
  * Turns thread status transitions in every connected environment into sounds, in-app toasts,
@@ -115,6 +131,8 @@ export function startThreadNotifications(
     environmentId: EnvironmentId,
     state: NotificationState,
     kind: ThreadNotificationKind,
+    // fork: a lost background wake alerts like attention, under its own name; see FORK.md.
+    wakeCancelled = false,
   ) => {
     const { thread, status } = state;
     if (
@@ -128,8 +146,9 @@ export function startThreadNotifications(
       environmentId?: string;
       threadId?: string;
     };
-    const title =
-      kind === "completion"
+    const title = wakeCancelled
+      ? WAKE_CANCELLED_NOTICE_TITLE
+      : kind === "completion"
         ? "Thread completed"
         : status === "approval"
           ? "Approval needed"
@@ -154,23 +173,30 @@ export function startThreadNotifications(
       const toastKey = threadKey({ environmentId, threadId: thread.id });
       const toastId: ToastId = toastManager.add({
         onRemove: (): void => forgetToast(toastKey, toastId),
-        type: kind === "completion" ? "success" : status === "failed" ? "error" : "warning",
+        type: wakeCancelled
+          ? "warning"
+          : kind === "completion"
+            ? "success"
+            : status === "failed"
+              ? "error"
+              : "warning",
         title,
         description: thread.title,
         data: {
           hideCopyButton: true,
-          leadingIcon:
-            kind === "completion" ? (
-              <CircleCheckIcon aria-hidden className="size-4 text-success-foreground" />
-            ) : status === "approval" ? (
-              <ShieldQuestionIcon aria-hidden className="size-4 text-warning-foreground" />
-            ) : status === "limited" ? (
-              <CircleAlertIcon aria-hidden className="size-4 text-warning-foreground" />
-            ) : status === "failed" ? (
-              <CircleAlertIcon aria-hidden className="size-4 text-destructive-foreground" />
-            ) : (
-              <MessageCircleQuestionIcon aria-hidden className="size-4 text-info-foreground" />
-            ),
+          leadingIcon: wakeCancelled ? (
+            <CircleAlertIcon aria-hidden className="size-4 text-warning-foreground" />
+          ) : kind === "completion" ? (
+            <CircleCheckIcon aria-hidden className="size-4 text-success-foreground" />
+          ) : status === "approval" ? (
+            <ShieldQuestionIcon aria-hidden className="size-4 text-warning-foreground" />
+          ) : status === "limited" ? (
+            <CircleAlertIcon aria-hidden className="size-4 text-warning-foreground" />
+          ) : status === "failed" ? (
+            <CircleAlertIcon aria-hidden className="size-4 text-destructive-foreground" />
+          ) : (
+            <MessageCircleQuestionIcon aria-hidden className="size-4 text-info-foreground" />
+          ),
         },
         actionProps: {
           children: "Open thread",
@@ -228,6 +254,7 @@ export function startThreadNotifications(
       environmentThreadShells.pendingSubagentRequestsAtom(environmentId),
     );
     const delegatedUnderParent = registry.get(environmentThreadShells.delegatedUnderParentAtom);
+    const childRequests = registry.get(pendingChildRequestsAtom(environmentId));
     const changed: Array<[NotificationState | undefined, NotificationState]> = [];
     for (const rawThread of threads) {
       if (
@@ -241,10 +268,12 @@ export function startThreadNotifications(
       }
       const prior = previous.get(rawThread.id);
       const subagentRequest = subagentRequests.get(rawThread.id) ?? null;
+      const childRequest = childRequests.get(rawThread.id) ?? null;
       if (
         !entry.reconnecting &&
         prior?.raw === rawThread &&
-        prior.subagentRequest === subagentRequest
+        prior.subagentRequest === subagentRequest &&
+        prior.childRequest?.id === childRequest?.id
       ) {
         next.set(rawThread.id, prior);
         continue;
@@ -252,19 +281,20 @@ export function startThreadNotifications(
       const thread = presentThreadShell(environmentId, rawThread, subagentRequest);
       let status = resolveSidebarThreadStatus(thread);
       if (status === "ready" && thread.latestRun?.status === "failed") status = "failed";
-      const attention =
-        status === "input" ||
-        status === "request" ||
-        status === "approval" ||
-        status === "failed" ||
-        status === "limited"
-          ? `${thread.latestRun?.runId ?? ""}:${status}`
-          : null;
+      // fork: the pending request's identity keeps a new prompt in the same run from being
+      // deduplicated; see FORK.md.
+      const request = announcedRequest(
+        prior?.announcedRequest ?? null,
+        newerAttentionRequest(ownAttentionRequest(rawThread), childRequest),
+      );
+      const attention = threadAttentionKey(thread.latestRun?.runId ?? "", status, request);
       const completedAt = Date.parse(thread.latestRun?.completedAt ?? "");
       const settled = status === "ready" && thread.latestRun?.status === "completed";
       const state = {
         raw: rawThread,
         subagentRequest,
+        childRequest,
+        announcedRequest: request,
         thread,
         status,
         attention,
@@ -276,8 +306,14 @@ export function startThreadNotifications(
     }
     entry.reconnecting = false;
     entry.previous = next;
-    entry.gate.retain(new Set(next.keys()));
+    const threadIds = new Set(next.keys());
+    entry.gate.retain(threadIds);
+    entry.wakeNotices.retain(threadIds);
+    // fork: completions send at once, so queue a lost-wake read before the gate sees the same
+    // update, and that completion waits for it; see FORK.md.
+    entry.wakeNotices.resume();
     for (const [prior, state] of changed) {
+      entry.wakeNotices.observe(state.thread.id, state.raw);
       entry.gate.observe(state.thread.id, prior, state, {
         archived: state.thread.archivedAt !== null,
         quiet: state.raw.latestRunStopRequested === true,
@@ -291,8 +327,26 @@ export function startThreadNotifications(
       reconnecting: false,
       unsubscribe: () => {},
       gate: createThreadNotificationGate<ThreadId>((threadId, kind) => {
-        const state = entry.previous.get(threadId);
-        if (state) present(environmentId, state, kind);
+        const deliver = () => {
+          const state = entry.previous.get(threadId);
+          if (state) present(environmentId, state, kind);
+        };
+        // fork: a read in flight may replace this completion with a wake alert; see FORK.md.
+        if (kind !== "completion" || !entry.wakeNotices.holdCompletion(threadId, deliver)) {
+          deliver();
+        }
+      }),
+      wakeNotices: createThreadWakeNotices({
+        read: (threadId) => readWakeNoticeItems(registry, environmentId, threadId),
+        notify: (threadId) => {
+          const state = entry.previous.get(threadId);
+          if (!state) return;
+          entry.gate.supersedeCompletion(
+            threadId,
+            Date.parse(state.thread.latestRun?.completedAt ?? ""),
+          );
+          present(environmentId, state, "input", true);
+        },
       }),
     };
     let threads: ReadonlyArray<OrchestrationV2ThreadShell> | null = null;
@@ -307,6 +361,7 @@ export function startThreadNotifications(
           observeThreads(environmentId, entry, threads);
           return;
         }
+        entry.wakeNotices.pause();
         entry.reconnecting = true;
       },
       { immediate: true },
@@ -322,11 +377,18 @@ export function startThreadNotifications(
       environmentThreadShells.delegatedUnderParentAtom,
       reobserve,
     );
+    // fork: a linked task's next request changes neither this environment's shell nor its flags.
+    const unsubscribeChildRequests = registry.subscribe(
+      pendingChildRequestsAtom(environmentId),
+      reobserve,
+    );
     entry.unsubscribe = () => {
       unsubscribeShell();
       unsubscribeRequests();
       unsubscribeDelegated();
+      unsubscribeChildRequests();
       entry.gate.clear();
+      entry.wakeNotices.dispose();
     };
     return entry;
   };
