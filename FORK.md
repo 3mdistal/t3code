@@ -261,8 +261,9 @@ lookup took 1.9 seconds, while a lookup of the file next to it took 1 ms.
 
 A watch on a file is the same directory watch underneath, matched by name in libuv, with no lookup, and it still sees
 an atomic save. Elsewhere a watch on a file loses it on an atomic save, so other platforms keep the directory. So does
-a file that doesn't exist when the watch starts, and a path that is a directory: upstream v0.1.11's settings watcher
-also watches a symlink target's directory for a rename through the same function.
+a file that doesn't exist when the watch starts, a path that is a directory, and a file's watch that fails, which can
+happen if the file is replaced just as the watch attaches. Upstream v0.1.11's settings watcher also watches a symlink
+target's directory for a rename through the same function.
 
 - `apps/server/src/watchOneFile.ts`: picks the file or the directory.
 - `apps/server/src/keybindings.ts`, `apps/server/src/serverSettings.ts`: watch through it.
