@@ -521,28 +521,30 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
   });
 
   const inspect = Effect.fn("ResourceLimitsGovernor.inspect")(function* (entry: WaitingThread) {
-    const shell = yield* projections
-      .getThreadShell(entry.threadId)
-      .pipe(Effect.orElseSucceed(() => null));
-    if (shell === null || shell.archivedAt !== null || shell.deletedAt !== null) {
-      return {
-        entry,
-        shell: null,
-        queued: false,
-        held: false,
-        blocked: false,
-        snoozable: false,
-      } satisfies Inspected;
+    // A read that failed says nothing about the thread, so it counts as queued and stays for the next pass.
+    const unread = {
+      entry,
+      shell: null,
+      queued: true,
+      held: false,
+      blocked: false,
+      snoozable: false,
+    } satisfies Inspected;
+    const shell = yield* projections.getThreadShell(entry.threadId).pipe(Effect.option);
+    if (Option.isNone(shell)) return unread;
+    if (shell.value === null || shell.value.archivedAt !== null || shell.value.deletedAt !== null) {
+      return { ...unread, queued: false } satisfies Inspected;
     }
-    const runs = yield* projections.getThreadRecords(entry.threadId, ["runs"]).pipe(
-      Effect.map((records) => records.runs),
-      Effect.orElseSucceed(() => []),
-    );
+    const records = yield* projections
+      .getThreadRecords(entry.threadId, ["runs"])
+      .pipe(Effect.option);
+    if (Option.isNone(records)) return unread;
+    const runs = records.value.runs;
     const queued = runs.filter((run) => run.status === "queued");
     const snoozable =
       queued.length > 0 &&
       !entry.snoozeTried &&
-      shell.snoozedUntil == null &&
+      shell.value.snoozedUntil == null &&
       (yield* projections
         .getThreadRecords(entry.threadId, ["messages"], {
           messageIds: queued.map((run) => run.userMessageId),
@@ -560,7 +562,7 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
         ));
     return {
       entry,
-      shell,
+      shell: shell.value,
       queued: queued.length > 0,
       held: queued.some((run) => run.queueHeld === true),
       blocked: runs.some((run) =>
@@ -793,7 +795,7 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
     const dropped = new Set<ThreadId>();
     const changed = new Map<ThreadId, WaitingThread>();
     for (const item of inspected) {
-      if (item.shell === null || !item.queued) {
+      if (!item.queued) {
         // A wake the restart dropped comes back as a note, so the thread keeps its place in the line.
         if (
           item.shell !== null &&
@@ -802,6 +804,8 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
         ) {
           continue;
         }
+        // Its held run may not be written yet. Dropping it now would leave that run with nothing to release it.
+        if (item.shell !== null && now - item.entry.lastHeldAt < TIMING.holdWriteMs) continue;
         dropped.add(item.entry.threadId);
         if (item.shell !== null) yield* unsnooze(item, now);
         continue;
@@ -883,12 +887,23 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
       }
     }
 
-    // Admission may have added threads during this pass, so only the ones handled here change.
+    // Admission may have added threads during this pass, so only the ones handled here change, and one held again
+    // since this pass read it stays, with a new run to wait for.
+    const handled = new Map(current.waiting.map((entry) => [entry.threadId, entry.lastHeldAt]));
     const published = yield* limits.update((snapshot) => ({
       ...snapshot,
       waiting: snapshot.waiting
-        .filter((entry) => !dropped.has(entry.threadId) && !released.has(entry.threadId))
-        .map((entry) => changed.get(entry.threadId) ?? entry),
+        .filter(
+          (entry) =>
+            (!dropped.has(entry.threadId) && !released.has(entry.threadId)) ||
+            entry.lastHeldAt !== handled.get(entry.threadId),
+        )
+        .map((entry) => {
+          const snooze = changed.get(entry.threadId);
+          return snooze === undefined
+            ? entry
+            : { ...entry, snoozedUntil: snooze.snoozedUntil, snoozeTried: snooze.snoozeTried };
+        }),
     }));
     yield* Ref.update(memory, (latest) => ({
       ...latest,
@@ -935,15 +950,14 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
     const number = (value: unknown) => (typeof value === "number" ? value : null);
     const waiting = Array.isArray(saved.waiting)
       ? saved.waiting.flatMap((entry: unknown): Array<WaitingThread> => {
-          const { threadId, heldAt, snoozedUntil, snoozeTried } = (entry ?? {}) as Record<
-            string,
-            unknown
-          >;
+          const { threadId, heldAt, lastHeldAt, snoozedUntil, snoozeTried } = (entry ??
+            {}) as Record<string, unknown>;
           return typeof threadId === "string" && typeof heldAt === "number"
             ? [
                 {
                   threadId: threadId as ThreadId,
                   heldAt,
+                  lastHeldAt: typeof lastHeldAt === "number" ? lastHeldAt : heldAt,
                   snoozedUntil: typeof snoozedUntil === "string" ? snoozedUntil : null,
                   snoozeTried: snoozeTried === true,
                 },
