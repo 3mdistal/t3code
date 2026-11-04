@@ -299,6 +299,29 @@ it.each(["pending", "held"])(
   },
 );
 
+it.each([false, true])(
+  "rechecks a delayed completion read after reconnect (continued: %s)",
+  async (continued) => {
+    showThreads(thread(working));
+    start();
+    const completed = thread({ itemCount: 2, updatedAt: at(5), latestRunCompletedAt: at(5) });
+    showThreads(completed);
+    registry.set(shellAtom, { status: "cached", snapshot: Option.some({ threads: [completed] }) });
+    await vi.advanceTimersByTimeAsync(WORKING_EXIT_GRACE_MS);
+    expect(titles()).toEqual([]);
+    showThreads(continued ? thread(working) : completed);
+    expect(state.read).toHaveBeenCalledTimes(2);
+    state.read.mock.results[0]!.value.resolve(wakeNotice(5));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(titles()).toEqual([]);
+    await vi.advanceTimersByTimeAsync(WORKING_EXIT_GRACE_MS);
+    expect(titles()).toEqual([]);
+    await answerRead([]);
+    await vi.advanceTimersByTimeAsync(WORKING_EXIT_GRACE_MS);
+    expect(titles()).toEqual(continued ? [] : ["Thread completed"]);
+  },
+);
+
 it("does not read for a historical notice on first sight, or while a run streams", () => {
   showThreads(thread({ itemCount: 9 }));
   start();

@@ -18,6 +18,10 @@ const state = vi.hoisted(() => ({
   badge: vi.fn(),
   settingsListeners: new Set<() => void>(),
 }));
+// fork: this badge fixture has no projection server; see FORK.md.
+vi.mock(import("./ThreadWakeNoticeRead.fork"), () => ({
+  readWakeNoticeItems: async () => [],
+}));
 vi.mock(import("./ui/toast"), async (original) => {
   const actual = await original();
   return { ...actual, toastManager: { ...actual.toastManager, add: state.toast as never } };
