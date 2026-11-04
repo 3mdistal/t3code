@@ -219,6 +219,18 @@ export function matchesSidebarViewFilters(
   return true;
 }
 
+/**
+ * Picks the menu no longer lists: a tag no thread has now, or a machine since removed. They stay
+ * in the menu, so each can still be unticked on its own.
+ */
+export function unlistedSidebarFilterPicks(
+  picked: ReadonlyArray<string>,
+  listed: ReadonlyArray<string>,
+): ReadonlyArray<string> {
+  const keys = new Set(listed.map((value) => value.toLocaleLowerCase()));
+  return picked.filter((value) => !keys.has(value.toLocaleLowerCase()));
+}
+
 /** The badge on the filter button: every pick counts once. */
 export function countSidebarViewFilters(view: SidebarView, projectCount: number): number {
   return (
