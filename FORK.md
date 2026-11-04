@@ -35,6 +35,23 @@ headless, and agents may install and test freely on the Mac Mini.
 
 Each entry says what the patch is for, the files it touches, and the tests that prove it.
 
+### Claude prompts end when their callback is superseded (`fork:`)
+
+An accepted steer retires the root permission or question callbacks that preceded it. The old tool is denied
+without interrupting the run, its waiting card is cancelled, and its request becomes resolved and non-resumable.
+Late answers cannot reach the provider. Parallel subagent permissions remain pending. Clearing a superseded
+prompt also prevents it from incorrectly blocking the existing restart continuation. The fork used to retire a
+callback on an SDK abort too; upstream v0.1.7 (#27320) now cancels a request Claude withdraws, and its card,
+which does the same job, so the fork leaves that case to upstream. Upstream's cancel skips a request a steer
+already retired.
+
+- `apps/server/src/orchestration-v2/Adapters/ClaudeRuntimeRequests.ts` owns callback claims and retirement;
+  `ClaudeAdapterV2.ts` connects SDK callbacks and accepted steers to it.
+- `ClaudeAdapterV2.testkit.ts` exposes SDK callbacks to deterministic replays.
+- `apps/server/src/orchestration-v2/ClaudeApprovalLifecycle.fork.test.ts` covers steer, SDK abort (upstream's
+  cancel), questions, a parallel subagent permission, late Cancel, and shutdown/startup against a temporary
+  SQLite database.
+
 ### Releases come from this fork (`fork:`)
 
 Every path that downloads T3 Code reads this fork's releases, so no fork build installs stock T3 over itself.
