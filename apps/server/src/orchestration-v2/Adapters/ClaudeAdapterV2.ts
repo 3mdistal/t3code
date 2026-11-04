@@ -9,7 +9,7 @@ import { claudeTaskOutputRoot, tailClaudeTaskOutput } from "./ClaudeTaskOutputTa
 // fork: see FORK.md, "A Claude session that was never saved recovers".
 import { isClaudeTranscriptMissing } from "./ClaudeLostSession.ts";
 import { makeClaudeWakeOwnership, claudeWakeTaskIds } from "./ClaudeWakeOwnership.ts"; // fork: see FORK.md.
-import { makeClaudeRuntimeRequests } from "./ClaudeRuntimeRequests.ts"; // fork: see FORK.md.
+import { makeClaudeRuntimeRequests, offerClaudeSteer } from "./ClaudeRuntimeRequests.ts"; // fork: see FORK.md.
 import {
   dynamicToolTitle,
   formatReadToolLabel,
@@ -14941,12 +14941,12 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               return next;
             });
             yield* emitSteerStatus(currentTurn, messageId, "pending");
-            yield* Effect.uninterruptibleMask((restore) =>
-              restore(existing.query.offer(userMessage, commitOffer)).pipe(
-                Effect.tap(() => Effect.sync(commitOffer)),
-                Effect.tap(() => pendingRuntimeRequests.retireAll(supersededRequests)),
-              ),
-            ).pipe(
+            // fork: acceptance owns retirement even if offer exits during logging; see FORK.md.
+            yield* offerClaudeSteer({
+              offer: (onQueued) => existing.query.offer(userMessage, onQueued),
+              onAccepted: commitOffer,
+              retire: pendingRuntimeRequests.retireAll(supersededRequests),
+            }).pipe(
               Effect.onError(() =>
                 currentTurn.pendingSteers.delete(steerUuid)
                   ? emitSteerStatus(currentTurn, messageId, "completed")
