@@ -766,8 +766,10 @@ Users read about it in the Memory and CPU limits section of `docs/user/remote-ac
   - `followPause` also saves the waiting list to `state.json` when it changes, because a pass saves only every 15
     seconds and "Stop now, then shut down" would otherwise lose the threads it just held.
   - The waiting list is the only thing that releases a held run, so a pass mustn't take off a thread that's about to
-    have one. Admission records a thread a moment before its run is written, so a thread held in the last minute
-    (`holdWriteMs`, from `lastHeldAt`) stays even with nothing queued. A run that has started ends that wait: each
+    have one. Admission records a thread a moment before its run is written, and before the thread itself for a new
+    delegated child, so a thread held in the last minute (`holdWriteMs`, from `lastHeldAt`) stays even with nothing
+    queued and no record yet. The pass measures that minute when it reads the list, not when it began, since a pass can
+    wait a long time on idle sessions first. A run that has started ends that wait: each
     thread's commands run one at a time and admission holds nothing new while a run is active, so no write can still
     be coming. A started run with nothing held behind it takes the thread off, as a release does, even with work queued
     behind it, which is admitted when that run ends. That keeps Stop stopped, since a thread started by hand and left on

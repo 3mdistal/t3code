@@ -410,6 +410,82 @@ it.effect("R2: a thread stays in line while its preparing run waits to be held",
   }).pipe(Effect.provide(layerTest)),
 );
 
+it.effect("R2: a new thread stays in line until the thread and its held run are written", () =>
+  Effect.gen(function* () {
+    const limits = yield* ResourceLimits.ResourceLimits;
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const governor = yield* makeGovernor;
+    const parent = ThreadId.make("thread:r2:parent-of-new");
+    yield* createThread(parent);
+    yield* governor.pass(yield* tight);
+
+    // A delegated child is held in the same command that creates it, so it's on the line before it exists.
+    const child = ThreadId.make("thread:r2:new");
+    const { thread } = yield* orchestrator.getThreadProjection(parent);
+    yield* limits.admit({ thread: { ...thread, id: child }, message: agent });
+    yield* governor.pass(yield* tight);
+    assert.deepEqual(yield* waitingThreads, [child]);
+
+    yield* TestClock.adjust(TIMING.holdWriteMs);
+    yield* governor.pass(yield* tight);
+    assert.deepEqual(yield* waitingThreads, []);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("R2: an archived thread leaves the line at once", () =>
+  Effect.gen(function* () {
+    const limits = yield* ResourceLimits.ResourceLimits;
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const governor = yield* makeGovernor;
+    const threadId = ThreadId.make("thread:r2:archived");
+    yield* createThread(threadId);
+    yield* governor.pass(yield* tight);
+
+    const { thread } = yield* orchestrator.getThreadProjection(threadId);
+    yield* limits.admit({ thread, message: agent });
+    yield* orchestrator.dispatch({
+      type: "thread.archive",
+      commandId: CommandId.make("archive"),
+      threadId,
+    });
+    yield* governor.pass(yield* tight);
+    assert.deepEqual(yield* waitingThreads, []);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("R2: a hold that lands during a long pass counts from when it landed", () =>
+  Effect.gen(function* () {
+    const limits = yield* ResourceLimits.ResourceLimits;
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const sessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
+    const threadId = ThreadId.make("thread:r2:long-pass");
+    yield* createThread(threadId);
+    const ordinary = yield* makeGovernor;
+    yield* ordinary.pass(yield* tight);
+
+    // Closing idle sessions outlasts the wait for the write, and the thread is held just as it finishes.
+    const { thread } = yield* orchestrator.getThreadProjection(threadId);
+    const governor = yield* Governor.make().pipe(
+      Effect.provideService(HostProcess.Platform, "win32"),
+      Effect.provideService(ResourceLimits.TotalMemoryBytes, 128 * GiB),
+      Effect.provideService(ProcessTree, quietProcessTree),
+      Effect.provideService(ProviderSessionManager.ProviderSessionManagerV2, {
+        ...sessions,
+        releaseIdleSessions: () =>
+          Effect.gen(function* () {
+            yield* TestClock.adjust(TIMING.holdWriteMs + 1_000);
+            const fresh = yield* tight;
+            yield* limits.update((snapshot) => ({ ...snapshot, reading: fresh }));
+            yield* limits.admit({ thread, message: agent });
+            return [];
+          }),
+      }),
+    );
+    yield* governor.pass(yield* tight);
+    assert.deepEqual(yield* waitingThreads, [threadId]);
+  }).pipe(Effect.provide(layerTest)),
+);
+
 it.effect("R2: a clock set back doesn't keep an empty thread in line", () =>
   Effect.gen(function* () {
     const limits = yield* ResourceLimits.ResourceLimits;

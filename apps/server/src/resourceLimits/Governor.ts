@@ -104,6 +104,8 @@ const NOTHING_NOTED: NotedProcesses = { readings: [], noted: new Set(), checkAt:
 interface Inspected {
   readonly entry: WaitingThread;
   readonly shell: OrchestrationV2ThreadShell | null;
+  /** Archived or deleted. A thread with no record at all may be a new delegated child, written along with its hold. */
+  readonly closed: boolean;
   readonly queued: boolean;
   readonly held: boolean;
   readonly blocked: boolean;
@@ -530,6 +532,7 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
       return {
         entry,
         shell: null,
+        closed: shell !== null,
         queued: false,
         held: false,
         blocked: false,
@@ -564,6 +567,7 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
     return {
       entry,
       shell,
+      closed: false,
       queued: queued.length > 0,
       held: queued.some((run) => run.queueHeld === true),
       blocked: runs.some((run) =>
@@ -791,6 +795,9 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
       state: next.state,
     }));
 
+    // Admission stamps a hold when it runs, which can be long after `now` if this pass waited on idle sessions.
+    const readAt = yield* Clock.currentTimeMillis;
+
     // Drop threads with nothing left waiting, and snooze the rest out of Alice's inbox.
     const firstPass = yield* Ref.getAndSet(firstPassPending, false);
     const inspected = yield* Effect.forEach(current.waiting, inspect);
@@ -812,9 +819,9 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
         // that has started means the write is over, and a clock set back mustn't stretch the wait, so a stamp from the
         // future counts as old.
         if (
-          item.shell !== null &&
+          !item.closed &&
           !item.started &&
-          Math.abs(now - item.entry.lastHeldAt) < TIMING.holdWriteMs
+          Math.abs(readAt - item.entry.lastHeldAt) < TIMING.holdWriteMs
         ) {
           continue;
         }
