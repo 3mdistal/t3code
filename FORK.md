@@ -278,6 +278,32 @@ this patch. No schema, persisted event type or settings format changes.
   `ProviderRuntimeRecoveryService.test.ts` supplies the new empty-outbox lookup in its queued-work fixture;
   its assertions are unchanged.
 
+### Watch the settings files, not the state directory, on Windows (`fork:`)
+
+The settings and keybindings watchers each watched the state directory, three watches in all, and that directory holds
+the database. With a directory watch, libuv on Windows calls `GetLongPathNameW` on every entry that changes, from the
+main thread, inside its poll phase, where a CPU profile shows it as `(idle)`. A native stack of a 6.8-second freeze
+on the PC showed the main thread in `ZwQueryAttributesFile`, under `GetLongPathNameW`, under `uv_run`. The database
+file changes all the time, and a lookup of a file can wait while another handle flushes it: during a 3 GB flush one
+lookup took 1.9 seconds, while a lookup of the file next to it took 1 ms.
+
+A watch on a file is the same directory watch underneath, matched by name in libuv, with no lookup, and it still sees
+an atomic save. Elsewhere a watch on a file loses it on an atomic save, so other platforms keep the directory. So does
+a file that doesn't exist when the watch starts.
+
+- `apps/server/src/watchOneFile.ts`: picks the file or the directory.
+- `apps/server/src/keybindings.ts`, `apps/server/src/serverSettings.ts`: watch through it.
+- Test: `apps/server/src/watchOneFile.fork.test.ts`, which runs live watches.
+
+### Don't walk PATH for every Claude start (`fork:`)
+
+`resolveSpawnExecutableWithNode` stats every candidate in every PATH entry, synchronously, on the main thread: about
+550 stats on the PC, for 46 entries and 12 extensions. Two freezes of 9.6 and 15.9 seconds were inside it, when stats
+were slow. A hit now stands for five minutes and is checked with one stat, and a command that's gone is looked up again.
+
+- `packages/shared/src/shell.ts`: the cache.
+- Test: `packages/shared/src/shell.fork.test.ts`.
+
 ### A CPU profile of each freeze on Windows (`fork:`)
 
 On the PC the server's event loop freezes for 4 to 13 seconds within a minute after every noon and midnight, and
@@ -288,7 +314,13 @@ more, the worker reads the profile back once the main thread is free and saves i
 `logs/freeze-profiles/freeze-<start>-<length>ms.cpuprofile`, which Chrome's DevTools and VS Code open. The profile
 covers the freeze and up to two minutes before it; without a freeze it is dropped and restarted every two minutes.
 The newest 20 are kept. A pause long enough to stop the worker too, such as a sleeping PC, isn't saved. Each save
-logs "freeze profile saved". `T3CODE_FREEZE_PROFILES=0` turns it off. Drop this patch once the freezes are fixed.
+logs "freeze profile saved".
+
+It's off unless `T3CODE_FREEZE_PROFILES=1`, because it caused freezes of its own. Each profile start walks the heap
+on the main thread, which on the PC held it for 0.4 to 3.8 seconds every two minutes and after every save, so one
+freeze could set off the next. The profile also can't see into libuv's poll phase, where it shows a blocked call as
+`(idle)`. Native stacks taken from outside the process found what those were. Drop this patch once the freezes are
+fixed.
 
 - `apps/server/src/observability/FreezeProfiler.ts`: the heartbeat, the worker and its layer.
 - `apps/server/src/server.ts`: merges the layer with `EventLoopMonitor`'s.

@@ -70,6 +70,11 @@ export type SpawnExecutableResolver = (
   env: NodeJS.ProcessEnv,
 ) => string | undefined;
 
+// fork: a bare command stats every candidate in every PATH entry, synchronously, on the main thread.
+// A hit stands for five minutes and is checked with one stat; see FORK.md.
+const SPAWN_EXECUTABLE_CACHE_TTL_MS = 5 * 60_000;
+const spawnExecutableCache = new Map<string, { resolved: string; expiresAtMs: number }>();
+
 function resolveSpawnExecutableWithNode(
   command: string,
   platform: NodeJS.Platform,
@@ -99,12 +104,32 @@ function resolveSpawnExecutableWithNode(
     return candidates.find(isExecutable);
   }
 
-  for (const pathEntry of (readEnvPath(env) ?? "").split(pathDelimiterForPlatform(platform))) {
+  const pathValue = readEnvPath(env) ?? "";
+  const cacheKey = [platform, pathValue, windowsPathExtensions.join(";"), command].join(
+    COMMAND_RESOLUTION_CACHE_KEY_SEPARATOR,
+  );
+  // @effect-diagnostics-next-line globalDate:off - The resolver is a plain synchronous function.
+  const nowMs = Date.now();
+  const cached = spawnExecutableCache.get(cacheKey);
+  if (cached && cached.expiresAtMs > nowMs && isExecutable(cached.resolved)) {
+    return cached.resolved;
+  }
+
+  for (const pathEntry of pathValue.split(pathDelimiterForPlatform(platform))) {
     const normalizedPathEntry = stripWrappingQuotes(pathEntry.trim());
     if (normalizedPathEntry.length === 0) continue;
     for (const candidate of candidates) {
       const candidatePath = path.join(normalizedPathEntry, candidate);
-      if (isExecutable(candidatePath)) return candidatePath;
+      if (isExecutable(candidatePath)) {
+        if (spawnExecutableCache.size >= COMMAND_RESOLUTION_CACHE_MAX_ENTRIES) {
+          spawnExecutableCache.clear();
+        }
+        spawnExecutableCache.set(cacheKey, {
+          resolved: candidatePath,
+          expiresAtMs: nowMs + SPAWN_EXECUTABLE_CACHE_TTL_MS,
+        });
+        return candidatePath;
+      }
     }
   }
   return undefined;
