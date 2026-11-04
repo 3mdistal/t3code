@@ -328,12 +328,10 @@ const waitingThreads = Effect.map(
   (snapshot) => snapshot.waiting.map((entry) => entry.threadId),
 );
 
-/** The limits as a pass sees them, with `threadId` held again just before the pass takes a thread off the line. */
-const holdingAgainDuringPass = (threadId: ThreadId) =>
+/** A governor that runs `during` once, just before a pass takes a thread off the line. */
+const makeGovernorInterrupted = (during: Effect.Effect<unknown>) =>
   Effect.gen(function* () {
     const limits = yield* ResourceLimits.ResourceLimits;
-    const orchestrator = yield* Orchestrator.OrchestratorV2;
-    const { thread } = yield* orchestrator.getThreadProjection(threadId);
     const armed = yield* Ref.make(true);
     const service: typeof limits = {
       ...limits,
@@ -344,12 +342,12 @@ const holdingAgainDuringPass = (threadId: ThreadId) =>
             change(before).waiting.length < before.waiting.length &&
             (yield* Ref.getAndSet(armed, false))
           ) {
-            yield* limits.admit({ thread, message: agent });
+            yield* during;
           }
           return yield* limits.update(change);
         }),
     };
-    return service;
+    return yield* makeGovernor.pipe(Effect.provideService(ResourceLimits.ResourceLimits, service));
   });
 
 it.effect("R2: a thread stays in line when a pass runs before its held run is written", () =>
@@ -374,47 +372,180 @@ it.effect("R2: a thread stays in line when a pass runs before its held run is wr
   }).pipe(Effect.provide(layerTest)),
 );
 
-it.effect("R2: a thread held again during a pass isn't taken off the line by it", () =>
+/** A governor that reads each run through `seen`, for states the orchestrator reaches only during a command. */
+const makeGovernorSeeing = (seen: (run: OrchestrationV2Run, index: number) => OrchestrationV2Run) =>
+  Effect.gen(function* () {
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    return yield* makeGovernor.pipe(
+      Effect.provideService(ProjectionStore.ProjectionStoreV2, {
+        ...projections,
+        getThreadRecords: (id, fields, filter) =>
+          projections.getThreadRecords(id, fields, filter).pipe(
+            Effect.map((records) => {
+              const { runs: all } = records as { runs?: ReadonlyArray<OrchestrationV2Run> };
+              return (
+                all === undefined ? records : { ...records, runs: all.map(seen) }
+              ) as typeof records;
+            }),
+          ),
+      }),
+    );
+  });
+
+it.effect("R2: a thread stays in line while its preparing run waits to be held", () =>
+  Effect.gen(function* () {
+    const limits = yield* ResourceLimits.ResourceLimits;
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const threadId = ThreadId.make("thread:r2:preparing");
+    yield* createThread(threadId);
+    yield* send(threadId, "workspace first", alice);
+    // A run that prepares a workspace is still preparing when admission holds it.
+    const governor = yield* makeGovernorSeeing((run) => ({ ...run, status: "preparing" }));
+    yield* governor.pass(yield* tight);
+
+    const { thread } = yield* orchestrator.getThreadProjection(threadId);
+    yield* limits.admit({ thread, message: agent });
+    yield* governor.pass(yield* tight);
+    assert.deepEqual(yield* waitingThreads, [threadId]);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("R2: a clock set back doesn't keep an empty thread in line", () =>
+  Effect.gen(function* () {
+    const limits = yield* ResourceLimits.ResourceLimits;
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const governor = yield* makeGovernor;
+    const threadId = ThreadId.make("thread:r2:clock");
+    yield* createThread(threadId);
+    yield* governor.pass(yield* tight);
+
+    const { thread } = yield* orchestrator.getThreadProjection(threadId);
+    yield* limits.admit({ thread, message: agent });
+    const dayAhead = (yield* Clock.currentTimeMillis) + 86_400_000;
+    yield* limits.update((snapshot) => ({
+      ...snapshot,
+      waiting: snapshot.waiting.map((entry) => ({ ...entry, lastHeldAt: dayAhead })),
+    }));
+    yield* governor.pass(yield* tight);
+    assert.deepEqual(yield* waitingThreads, []);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("R2: a thread held again during a pass stays in line until its run is released", () =>
   Effect.gen(function* () {
     const orchestrator = yield* Orchestrator.OrchestratorV2;
     const threadId = ThreadId.make("thread:r2:held-again");
     yield* createThread(threadId);
-    const first = yield* makeGovernor;
-    yield* first.pass(yield* tight);
+    const governor = yield* makeGovernorInterrupted(
+      send(threadId, "held again", agent).pipe(
+        Effect.provideService(Orchestrator.OrchestratorV2, orchestrator),
+        Effect.orDie,
+      ),
+    );
+    yield* governor.pass(yield* tight);
     yield* send(threadId, "agent work", agent);
     yield* orchestrator.dispatch({
       type: "queue.resume",
       commandId: CommandId.make("start-now"),
       threadId,
     });
-    assert.deepEqual(yield* runs(threadId), ["starting"]);
-
+    yield* endRun(threadId);
     yield* TestClock.adjust(TIMING.holdWriteMs);
-    const governor = yield* makeGovernor.pipe(
-      Effect.provideService(ResourceLimits.ResourceLimits, yield* holdingAgainDuringPass(threadId)),
-    );
+
+    // Nothing is left, so this pass takes the thread off, and the new hold lands before it does.
     yield* governor.pass(yield* tight);
+    assert.deepEqual(yield* runs(threadId), ["interrupted", "queued:held"]);
     assert.deepEqual(yield* waitingThreads, [threadId]);
+
+    yield* TestClock.adjust(TIMING.passMs);
+    yield* governor.pass(yield* comfortable);
+    assert.deepEqual(yield* runs(threadId), ["interrupted", "starting"]);
   }).pipe(Effect.provide(layerTest)),
 );
 
-it.effect("R3: a thread held again during its release stays in line", () =>
+const stopAfterStartingByHand = (name: string, followUpBeforePass: boolean) =>
   Effect.gen(function* () {
-    const threadId = ThreadId.make("thread:r3:held-again");
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const governor = yield* makeGovernor;
+    const threadId = ThreadId.make(`thread:r2:${name}`);
     yield* createThread(threadId);
-    const first = yield* makeGovernor;
-    yield* first.pass(yield* tight);
+    yield* governor.pass(yield* tight);
     yield* send(threadId, "agent work", agent);
-    assert.deepEqual(yield* runs(threadId), ["queued:held"]);
+    yield* orchestrator.dispatch({
+      type: "queue.resume",
+      commandId: CommandId.make("start-now"),
+      threadId,
+    });
+    const followUp = send(threadId, "agent follow-up", agent, "queue_after_active");
+    if (followUpBeforePass) yield* followUp;
+    yield* TestClock.adjust(TIMING.passMs);
+    yield* governor.pass(yield* comfortable);
+    assert.deepEqual(yield* waitingThreads, []);
 
-    yield* TestClock.adjust("1 second");
-    const governor = yield* makeGovernor.pipe(
-      Effect.provideService(ResourceLimits.ResourceLimits, yield* holdingAgainDuringPass(threadId)),
-    );
-    yield* governor.pass(yield* recovered);
-    assert.deepEqual(yield* runs(threadId), ["starting"]);
-    assert.deepEqual(yield* waitingThreads, [threadId]);
-  }).pipe(Effect.provide(layerTest)),
+    if (!followUpBeforePass) yield* followUp;
+    yield* orchestrator.dispatch({
+      type: "thread.stop",
+      commandId: CommandId.make("stop"),
+      threadId,
+      reason: "Stopped.",
+      stopDelegatedTasks: false,
+    });
+    yield* TestClock.adjust(TIMING.passMs);
+    yield* governor.pass(yield* comfortable);
+    assert.deepEqual(yield* runs(threadId), ["interrupted", "queued:held"]);
+  }).pipe(Effect.provide(layerTest));
+
+it.effect("R2: a thread started by hand leaves the line, so Stop stays stopped", () =>
+  stopAfterStartingByHand("stop", false),
+);
+
+it.effect("R2: work queued behind a run started by hand doesn't keep it in line", () =>
+  stopAfterStartingByHand("stop-queued", true),
+);
+
+it.effect(
+  "R2: a run held behind a started one stays in line, with nothing else to release it",
+  () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("thread:r2:held-behind");
+      yield* createThread(threadId);
+      const governor = yield* makeGovernorSeeing((run, index) =>
+        index === 0 ? { ...run, status: "starting" } : run,
+      );
+      yield* governor.pass(yield* tight);
+      yield* send(threadId, "agent work", agent);
+      yield* send(threadId, "more agent work", agent, "queue_after_active");
+      assert.deepEqual(yield* runs(threadId), ["queued:held", "queued:held"]);
+
+      yield* TestClock.adjust(TIMING.holdWriteMs);
+      yield* governor.pass(yield* tight);
+      assert.deepEqual(yield* waitingThreads, [threadId]);
+    }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect(
+  "R3: a thread held again during its release stays in line until the run has started",
+  () =>
+    Effect.gen(function* () {
+      const limits = yield* ResourceLimits.ResourceLimits;
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const threadId = ThreadId.make("thread:r3:held-again");
+      yield* createThread(threadId);
+      const { thread } = yield* orchestrator.getThreadProjection(threadId);
+      // The clock doesn't move, so the two holds share a millisecond.
+      const governor = yield* makeGovernorInterrupted(limits.admit({ thread, message: agent }));
+      yield* governor.pass(yield* tight);
+      yield* send(threadId, "agent work", agent);
+      assert.deepEqual(yield* runs(threadId), ["queued:held"]);
+
+      yield* governor.pass(yield* recovered);
+      assert.deepEqual(yield* runs(threadId), ["starting"]);
+      assert.deepEqual(yield* waitingThreads, [threadId]);
+
+      yield* TestClock.adjust(TIMING.passMs);
+      yield* governor.pass(yield* recovered);
+      assert.deepEqual(yield* waitingThreads, []);
+    }).pipe(Effect.provide(layerTest)),
 );
 
 it.effect("R3: held threads start oldest first, at least 90 s apart, near the lines", () =>
