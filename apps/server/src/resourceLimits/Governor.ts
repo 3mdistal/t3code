@@ -107,6 +107,8 @@ interface Inspected {
   readonly queued: boolean;
   readonly held: boolean;
   readonly blocked: boolean;
+  /** A run is past preparing. Admission holds nothing new while one is, so no held run is still being written. */
+  readonly started: boolean;
   /** Upstream snoozes a thread with a queue only when every queued message is a notification. */
   readonly snoozable: boolean;
 }
@@ -531,6 +533,7 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
         queued: false,
         held: false,
         blocked: false,
+        started: false,
         snoozable: false,
       } satisfies Inspected;
     }
@@ -566,6 +569,7 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
       blocked: runs.some((run) =>
         ["preparing", "starting", "running", "waiting"].includes(run.status),
       ),
+      started: runs.some((run) => ["starting", "running", "waiting"].includes(run.status)),
       snoozable,
     } satisfies Inspected;
   });
@@ -793,7 +797,9 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
     const dropped = new Set<ThreadId>();
     const changed = new Map<ThreadId, WaitingThread>();
     for (const item of inspected) {
-      if (item.shell === null || !item.queued) {
+      // A run started by hand ends the hold, and whatever's queued behind it is admitted when that run ends. Staying
+      // on the line would let a later pass release a run that Stop held.
+      if (item.shell === null || !item.queued || (item.started && !item.held)) {
         // A wake the restart dropped comes back as a note, so the thread keeps its place in the line.
         if (
           item.shell !== null &&
@@ -802,8 +808,16 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
         ) {
           continue;
         }
-        // Its held run may not be written yet. Dropping it now would leave that run with nothing to release it.
-        if (item.shell !== null && now - item.entry.lastHeldAt < TIMING.holdWriteMs) continue;
+        // Its held run may not be written yet. Dropping it now would leave that run with nothing to release it. A run
+        // that has started means the write is over, and a clock set back mustn't stretch the wait, so a stamp from the
+        // future counts as old.
+        if (
+          item.shell !== null &&
+          !item.started &&
+          Math.abs(now - item.entry.lastHeldAt) < TIMING.holdWriteMs
+        ) {
+          continue;
+        }
         dropped.add(item.entry.threadId);
         if (item.shell !== null) yield* unsnooze(item, now);
         continue;
@@ -885,16 +899,17 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
       }
     }
 
-    // Admission may have added threads during this pass, so only the ones handled here change, and one held again
-    // since this pass read it stays, with a new run to wait for.
-    const handled = new Map(current.waiting.map((entry) => [entry.threadId, entry.lastHeldAt]));
+    // Admission may have added threads during this pass, so only the ones handled here change. Admission also replaces
+    // the entry of a thread it holds again, even in the same millisecond, so one that isn't what this pass read stays,
+    // with a new run to wait for.
+    const handled = new Map(current.waiting.map((entry) => [entry.threadId, entry]));
     const published = yield* limits.update((snapshot) => ({
       ...snapshot,
       waiting: snapshot.waiting
         .filter(
           (entry) =>
             (!dropped.has(entry.threadId) && !released.has(entry.threadId)) ||
-            entry.lastHeldAt !== handled.get(entry.threadId),
+            entry !== handled.get(entry.threadId),
         )
         .map((entry) => {
           const snooze = changed.get(entry.threadId);
