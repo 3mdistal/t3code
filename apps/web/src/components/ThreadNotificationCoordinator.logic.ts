@@ -124,6 +124,11 @@ export function createThreadNotificationGate<Key>(
       for (const key of releases.keys()) if (!keys.has(key)) cancel(key);
       for (const key of attended.keys()) if (!keys.has(key)) attended.delete(key);
     },
+    // fork: a lost background wake's alert stands in for its run's completion; see FORK.md.
+    supersedeCompletion(key: Key, at: number): void {
+      cancel(key);
+      skip(key, at);
+    },
     clear(): void {
       for (const key of releases.keys()) cancel(key);
       handled.clear();

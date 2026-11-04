@@ -2510,6 +2510,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   ) {
     if (notification?.source.kind !== "delegated_task" || notification.outcome !== "updated")
       return false;
+    // fork: approval and lost-wake notices are no question wakes; see FORK.md.
+    if (messageId.startsWith("message:delegated-attention:")) return false;
     const source = notification.source;
     const threadId = projection.thread.id;
     const task =

@@ -19,6 +19,7 @@ import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import { forkParked } from "../serverActivation.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
+import { isDelegatedAttentionEvent, makeDelegatedAttention } from "./DelegatedAttention.ts"; // fork: see FORK.md.
 
 export class DelegatedTaskQuestionReactor extends Context.Service<
   DelegatedTaskQuestionReactor,
@@ -31,6 +32,7 @@ export class DelegatedTaskQuestionReactor extends Context.Service<
 const make = Effect.gen(function* () {
   const engine = yield* Orchestrator.OrchestratorV2;
   const projections = yield* ProjectionStore.ProjectionStoreV2;
+  const attention = yield* makeDelegatedAttention(); // fork: see FORK.md.
 
   const wakeParent = Effect.fnUntraced(function* (
     task: OrchestrationV2Subagent,
@@ -95,6 +97,8 @@ const make = Effect.gen(function* () {
   // Runs for every domain event; most events return before any work is needed.
   const handle: DelegatedTaskQuestionReactor["Service"]["handle"] = Effect.fnUntraced(
     function* (event) {
+      // fork: approvals and wake loss reach the owner without granting approval rights; see FORK.md.
+      if (isDelegatedAttentionEvent(event)) return yield* attention(event);
       if (event.type === "run.updated") {
         if (!["completed", "failed", "waiting"].includes(event.payload.status)) return;
         const parent = yield* projections.getThreadRecords(event.threadId, ["subagents"]);
@@ -231,6 +235,12 @@ const make = Effect.gen(function* () {
   // Every wake and cancel goes to the parent, so keying by it keeps a question's wake ahead of
   // its task's cancel while a busy parent's lock delays only that parent's reactions.
   const parentOf = (event: OrchestrationV2DomainEvent) => {
+    // fork: an approval or a lost wake reaches the parent under its lock too; see FORK.md.
+    if (isDelegatedAttentionEvent(event)) {
+      return projections
+        .getThread(event.threadId)
+        .pipe(Effect.map((child) => child.lineage.parentThreadId));
+    }
     switch (event.type) {
       case "run.updated":
         return Effect.succeed(event.threadId);
