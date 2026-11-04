@@ -33,6 +33,7 @@ import {
   type OrchestrationV2ThreadProjection,
   type OrchestrationV2ThreadTranscript,
   type OrchestrationV2TurnItem,
+  type OrchestratorMcpThreadAttention, // fork: see FORK.md.
   ProjectId,
   PROVIDER_SEND_TURN_MAX_FILE_BYTES,
   ProviderInstanceId,
@@ -72,6 +73,7 @@ import { cancelledBeforeStart } from "./RestartBackgroundNote.ts";
 import * as LegacyV1ThreadImporter from "./legacy/LegacyV1ThreadImporter.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { ThreadWorktreeRestore } from "../workspace/restoreMissingWorktree.ts";
+import { pendingThreadAttention } from "./ThreadAttention.ts"; // fork: see FORK.md.
 
 export type ThreadManagementSendMode = "auto" | "queue" | "steer" | "restart";
 
@@ -181,6 +183,7 @@ export interface ThreadManagementWaitInput {
   readonly threadId: ThreadId;
   readonly runId?: RunId;
   readonly timeoutMs: number;
+  readonly seenAttentionIds?: ReadonlyArray<string>; // fork: see FORK.md.
   /**
    * Also wait until the thread's own delegated work settles: an ended run
    * still owes the thread's answer while a child, a background task or a
@@ -193,6 +196,7 @@ export interface ThreadManagementWaitResult {
   readonly threadId: ThreadId;
   readonly run: OrchestrationV2Run | null;
   readonly timedOut: boolean;
+  readonly attention?: ReadonlyArray<OrchestratorMcpThreadAttention>; // fork: see FORK.md.
   /** With `untilDelegatedWorkSettled`, once settled: the run with the thread's final answer. */
   readonly resultRun?: OrchestrationV2Run;
 }
@@ -1060,20 +1064,37 @@ const make = Effect.gen(function* () {
       runs: ReadonlyArray<OrchestrationV2Run>,
     ) {
       const current = yield* outcome(runs);
+      // fork: attention ends a long poll without pretending that its run completed; see FORK.md.
+      const attention =
+        input.seenAttentionIds === undefined
+          ? []
+          : pendingThreadAttention({
+              ...(yield* getProjectThreadRecords(input, ["runtimeRequests", "turnItems"], {
+                turnItemTypes: ["system_notice"],
+              }).pipe(
+                Effect.map((records) => ({
+                  requests: records.runtimeRequests,
+                  notices: records.turnItems,
+                })),
+              )),
+              seen: input.seenAttentionIds,
+              since: selectedRun.requestedAt,
+            });
       if (!current.settled || !untilDelegatedWorkSettled) {
-        return { ...current, resultRun: undefined };
+        return { ...current, resultRun: undefined, attention };
       }
       const resultRun = yield* delegatedWorkResult;
-      return { ...current, settled: resultRun !== undefined, resultRun };
+      return { ...current, settled: resultRun !== undefined, resultRun, attention };
     });
     const settledResult = (current: Effect.Success<ReturnType<typeof evaluate>>) => ({
       threadId: input.threadId,
       run: current.run,
-      timedOut: !current.settled,
+      timedOut: !current.settled && current.attention.length === 0, // fork: see FORK.md.
+      ...(input.seenAttentionIds === undefined ? {} : { attention: current.attention }), // fork: see FORK.md.
       ...(current.resultRun === undefined ? {} : { resultRun: current.resultRun }),
     });
     const initial = yield* evaluate(target.runs);
-    if (initial.settled) return settledResult(initial);
+    if (initial.settled || initial.attention.length > 0) return settledResult(initial); // fork: see FORK.md.
 
     // A declined continuation records no event, so its effect settling wakes
     // the wait too.
@@ -1083,6 +1104,10 @@ const make = Effect.gen(function* () {
           [
             "run.updated",
             "thread.deleted",
+            // fork: peer followers also wake on prompts and lost background wakes; see FORK.md.
+            ...(input.seenAttentionIds === undefined
+              ? []
+              : (["runtime-request.updated", "turn-item.updated"] as const)),
             // What delegated work reads besides runs: tasks and their
             // deliveries, and a provider thread's background tasks.
             ...(untilDelegatedWorkSettled
@@ -1099,6 +1124,13 @@ const make = Effect.gen(function* () {
         { concurrency: "unbounded" },
       ).pipe(
         Stream.mapError(loadError),
+        // fork: streaming transcript updates are not attention events; see FORK.md.
+        Stream.filter(
+          (stored) =>
+            stored.event.type !== "turn-item.updated" ||
+            (stored.event.payload.type === "system_notice" &&
+              stored.event.payload.title === "Background wake cancelled"),
+        ),
         Stream.filter(
           (stored) =>
             untilDelegatedWorkSettled ||
@@ -1116,7 +1148,7 @@ const make = Effect.gen(function* () {
           Effect.flatMap((current) => evaluate(current.runs)),
         ),
       ),
-      Stream.filter((current) => current.settled),
+      Stream.filter((current) => current.settled || current.attention.length > 0), // fork: see FORK.md.
       Stream.runHead,
       Effect.timeoutOption(Duration.millis(Math.max(1, input.timeoutMs))),
     );
