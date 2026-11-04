@@ -43,6 +43,8 @@ export const TotalMemoryBytes = Context.Reference<number>("t3/resourceLimits/Tot
 export interface WaitingThread {
   readonly threadId: ThreadId;
   readonly heldAt: number;
+  /** The latest admission that held it, which `heldAt` keeps out of so the thread keeps its place in line. */
+  readonly lastHeldAt: number;
   /** The snooze the limits put on the thread, so a release ends only that one. */
   readonly snoozedUntil: string | null;
   /** Upstream refuses to snooze a thread with a queued message of its own, so this isn't retried. */
@@ -181,12 +183,23 @@ const make = Effect.fn("makeResourceLimits")(function* () {
     }
     const updated = yield* Ref.updateAndGet(snapshot, (latest) =>
       latest.waiting.some((entry) => entry.threadId === input.thread.id)
-        ? latest
+        ? {
+            ...latest,
+            waiting: latest.waiting.map((entry) =>
+              entry.threadId === input.thread.id ? { ...entry, lastHeldAt: now } : entry,
+            ),
+          }
         : {
             ...latest,
             waiting: [
               ...latest.waiting,
-              { threadId: input.thread.id, heldAt: now, snoozedUntil: null, snoozeTried: false },
+              {
+                threadId: input.thread.id,
+                heldAt: now,
+                lastHeldAt: now,
+                snoozedUntil: null,
+                snoozeTried: false,
+              },
             ],
           },
     );
