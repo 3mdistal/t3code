@@ -4,7 +4,7 @@ import { claudeTaskOutputRoot, tailClaudeTaskOutput } from "./ClaudeTaskOutputTa
 // fork: see FORK.md, "A Claude session that was never saved recovers".
 import { isClaudeTranscriptMissing } from "./ClaudeLostSession.ts";
 import { makeClaudeWakeOwnership, claudeWakeTaskIds } from "./ClaudeWakeOwnership.ts"; // fork: see FORK.md.
-import { makeClaudeRuntimeRequests } from "./ClaudeRuntimeRequests.ts"; // fork: see FORK.md.
+import { makeClaudeRuntimeRequests, offerClaudeSteer } from "./ClaudeRuntimeRequests.ts"; // fork: see FORK.md.
 import {
   dynamicToolTitle,
   formatReadToolLabel,
@@ -11132,20 +11132,12 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               next.add(turnInput.providerTurnId);
               return next;
             });
-            yield* Effect.uninterruptibleMask((restore) =>
-              restore(
-                existing.query.offer(userMessage, () => {
-                  pdfReservation.commit();
-                }),
-              ).pipe(
-                Effect.tap(() =>
-                  Effect.sync(() => {
-                    pdfReservation.commit();
-                  }),
-                ),
-                Effect.tap(() => pendingRuntimeRequests.retireAll(supersededRequests)),
-              ),
-            );
+            // fork: acceptance owns retirement even if offer exits during logging; see FORK.md.
+            yield* offerClaudeSteer({
+              offer: (onQueued) => existing.query.offer(userMessage, onQueued),
+              onAccepted: () => pdfReservation.commit(),
+              retire: pendingRuntimeRequests.retireAll(supersededRequests),
+            });
           },
           (effect, turnInput) =>
             effect.pipe(
