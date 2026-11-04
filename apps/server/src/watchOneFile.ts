@@ -18,6 +18,8 @@ export const watchOneFile = (
       const onWindows = (yield* HostProcess.Platform) === "win32";
       const exists =
         onWindows && (yield* fs.exists(filePath).pipe(Effect.orElseSucceed(() => false)));
-      return fs.watch(exists ? filePath : directory, options);
+      if (!exists) return fs.watch(directory, options);
+      // The file can be replaced as the watch attaches; the directory is still there.
+      return fs.watch(filePath, options).pipe(Stream.catch(() => fs.watch(directory, options)));
     }),
   );
