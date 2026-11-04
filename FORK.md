@@ -760,9 +760,13 @@ Users read about it in the Memory and CPU limits section of `docs/user/remote-ac
     seconds and "Stop now, then shut down" would otherwise lose the threads it just held.
   - The waiting list is the only thing that releases a held run, so a pass mustn't take off a thread that's about to
     have one. Admission records a thread a moment before its run is written, so a thread held in the last minute
-    (`holdWriteMs`) stays even with nothing queued. A thread held again since the pass read the list stays too
-    (`lastHeldAt`). A thread whose records can't be read is still dropped, because keeping it could hold all new work
-    behind one thread for as long as the read keeps failing.
+    (`holdWriteMs`, from `lastHeldAt`) stays even with nothing queued. A run that has started ends that wait: each
+    thread's commands run one at a time and admission holds nothing new while a run is active, so no write can still
+    be coming. A started run with nothing held behind it takes the thread off, as a release does, even with work queued
+    behind it, which is admitted when that run ends. That keeps Stop stopped, since a thread started by hand and left on
+    the list would have its stopped run released by the next pass. A thread held again since the pass read the list
+    stays too, which the pass tells from admission having replaced its entry. A thread whose records can't be read is still dropped, because keeping
+    it could hold all new work behind one thread for as long as the read keeps failing.
   - A subagent launch the hook refused can reach the inbox after its turn ended, so the inbox is matched against
     idle sessions as well as running ones.
 - teenylilconfig's memory gate and task wake share the governor's files under `<stateDir>/resource-limits/`:

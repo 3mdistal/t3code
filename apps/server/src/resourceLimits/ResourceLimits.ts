@@ -43,7 +43,10 @@ export const TotalMemoryBytes = Context.Reference<number>("t3/resourceLimits/Tot
 export interface WaitingThread {
   readonly threadId: ThreadId;
   readonly heldAt: number;
-  /** The latest admission that held it, which `heldAt` keeps out of so the thread keeps its place in line. */
+  /**
+   * The latest admission that held it, which `heldAt` keeps out of so the thread keeps its place in line. Each
+   * admission writes a new entry, which is how a pass tells one that landed while it ran.
+   */
   readonly lastHeldAt: number;
   /** The snooze the limits put on the thread, so a release ends only that one. */
   readonly snoozedUntil: string | null;
