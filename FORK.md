@@ -880,8 +880,11 @@ peers retain their completion-only behavior. There is no persisted schema, event
 
 Web and desktop notifications identify the newest pending request, including linked children, so a second prompt
 in one run alerts again without re-alerting when an older prompt is exposed. For a root thread's lost wake, the
-client reads a bounded recent projection when an idle thread gains items or loses awaited work. Reads are
-coalesced, limited and retried. A wake warning replaces a pending completion alert; existing notification settings
+client reads a bounded recent projection when a run settles, or an idle thread gains items or loses awaited
+work. This includes completion and wake loss coalesced into one shell update. Deferred completions retain their
+run identity and are discarded when work resumes; a late wake warning supersedes only its own run's completion.
+Completion deferral expires after fifteen seconds even behind stalled transport reads.
+Reads are coalesced, limited and retried. A wake warning replaces a pending completion alert; existing notification settings
 and focused-thread suppression apply. Historical notices remain quiet after reload. Mobile notification behavior
 is unchanged. The title `Background wake cancelled` is shared by the Claude adapter, relay and client tracker;
 changing it requires updating all three.
