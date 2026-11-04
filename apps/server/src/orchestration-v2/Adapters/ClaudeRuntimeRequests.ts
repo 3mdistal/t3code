@@ -14,6 +14,29 @@ export interface ClaudeRequestArtifacts {
   readonly turnItem: OrchestrationV2TurnItem;
 }
 
+export const offerClaudeSteer = Effect.fn("ClaudeRuntimeRequests.offerSteer")(function* <
+  E,
+  R,
+>(input: {
+  readonly offer: (onQueued: () => void) => Effect.Effect<void, E, R>;
+  readonly onAccepted: () => void;
+  readonly retire: Effect.Effect<void>;
+}) {
+  let accepted = false;
+  const onQueued = () => {
+    if (accepted) return;
+    accepted = true;
+    input.onAccepted();
+  };
+  // Enqueue acceptance precedes protocol logging, which can fail or be interrupted.
+  yield* Effect.uninterruptibleMask((restore) =>
+    restore(input.offer(onQueued)).pipe(
+      Effect.tap(() => Effect.sync(onQueued)),
+      Effect.ensuring(Effect.suspend(() => (accepted ? input.retire : Effect.void))),
+    ),
+  );
+});
+
 export const makeClaudeRuntimeRequests = Effect.fn("ClaudeRuntimeRequests.make")(function* <
   Pending,
 >(publish: (artifacts: ClaudeRequestArtifacts) => Effect.Effect<void>) {
