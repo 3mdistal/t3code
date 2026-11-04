@@ -22,6 +22,8 @@ export const watchOneFile = (
           Effect.map((info) => info.type === "File"),
           Effect.orElseSucceed(() => false),
         ));
-      return fs.watch(isFile ? filePath : directory, options);
+      if (!isFile) return fs.watch(directory, options);
+      // The file can be replaced as the watch attaches; the directory is still there.
+      return fs.watch(filePath, options).pipe(Stream.catch(() => fs.watch(directory, options)));
     }),
   );
