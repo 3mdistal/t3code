@@ -32,6 +32,9 @@ export const TIMING = {
   // A thread waiting for memory leaves Alice's inbox until it's released; a snooze outlives any
   // normal pause, and still ends by itself if the server goes away for good.
   snoozeMs: 24 * 3_600_000,
+  // Admission records a thread a moment before its held run is written, and a busy machine stretches that moment.
+  // A thread held this recently stays in line even with nothing queued yet.
+  holdWriteMs: 60_000,
   // `memgate off` switches the limits off for 2 h by default; no switch outlasts a day.
   maxOffMs: 24 * 3_600_000,
   // Task wake rewrites the ranks file every 10 minutes; one older than a day is left over, so it counts as none.
