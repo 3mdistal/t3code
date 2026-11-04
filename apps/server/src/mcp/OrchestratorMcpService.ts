@@ -3065,6 +3065,9 @@ const make = Effect.gen(function* () {
             Math.max(1, input.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS),
           ),
           ...(input.untilDelegatedWorkSettled === true ? { untilDelegatedWorkSettled: true } : {}),
+          ...(input.seenAttentionIds === undefined
+            ? {}
+            : { seenAttentionIds: input.seenAttentionIds }), // fork: see FORK.md.
         })
         .pipe(Effect.mapError(threadManagementFailure));
       const status = result.run === null ? "idle" : runOutcome(result.run);
@@ -3095,6 +3098,7 @@ const make = Effect.gen(function* () {
         runId: result.run?.id ?? null,
         status,
         timedOut: result.timedOut,
+        ...(result.attention === undefined ? {} : { attention: result.attention }), // fork: see FORK.md.
         ...(wakesCaller ? { next: ORCHESTRATOR_MCP_RUNNING_TASK_NEXT } : {}),
         ...(result.resultRun === undefined
           ? {}

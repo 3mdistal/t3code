@@ -3,7 +3,7 @@ import { WORKING_EXIT_GRACE_MS } from "@t3tools/client-runtime/state/thread-inbo
 export type ThreadNotificationKind = "input" | "completion";
 
 export interface ThreadNotificationObservation {
-  /** Run and status key while the thread needs attention, otherwise null. */
+  /** Run, status and pending request key while the thread needs attention, otherwise null. */
   readonly attention: string | null;
   /** The thread is idle and its latest run completed. */
   readonly settled: boolean;
@@ -71,6 +71,11 @@ export function createThreadNotificationGate<Key>(
     },
     cancelPending(): void {
       for (const key of pending.keys()) cancel(key);
+    },
+    // fork: a lost background wake's alert stands in for its run's completion; see FORK.md.
+    supersedeCompletion(key: Key, at: number): void {
+      cancel(key);
+      skip(key, at);
     },
     clear(): void {
       for (const key of pending.keys()) cancel(key);

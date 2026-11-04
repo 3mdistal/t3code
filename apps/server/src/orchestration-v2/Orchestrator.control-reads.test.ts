@@ -1105,7 +1105,7 @@ it.effect("wakes the parent once when its delegated task asks a question", () =>
       ],
     });
     yield* reactor.handle(answered);
-    yield* reactor.handle(approval);
+    // fork: approval delivery is asserted separately in DelegatedAttention.fork.test.ts; see FORK.md.
 
     const wakes = (yield* projections.getThreadProjection(parentThreadId)).messages.filter(
       (message) => message.notification !== undefined,
