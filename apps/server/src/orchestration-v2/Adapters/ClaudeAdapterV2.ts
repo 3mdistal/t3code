@@ -9,6 +9,7 @@ import { claudeTaskOutputRoot, tailClaudeTaskOutput } from "./ClaudeTaskOutputTa
 // fork: see FORK.md, "A Claude session that was never saved recovers".
 import { isClaudeTranscriptMissing } from "./ClaudeLostSession.ts";
 import { makeClaudeWakeOwnership, claudeWakeTaskIds } from "./ClaudeWakeOwnership.ts"; // fork: see FORK.md.
+import { makeClaudeRuntimeRequests } from "./ClaudeRuntimeRequests.ts"; // fork: see FORK.md.
 import {
   dynamicToolTitle,
   formatReadToolLabel,
@@ -6408,9 +6409,6 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
         const providerRetries = yield* Ref.make(
           new Map<OrchestrationV2ProviderTurn["id"], ActiveClaudeProviderRetry>(),
         );
-        const pendingRuntimeRequests = yield* Ref.make(
-          new Map<string, PendingClaudeRuntimeRequest>(),
-        );
         const mcpElicitationSessionGrants = yield* Ref.make(new Set<string>());
         // Background local_bash tasks can trigger wake turns on the query stream with no active provider turn.
         const lastTurnRouteByNativeThread = yield* Ref.make(
@@ -6809,6 +6807,27 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
         // Only a process's first API request is startup; a reused process is already connected.
         const requestedQueries = new WeakSet<ClaudeAgentSdkQuerySession>();
         let connectingTurn: ActiveClaudeTurnContext | undefined;
+        // fork: callback retirement and answer delivery claim the same request; see FORK.md.
+        const pendingRuntimeRequests =
+          yield* makeClaudeRuntimeRequests<PendingClaudeRuntimeRequest>(
+            Effect.fn("ClaudeAdapterV2.publishRuntimeRequest")(function* ({
+              node,
+              request,
+              turnItem,
+            }) {
+              yield* emitProviderEvent({ type: "node.updated", driver: CLAUDE_PROVIDER, node });
+              yield* emitProviderEvent({
+                type: "runtime_request.updated",
+                driver: CLAUDE_PROVIDER,
+                runtimeRequest: request,
+              });
+              yield* emitProviderEvent({
+                type: "turn_item.updated",
+                driver: CLAUDE_PROVIDER,
+                turnItem,
+              });
+            }),
+          );
 
         const persistAttachmentBudget = Effect.fnUntraced(function* (nativeThreadId: string) {
           const providerThread = (yield* Ref.get(lastProviderThreadByNativeThread)).get(
@@ -13210,48 +13229,26 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               questions,
             });
             const answers = yield* Deferred.make<ProviderUserInputAnswers, never>();
-            yield* Ref.update(pendingRuntimeRequests, (current) => {
-              const updated = new Map(current);
-              updated.set(String(artifacts.request.id), {
+            const pending = yield* pendingRuntimeRequests.register({
+              owner: context.providerTurnId,
+              root: callbackOptions.agentID === undefined,
+              artifacts,
+              pending: {
                 type: "user_input",
                 answers,
-              });
-              return updated;
+              },
             });
-            yield* Effect.all(
-              [
-                emitProviderEvent({
-                  type: "node.updated",
-                  driver: CLAUDE_PROVIDER,
-                  node: artifacts.node,
-                }),
-                emitProviderEvent({
-                  type: "runtime_request.updated",
-                  driver: CLAUDE_PROVIDER,
-                  runtimeRequest: artifacts.request,
-                }),
-                emitProviderEvent({
-                  type: "turn_item.updated",
-                  driver: CLAUDE_PROVIDER,
-                  turnItem: artifacts.turnItem,
-                }),
-              ],
-              { concurrency: 1 },
-            );
             const resolvedAnswers = yield* awaitClaudeUserInputAnswers(
               answers,
               callbackOptions.signal,
             ).pipe(
-              Effect.ensuring(
-                Ref.update(pendingRuntimeRequests, (current) => {
-                  const updated = new Map(current);
-                  updated.delete(String(artifacts.request.id));
-                  return updated;
-                }),
-              ),
+              Effect.raceFirst(Deferred.await(pending.retired).pipe(Effect.as({}))),
+              Effect.ensuring(pendingRuntimeRequests.remove(pending)),
             );
-            if (!(yield* Deferred.isDone(answers))) yield* cancelWithdrawnRequest(artifacts);
-            return callbackOptions.signal.aborted
+            // fork: a steer already closed a retired request's card as superseded; see FORK.md.
+            if (!(yield* Deferred.isDone(answers)) && !(yield* Deferred.isDone(pending.retired)))
+              yield* cancelWithdrawnRequest(artifacts);
+            return callbackOptions.signal.aborted || (yield* Deferred.isDone(pending.retired))
               ? ({
                   behavior: "deny",
                   message: "User cancelled tool execution.",
@@ -13350,53 +13347,34 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             }),
           });
           const decision = yield* Deferred.make<ClaudeApprovalResponse, never>();
-          yield* Ref.update(pendingRuntimeRequests, (current) => {
-            const updated = new Map(current);
-            updated.set(String(artifacts.request.id), {
+          const pending = yield* pendingRuntimeRequests.register({
+            owner: context.providerTurnId,
+            root: callbackOptions.agentID === undefined,
+            artifacts,
+            pending: {
               type: "approval",
               requestKind,
               decision,
-            });
-            return updated;
+            },
           });
-          yield* Effect.all(
-            [
-              emitProviderEvent({
-                type: "node.updated",
-                driver: CLAUDE_PROVIDER,
-                node: artifacts.node,
-              }),
-              emitProviderEvent({
-                type: "runtime_request.updated",
-                driver: CLAUDE_PROVIDER,
-                runtimeRequest: artifacts.request,
-              }),
-              emitProviderEvent({
-                type: "turn_item.updated",
-                driver: CLAUDE_PROVIDER,
-                turnItem: artifacts.turnItem,
-              }),
-            ],
-            { concurrency: 1 },
-          );
 
           const resolvedDecision = yield* awaitClaudeApprovalDecision(
             decision,
             callbackOptions.signal,
           ).pipe(
-            Effect.ensuring(
-              Ref.update(pendingRuntimeRequests, (current) => {
-                const updated = new Map(current);
-                updated.delete(String(artifacts.request.id));
-                return updated;
-              }),
+            Effect.raceFirst(
+              Deferred.await(pending.retired).pipe(Effect.as({ decision: "decline" as const })),
             ),
+            Effect.ensuring(pendingRuntimeRequests.remove(pending)),
           );
-          if (!(yield* Deferred.isDone(decision))) yield* cancelWithdrawnRequest(artifacts);
+          // fork: a steer already closed a retired request's card as superseded; see FORK.md.
+          if (!(yield* Deferred.isDone(decision)) && !(yield* Deferred.isDone(pending.retired)))
+            yield* cancelWithdrawnRequest(artifacts);
 
           return permissionResultFromDecision({
             toolName,
             ...resolvedDecision,
+            ...(callbackOptions.signal.aborted ? { decision: "decline" as const } : {}),
             toolInput,
             toolUseID: callbackOptions.toolUseID,
             managedCeiling: context.input.runtimePolicy.maxRuntimeMode !== undefined,
@@ -13454,35 +13432,16 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             options: CLAUDE_MCP_ELICITATION_OPTIONS,
           });
           const decision = yield* Deferred.make<ClaudeApprovalResponse>();
-          yield* Ref.update(pendingRuntimeRequests, (current) => {
-            const updated = new Map(current);
-            updated.set(String(artifacts.request.id), {
+          const pending = yield* pendingRuntimeRequests.register({
+            owner: context.providerTurnId,
+            root: false,
+            artifacts,
+            pending: {
               type: "approval",
               requestKind: "mcp-elicitation",
               decision,
-            });
-            return updated;
+            },
           });
-          yield* Effect.all(
-            [
-              emitProviderEvent({
-                type: "node.updated",
-                driver: CLAUDE_PROVIDER,
-                node: artifacts.node,
-              }),
-              emitProviderEvent({
-                type: "runtime_request.updated",
-                driver: CLAUDE_PROVIDER,
-                runtimeRequest: artifacts.request,
-              }),
-              emitProviderEvent({
-                type: "turn_item.updated",
-                driver: CLAUDE_PROVIDER,
-                turnItem: artifacts.turnItem,
-              }),
-            ],
-            { concurrency: 1 },
-          );
 
           // Closing the query aborts the signal, so a stopped session settles
           // this as cancel and a late response finds no pending request.
@@ -13490,13 +13449,10 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             decision,
             callbackOptions.signal,
           ).pipe(
-            Effect.ensuring(
-              Ref.update(pendingRuntimeRequests, (current) => {
-                const updated = new Map(current);
-                updated.delete(String(artifacts.request.id));
-                return updated;
-              }),
+            Effect.raceFirst(
+              Deferred.await(pending.retired).pipe(Effect.as({ decision: "decline" as const })),
             ),
+            Effect.ensuring(pendingRuntimeRequests.remove(pending)),
           );
           if (resolved === "cancel" && callbackOptions.signal.aborted) {
             const now = yield* DateTime.now;
@@ -14924,6 +14880,8 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
               Effect.provideService(Path.Path, path),
             );
+            // fork: a child permission or a new callback is not superseded by this root steer; see FORK.md.
+            const supersededRequests = pendingRuntimeRequests.snapshot(currentTurn.providerTurnId);
             // Notes this turn's prompt or an earlier steer already carried are not sent again.
             const appContext = turnInput.appContext ?? [];
             const seenAppContext =
@@ -14986,6 +14944,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             yield* Effect.uninterruptibleMask((restore) =>
               restore(existing.query.offer(userMessage, commitOffer)).pipe(
                 Effect.tap(() => Effect.sync(commitOffer)),
+                Effect.tap(() => pendingRuntimeRequests.retireAll(supersededRequests)),
               ),
             ).pipe(
               Effect.onError(() =>
@@ -15689,10 +15648,33 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           }),
           respondToRuntimeRequest: Effect.fn("ClaudeAdapterV2.respondToRuntimeRequest")(
             function* (requestInput) {
-              const pending = (yield* Ref.get(pendingRuntimeRequests)).get(
+              // fork: once retired, a late Cancel must never reach the live query; see FORK.md.
+              const delivered = yield* pendingRuntimeRequests.respond(
                 String(requestInput.requestId),
+                Effect.fn("ClaudeAdapterV2.deliverRuntimeResponse")(function* (pending) {
+                  if (pending.type === "user_input") {
+                    yield* Deferred.succeed(pending.answers, requestInput.answers ?? {});
+                    return;
+                  }
+                  if (requestInput.decision === undefined) {
+                    return yield* new ProviderAdapter.ProviderAdapterRuntimeRequestResponseError({
+                      driver: CLAUDE_PROVIDER,
+                      requestId: requestInput.requestId,
+                      cause: new ProviderAdapter.ProviderAdapterProtocolError({
+                        driver: CLAUDE_PROVIDER,
+                        detail: `Claude ${pending.requestKind} request ${requestInput.requestId} requires an approval decision.`,
+                      }),
+                    });
+                  }
+                  yield* Deferred.succeed(pending.decision, {
+                    decision: requestInput.decision,
+                    ...(requestInput.feedback === undefined
+                      ? {}
+                      : { feedback: requestInput.feedback }),
+                  });
+                }),
               );
-              if (pending === undefined) {
+              if (!delivered) {
                 return yield* new ProviderAdapter.ProviderAdapterRuntimeRequestResponseError({
                   driver: CLAUDE_PROVIDER,
                   requestId: requestInput.requestId,
@@ -15702,24 +15684,6 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                   }),
                 });
               }
-              if (pending.type === "user_input") {
-                yield* Deferred.succeed(pending.answers, requestInput.answers ?? {});
-                return;
-              }
-              if (requestInput.decision === undefined) {
-                return yield* new ProviderAdapter.ProviderAdapterRuntimeRequestResponseError({
-                  driver: CLAUDE_PROVIDER,
-                  requestId: requestInput.requestId,
-                  cause: new ProviderAdapter.ProviderAdapterProtocolError({
-                    driver: CLAUDE_PROVIDER,
-                    detail: `Claude ${pending.requestKind} request ${requestInput.requestId} requires an approval decision.`,
-                  }),
-                });
-              }
-              yield* Deferred.succeed(pending.decision, {
-                decision: requestInput.decision,
-                ...(requestInput.feedback === undefined ? {} : { feedback: requestInput.feedback }),
-              });
             },
             (effect, requestInput) =>
               effect.pipe(
