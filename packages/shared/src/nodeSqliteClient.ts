@@ -513,7 +513,7 @@ const makeReader = Effect.fnUntraced(function* (
 const CHECKPOINT_FRAMES = 1000;
 const CHECKPOINT_IDLE_MS = 100;
 const CHECKPOINT_BACKPRESSURE_FRAMES = 10 * CHECKPOINT_FRAMES;
-// fork: a checkpoint that stops moving stops holding writers, up to about 4 GB of log, see FORK.md.
+// fork: a checkpoint that stops moving stops holding writers, until about 4 GB of log is outstanding, see FORK.md.
 const CHECKPOINT_STALL_GRACE_MS = 5_000;
 const CHECKPOINT_STALLED_CEILING_FRAMES = 100 * CHECKPOINT_BACKPRESSURE_FRAMES;
 
@@ -696,8 +696,10 @@ const startCheckpointWorker = Effect.fnUntraced(function* (
   type Waiter = { resume: () => void; cancelled: boolean };
   const waiters: Array<Waiter> = [];
   let elected: Waiter | undefined;
-  // fork: when the checkpoint last moved while it was holding writers, see FORK.md.
+  // fork: when the checkpoint last moved while it was holding writers, in monotonic time so a
+  // wall-clock change can't open the gate early or stretch the wait, see FORK.md.
   const clock = yield* Clock.Clock;
+  const monotonicMillis = () => Number(clock.monotonicTimeNanosUnsafe() / 1_000_000n);
   let heldSince: number | undefined;
   let graceTimer: Fiber.Fiber<void> | undefined;
   let warnedStalled = false;
@@ -705,7 +707,7 @@ const startCheckpointWorker = Effect.fnUntraced(function* (
     checkpointed < log && (blocked || log - checkpointed >= CHECKPOINT_BACKPRESSURE_FRAMES); // fork: FORK.md — a pinned reader can prevent reset after checkpointing finishes.
   const checkpointStalled = () =>
     heldSince !== undefined &&
-    clock.currentTimeMillisUnsafe() - heldSince >= CHECKPOINT_STALL_GRACE_MS &&
+    monotonicMillis() - heldSince >= CHECKPOINT_STALL_GRACE_MS &&
     log - checkpointed < CHECKPOINT_STALLED_CEILING_FRAMES;
   const gated = () =>
     !stopped &&
@@ -718,7 +720,7 @@ const startCheckpointWorker = Effect.fnUntraced(function* (
     if (!overBackpressure()) {
       heldSince = undefined;
       warnedStalled = false;
-    } else if (moved || heldSince === undefined) heldSince = clock.currentTimeMillisUnsafe();
+    } else if (moved || heldSince === undefined) heldSince = monotonicMillis();
   };
   const wake = () => {
     if (!gated() && elected === undefined) {
@@ -735,9 +737,7 @@ const startCheckpointWorker = Effect.fnUntraced(function* (
     }
     // fork: nothing else wakes the waiters when the grace period ends, see FORK.md.
     const graceLeft =
-      heldSince === undefined
-        ? 0
-        : heldSince + CHECKPOINT_STALL_GRACE_MS - clock.currentTimeMillisUnsafe();
+      heldSince === undefined ? 0 : heldSince + CHECKPOINT_STALL_GRACE_MS - monotonicMillis();
     if (waiters.length > 0 && graceLeft > 0 && graceTimer === undefined && gated()) {
       graceTimer = runFork(
         Effect.sleep(graceLeft).pipe(
@@ -750,7 +750,12 @@ const startCheckpointWorker = Effect.fnUntraced(function* (
         ),
       );
     }
-    if (waiters.length === 0 && elected === undefined) worker.unref();
+    if (waiters.length === 0 && elected === undefined) {
+      worker.unref();
+      // fork: with nobody waiting the timer has no job, and it mustn't keep the process alive.
+      graceTimer?.interruptUnsafe();
+      graceTimer = undefined;
+    }
   };
   const release = (waiter: Waiter) => {
     waiter.cancelled = true;

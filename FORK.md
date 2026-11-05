@@ -210,11 +210,13 @@ The existing journal size limit and checkpoint durability settings are unchanged
 
 A pinned reader also held writers once 10,000 frames were outstanding, because the checkpoint can't copy past the
 reader's snapshot. On Nov 4 one agent's read-only `LIKE` scan of the live database stopped every save for 30.7
-minutes. Backpressure now only waits for a checkpoint that's moving: if `checkpointed` hasn't changed for 5 seconds,
-writers go ahead, and a checkpoint that moves again restarts the 5 seconds. A slow fsync gets the same treatment. The
-log then grows until the reader closes, up to 1,000,000 outstanding frames (about 4 GB at 4 KB pages), where writers
-wait as they did before. Afterwards the checkpoint catches up and truncation returns the file to the size limit. Tests:
-`nodeSqliteClient.fork.test.ts`.
+minutes. Backpressure now only waits for a checkpoint that's moving: if `checkpointed` hasn't changed for 5
+seconds, writers go ahead, and a checkpoint that moves again restarts the 5 seconds. A slow fsync gets the same
+treatment. The log then grows until the reader closes. At 1,000,000 outstanding frames (about 4 GB at 4 KB pages)
+later writes wait as they did before. That's a threshold, not a cap on the file: a statement or transaction
+already running can go past it, and the file also keeps frames already copied until no reader needs them. Elapsed
+time is monotonic, so a wall-clock change can't open the gate early or stretch the wait. Afterwards the checkpoint
+catches up and truncation returns the file to the size limit. Tests: `nodeSqliteClient.fork.test.ts`.
 
 Session and WebSocket-ticket verification reserve a separate, lazy read-only worker for their indexed session
 lookup. They retain the writer inside an existing write transaction. Upstream added a pool of four reader

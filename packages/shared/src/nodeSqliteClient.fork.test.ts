@@ -312,11 +312,14 @@ it.effect("holds writers again when the checkpoint moves or the log reaches the 
       report(50_000, 0);
       yield* Fiber.join(atCeiling);
 
-      // A checkpoint that moves gets another grace period.
+      // A checkpoint that moves while a writer waits starts the grace period again.
       report(50_000, 1_000);
       const moving = yield* forkWrite("moving");
-      // The silent worker sends nothing, so only the grace timer can wake this write. Its fiber starts next.
+      // The silent worker sends nothing, so only the grace timer can wake this write. This gives its
+      // fiber a turn to start. If it started later the write would still finish, just on a later timer.
       yield* Effect.yieldNow;
+      yield* TestClock.adjust("4 seconds");
+      report(50_000, 2_000);
       yield* TestClock.adjust("4 seconds");
       assert.equal(moving.pollUnsafe(), undefined);
       yield* TestClock.adjust("1 second");
