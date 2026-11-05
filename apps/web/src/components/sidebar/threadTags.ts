@@ -17,7 +17,12 @@ import { environmentServerConfigsAtom, serverEnvironment } from "~/state/server"
 import { useAtomCommand } from "~/state/use-atom-command";
 import type { ThreadActionMenuId, ThreadTagMenuState } from "../threadActionMenu.logic";
 import { stackedThreadToast, toastManager } from "../ui/toast";
-import { type BulkTagMenuId, buildBulkTagPatches, bulkTagAdds } from "./bulkThreadActions";
+import {
+  type BulkTagMenuId,
+  buildBulkTagPatches,
+  bulkAllTags,
+  bulkTagAdds,
+} from "./bulkThreadActions";
 import { requestNewThreadTag } from "./NewThreadTagDialog";
 
 const NO_TAGS: ReadonlyArray<string> = [];
@@ -149,7 +154,7 @@ export function useBulkThreadTagMenuActions() {
   return async (threadRefs: ReadonlyArray<ScopedThreadRef>, action: BulkTagMenuId) => {
     const menus = threadRefs.flatMap((threadRef) => readThreadTagMenu(threadRef) ?? []);
     if (action === "tag-new") {
-      const tag = await requestNewThreadTag(menus.flatMap((menu) => menu.all));
+      const tag = await requestNewThreadTag(bulkAllTags(menus));
       if (tag !== null) await write(threadRefs, tag, true);
       return;
     }
