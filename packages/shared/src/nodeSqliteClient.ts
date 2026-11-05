@@ -513,6 +513,9 @@ const makeReader = Effect.fnUntraced(function* (
 const CHECKPOINT_FRAMES = 1000;
 const CHECKPOINT_IDLE_MS = 100;
 const CHECKPOINT_BACKPRESSURE_FRAMES = 10 * CHECKPOINT_FRAMES;
+// fork: a checkpoint that stops moving stops holding writers, up to about 4 GB of log, see FORK.md.
+const CHECKPOINT_STALL_GRACE_MS = 5_000;
+const CHECKPOINT_STALLED_CEILING_FRAMES = 100 * CHECKPOINT_BACKPRESSURE_FRAMES;
 
 const readSafeSqliteInteger = (value: unknown) => {
   const number = typeof value === "bigint" ? Number(value) : value;
@@ -693,16 +696,59 @@ const startCheckpointWorker = Effect.fnUntraced(function* (
   type Waiter = { resume: () => void; cancelled: boolean };
   const waiters: Array<Waiter> = [];
   let elected: Waiter | undefined;
+  // fork: when the checkpoint last moved while it was holding writers, see FORK.md.
+  const clock = yield* Clock.Clock;
+  let heldSince: number | undefined;
+  let graceTimer: Fiber.Fiber<void> | undefined;
+  let warnedStalled = false;
+  const overBackpressure = () =>
+    checkpointed < log && (blocked || log - checkpointed >= CHECKPOINT_BACKPRESSURE_FRAMES); // fork: FORK.md — a pinned reader can prevent reset after checkpointing finishes.
+  const checkpointStalled = () =>
+    heldSince !== undefined &&
+    clock.currentTimeMillisUnsafe() - heldSince >= CHECKPOINT_STALL_GRACE_MS &&
+    log - checkpointed < CHECKPOINT_STALLED_CEILING_FRAMES;
   const gated = () =>
     !stopped &&
     !writer.isTransaction &&
-    (unknown ||
-      truncate !== undefined ||
-      (checkpointed < log && (blocked || log - checkpointed >= CHECKPOINT_BACKPRESSURE_FRAMES))); // fork: FORK.md — a pinned reader can prevent reset after checkpointing finishes.
+    (unknown || truncate !== undefined || (overBackpressure() && !checkpointStalled()));
+  const noteFrames = (nextLog: number, nextCheckpointed: number) => {
+    const moved = nextCheckpointed !== checkpointed;
+    log = nextLog;
+    checkpointed = nextCheckpointed;
+    if (!overBackpressure()) {
+      heldSince = undefined;
+      warnedStalled = false;
+    } else if (moved || heldSince === undefined) heldSince = clock.currentTimeMillisUnsafe();
+  };
   const wake = () => {
     if (!gated() && elected === undefined) {
+      if (waiters.length > 0 && !warnedStalled && overBackpressure() && checkpointStalled()) {
+        warnedStalled = true;
+        runFork(
+          Effect.logWarning("SQLite checkpoint is not moving; writes continue past backpressure", {
+            outstandingFrames: log - checkpointed,
+          }),
+        );
+      }
       elected = waiters.shift();
       elected?.resume();
+    }
+    // fork: nothing else wakes the waiters when the grace period ends, see FORK.md.
+    const graceLeft =
+      heldSince === undefined
+        ? 0
+        : heldSince + CHECKPOINT_STALL_GRACE_MS - clock.currentTimeMillisUnsafe();
+    if (waiters.length > 0 && graceLeft > 0 && graceTimer === undefined && gated()) {
+      graceTimer = runFork(
+        Effect.sleep(graceLeft).pipe(
+          Effect.andThen(
+            Effect.sync(() => {
+              graceTimer = undefined;
+              wake();
+            }),
+          ),
+        ),
+      );
     }
     if (waiters.length === 0 && elected === undefined) worker.unref();
   };
@@ -743,8 +789,7 @@ const startCheckpointWorker = Effect.fnUntraced(function* (
       const nextCheckpointed = readSafeSqliteInteger(state?.checkpointed);
       if (nextLog === undefined || nextCheckpointed === undefined)
         throw new Error("Invalid WAL frame counts");
-      log = nextLog;
-      checkpointed = nextCheckpointed;
+      noteFrames(nextLog, nextCheckpointed);
       unknown = false;
     } catch {
       unknown = true;
@@ -809,9 +854,8 @@ const startCheckpointWorker = Effect.fnUntraced(function* (
       "blocked" in message &&
       typeof message.blocked === "boolean"
     ) {
-      log = message.log;
-      checkpointed = message.checkpointed;
       blocked = message.blocked;
+      noteFrames(message.log, message.checkpointed);
       unknown = false;
     }
     // Even a stale snapshot must retire its request so a newer check can run.
@@ -826,6 +870,7 @@ const startCheckpointWorker = Effect.fnUntraced(function* (
     Effect.promise(() => {
       stopped = true;
       truncate = undefined;
+      graceTimer?.interruptUnsafe();
       wake();
       return worker.terminate();
     }),
