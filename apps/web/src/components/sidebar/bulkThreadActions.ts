@@ -25,6 +25,18 @@ export function buildBulkMenuItem<T extends string>(
 
 export type BulkTagMenuId = "tags" | `tag:${string}` | "tag-new";
 
+/** Every tag the selected threads' servers know, once each, however many threads share it. */
+export function bulkAllTags(menus: ReadonlyArray<ThreadTagMenuState>): ReadonlyArray<string> {
+  const tags = new Map<string, string>();
+  for (const menu of menus) {
+    for (const tag of menu.all) {
+      const key = normalizeThreadTag(tag).toLocaleLowerCase();
+      if (!tags.has(key)) tags.set(key, tag);
+    }
+  }
+  return [...tags.values()].toSorted((a, b) => a.localeCompare(b));
+}
+
 /**
  * The Tags submenu for several threads, or null when none of their servers can hold tags.
  * Native menus have no mixed state, so a tag only some threads have says how many.
@@ -33,14 +45,7 @@ export function buildBulkTagMenuItem(
   menus: ReadonlyArray<ThreadTagMenuState>,
 ): ContextMenuItem<BulkTagMenuId> | null {
   if (menus.length === 0) return null;
-  const tags = new Map<string, string>();
-  for (const menu of menus) {
-    for (const tag of menu.all) {
-      const key = normalizeThreadTag(tag).toLocaleLowerCase();
-      if (!tags.has(key)) tags.set(key, tag);
-    }
-  }
-  const all = [...tags.values()].toSorted((a, b) => a.localeCompare(b));
+  const all = bulkAllTags(menus);
   return {
     id: "tags",
     label: `Tags (${menus.length})`,

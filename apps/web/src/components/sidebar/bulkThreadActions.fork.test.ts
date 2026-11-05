@@ -5,6 +5,7 @@ import {
   buildBulkMenuItem,
   buildBulkTagMenuItem,
   buildBulkTagPatches,
+  bulkAllTags,
   bulkTagAdds,
   currentPinOrderKeys,
   planBulkPinOrderKeys,
@@ -62,6 +63,13 @@ describe("buildBulkTagMenuItem", () => {
   it("offers only New tag when there are no tags yet", () => {
     const item = buildBulkTagMenuItem([menu([]), menu([])]);
     expect(item?.children).toEqual([{ id: "tag-new", label: "New tag…", separatorBefore: false }]);
+  });
+});
+
+describe("bulkAllTags", () => {
+  it("lists a tag once however many selected threads share it", () => {
+    const all = ["bugs", "release"];
+    expect(bulkAllTags([menu([], all), menu([], all), menu([], all)])).toEqual(all);
   });
 });
 
