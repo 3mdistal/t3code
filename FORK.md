@@ -94,6 +94,15 @@ their copy button stay, for reporting by hand.
   only the request handler refuses. Upstream's `cli/triage.test.ts` launches agents through `t3 triage`, so it
   skips them while triage is off.
 
+### `t3 thread send --environment` (`fork:`)
+
+`--environment <id>` sends to a thread on a linked machine, so task wake can pass Alice's own board answers to a
+thread on her Mac. `t3_thread_send` already routes on `environmentId`, and the CLI signs in as an MCP client session,
+which may forward; the flag only names the target. `--wait` is refused with it, since the CLI follows runs here. Each
+call signs in afresh and a request key is scoped to its session, so a retry can't be deduplicated: a caller that must
+send once records its attempt first. File: `apps/server/src/cli/thread.ts`. Test:
+`apps/server/src/cli/thread.fork.test.ts`.
+
 ### Codex's `$` menu hides `user-invocable: false` skills (`fork:`)
 
 Skills Alice doesn't type carry `user-invocable: false` in their SKILL.md frontmatter. T3 already hides those
