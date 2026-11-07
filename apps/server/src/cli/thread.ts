@@ -1,4 +1,5 @@
 import {
+  EnvironmentId,
   OrchestratorMcpFailure,
   OrchestratorMcpThreadListResult,
   OrchestratorMcpThreadReadResult,
@@ -554,6 +555,27 @@ const decodeThreadId = (value: string) =>
     Effect.mapError(() => new ThreadUsageError({ detail: `'${value}' is not a thread id.` })),
   );
 
+const decodeEnvironmentIdValue = Schema.decodeUnknownEffect(EnvironmentId);
+
+// fork: lets a script on this machine reach a thread on a linked one, such as
+// task wake relaying Alice's words to her Mac (see FORK.md).
+export const decodeEnvironment = Effect.fn("cli.thread.decodeEnvironment")(function* (
+  value: Option.Option<string>,
+  wait: boolean,
+) {
+  if (Option.isNone(value)) return undefined;
+  if (wait) {
+    return yield* new ThreadUsageError({
+      detail: "--wait follows runs on this machine, so it can't go with --environment.",
+    });
+  }
+  return yield* decodeEnvironmentIdValue(value.value.trim()).pipe(
+    Effect.mapError(
+      () => new ThreadUsageError({ detail: `'${value.value}' is not an environment id.` }),
+    ),
+  );
+});
+
 // fork: lets scripts start a thread at a chosen effort, such as the sync
 // script's conflict thread (see FORK.md).
 export const decodeModelOptions = (values: ReadonlyArray<string>) =>
@@ -700,6 +722,11 @@ const threadSendCommand = Command.make("send", {
   ...projectLocationFlags,
   thread: threadArgument,
   message: messageArgument,
+  // fork: see decodeEnvironment.
+  environment: Flag.String("environment").pipe(
+    Flag.withDescription("Linked environment the thread is in. Defaults to this one."),
+    Flag.optional,
+  ),
   wait: waitFlag,
   json: jsonFlag,
 }).pipe(
@@ -710,12 +737,18 @@ const threadSendCommand = Command.make("send", {
     Effect.gen(function* () {
       const threadId = yield* decodeThreadId(flags.thread);
       const message = yield* readMessageArgument(flags.message);
+      const environmentId = yield* decodeEnvironment(flags.environment, flags.wait);
       yield* withThreadTools(
         flags,
         Effect.fn("cli.thread.send")(function* (tools) {
           const sent = yield* tools.call(
             "t3_thread_send",
-            { threadId, message, mode: "queue" },
+            {
+              threadId,
+              message,
+              mode: "queue",
+              ...(environmentId === undefined ? {} : { environmentId }),
+            },
             OrchestratorMcpThreadSendResult,
           );
           if (flags.wait) {
