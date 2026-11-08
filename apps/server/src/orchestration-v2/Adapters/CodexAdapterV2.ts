@@ -86,6 +86,14 @@ import type {
 import * as CodexClient from "effect-codex-app-server/client";
 import * as CodexErrors from "effect-codex-app-server/errors";
 import * as CodexSchema from "effect-codex-app-server/schema";
+// fork: full access can review flagged commands.
+import {
+  CODEX_REVIEWED_FULL_ACCESS_T3_SERVER,
+  CODEX_REVIEWED_FULL_ACCESS_TURN_DEFAULTS,
+  codexAutoReviewNotice,
+  codexReviewedFullAccessThreadConfig,
+  codexUnreviewedMcpServers,
+} from "./CodexReviewedFullAccess.ts";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Digest from "effect/crypto/Digest";
@@ -816,8 +824,15 @@ export const buildCodexTurnStartParams = Effect.fn("CodexAdapterV2.buildCodexTur
     readonly cyberAccess?: { readonly defaultProgram: string | undefined } | undefined;
     /** The user's `model_reasoning_summary` from the Codex config, when set. */
     readonly configuredReasoningSummary?: CodexSchema.V2TurnStartParams__ReasoningSummary;
+    // fork: full access can review flagged commands.
+    readonly reviewFlaggedCommandsInFullAccess?: boolean | undefined;
   }) {
-    const runtimeModeDefaults = codexRuntimeModeTurnDefaults(input.runtimePolicy.runtimeMode);
+    // fork: full access can review flagged commands.
+    const runtimeModeDefaults =
+      input.reviewFlaggedCommandsInFullAccess === true &&
+      input.runtimePolicy.runtimeMode === "full-access"
+        ? CODEX_REVIEWED_FULL_ACCESS_TURN_DEFAULTS
+        : codexRuntimeModeTurnDefaults(input.runtimePolicy.runtimeMode);
     const approvalPolicy =
       input.runtimePolicy.approvalPolicy === undefined
         ? runtimeModeDefaults.approvalPolicy
@@ -1529,12 +1544,14 @@ function codexThreadRuntimeParams(input: {
   readonly stdioMcpServers?: ReadonlyArray<string>;
   readonly modelSelection?: { readonly model: string };
   readonly runtimePolicy?: ProviderAdapter.ProviderAdapterV2RuntimePolicy;
+  // fork: set only when full access reviews flagged commands; these servers skip that review.
+  readonly unreviewedMcpServers?: ReadonlyArray<string> | undefined;
 }): {
   readonly cwd?: string;
   readonly model?: string;
   readonly config: Readonly<Record<string, Schema.Json>>;
 } {
-  const { mcpSession } = input;
+  const { mcpSession, unreviewedMcpServers } = input;
   const t3Server =
     mcpSession === undefined
       ? undefined
@@ -1542,12 +1559,18 @@ function codexThreadRuntimeParams(input: {
           url: mcpSession.endpoint,
           tool_timeout_sec: CODEX_T3_MCP_TOOL_TIMEOUT_SEC,
           http_headers: { Authorization: mcpSession.authorizationHeader },
+          // fork: full access can review flagged commands.
+          ...(unreviewedMcpServers === undefined ? {} : CODEX_REVIEWED_FULL_ACCESS_T3_SERVER),
         };
   return {
     ...(input.runtimePolicy?.cwd == null ? {} : { cwd: input.runtimePolicy.cwd }),
     ...(input.modelSelection === undefined ? {} : { model: input.modelSelection.model }),
     config: {
       ...CODEX_THREAD_CONFIG,
+      // fork: full access can review flagged commands.
+      ...(unreviewedMcpServers === undefined
+        ? {}
+        : codexReviewedFullAccessThreadConfig(unreviewedMcpServers)),
       // One app-server serves many threads, so the id goes in per-thread shell config, not its env.
       ...(input.threadId === null
         ? {}
@@ -2092,21 +2115,34 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
         // A failed open is discarded, so the next turn spawns the updated binary.
         if (adapterOptions.compatibility !== undefined) yield* ensureInitialized;
         // Read per thread: a workspace's project config can add its own servers.
-        const readStdioMcpServers = (cwd: string | null | undefined) =>
-          ensureInitialized.pipe(
+        // fork: the same read names the servers reviewed full access exempts; see FORK.md.
+        const readMcpServers = (
+          cwd: string | null | undefined,
+          runtimePolicy?: ProviderAdapter.ProviderAdapterV2RuntimePolicy,
+        ) => {
+          const unreviewed = (mcpServers: unknown) =>
+            codexUnreviewedMcpServers(adapterOptions.settings, runtimePolicy, mcpServers);
+          return ensureInitialized.pipe(
             Effect.andThen(
               client.request("config/read", {
                 ...(cwd == null ? {} : { cwd }),
                 includeLayers: false,
               }),
             ),
-            Effect.map((response) => codexStdioMcpServerNames(response.config.mcp_servers)),
+            Effect.map((response) => ({
+              stdioMcpServers: codexStdioMcpServerNames(response.config.mcp_servers),
+              unreviewedMcpServers: unreviewed(response.config.mcp_servers),
+            })),
             Effect.catch(() =>
               Effect.logDebug("Codex config read failed.").pipe(
-                Effect.as<ReadonlyArray<string>>([]),
+                Effect.as({
+                  stdioMcpServers: [] as ReadonlyArray<string>,
+                  unreviewedMcpServers: unreviewed(null),
+                }),
               ),
             ),
           );
+        };
         const now = yield* DateTime.now;
         const session = providerSession({
           providerSessionId: input.providerSessionId,
@@ -4892,6 +4928,44 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           return { node, request, turnItem, nativeQuestionIds };
         });
 
+        // fork: show what auto-review stopped, since the rejection otherwise only reaches the model.
+        yield* client.handleServerNotification("item/autoApprovalReview/completed", (payload) =>
+          Effect.gen(function* () {
+            const notice = codexAutoReviewNotice(payload);
+            if (notice === undefined) return;
+            const resolved = yield* resolveItemEventContext(payload.turnId);
+            if (resolved === undefined) return;
+            const { context } = resolved;
+            const nativeItemId = `auto-review:${payload.reviewId}`;
+            const completedAt = DateTime.makeUnsafe(payload.completedAtMs);
+            yield* emitProviderEvent({
+              type: "turn_item.updated",
+              driver: CODEX_PROVIDER,
+              turnItem: {
+                id: idAllocator.derive.turnItemFromProviderItem({
+                  driver: CODEX_PROVIDER,
+                  nativeItemId,
+                }),
+                threadId: context.projectionThreadId,
+                runId: context.projectionRunId,
+                nodeId: context.providerNodeId,
+                providerThreadId: context.providerThread.id,
+                providerTurnId: context.providerTurnId,
+                nativeItemRef: { driver: CODEX_PROVIDER, nativeId: nativeItemId, strength: "weak" },
+                parentItemId: null,
+                ordinal: yield* resolveItemOrdinal(context, nativeItemId),
+                type: "system_notice",
+                status: "completed",
+                title: notice.title,
+                message: notice.message,
+                startedAt: completedAt,
+                completedAt,
+                updatedAt: completedAt,
+              },
+            });
+          }),
+        );
+
         yield* client.handleServerNotification("item/agentMessage/delta", (payload) =>
           Effect.gen(function* () {
             const context = (yield* Ref.get(activeTurns)).get(payload.turnId);
@@ -7628,6 +7702,9 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               omitServiceTier: adapterOptions.resolveRuntime !== undefined,
               ...(turnInput.appContext === undefined ? {} : { appContext: turnInput.appContext }),
               ...(configuredReasoningSummary === undefined ? {} : { configuredReasoningSummary }),
+              // fork: full access can review flagged commands.
+              reviewFlaggedCommandsInFullAccess:
+                adapterOptions.settings.reviewFlaggedCommandsInFullAccess,
             });
             yield* Ref.update(pendingRootTurns, (current) => {
               const updated = new Map(current);
@@ -7840,15 +7917,15 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             Effect.catchIf(isCodexThreadNotFoundError, () =>
               Effect.all([
                 readMcpSession(providerThread.appThreadId),
-                readStdioMcpServers(undefined),
+                readMcpServers(undefined), // fork: see readMcpServers.
               ]).pipe(
-                Effect.flatMap(([mcpSession, stdioMcpServers]) =>
+                Effect.flatMap(([mcpSession, mcpServers]) =>
                   resumeNativeThread(threadId, {
                     excludeTurns: true,
                     ...codexThreadRuntimeParams({
                       threadId: providerThread.appThreadId,
                       mcpSession,
-                      stdioMcpServers,
+                      ...mcpServers,
                     }),
                   }),
                 ),
@@ -8015,15 +8092,16 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               Effect.andThen(
                 Effect.all([
                   mcpSessions.read(threadInput.threadId),
-                  readStdioMcpServers(threadInput.runtimePolicy.cwd),
+                  // fork: full access can review flagged commands.
+                  readMcpServers(threadInput.runtimePolicy.cwd, threadInput.runtimePolicy),
                 ]),
               ),
-              Effect.flatMap(([mcpSession, stdioMcpServers]) =>
+              Effect.flatMap(([mcpSession, mcpServers]) =>
                 client.request("thread/start", {
                   ...codexThreadRuntimeParams({
                     threadId: threadInput.threadId,
                     mcpSession,
-                    stdioMcpServers,
+                    ...mcpServers,
                     modelSelection: threadInput.modelSelection,
                     runtimePolicy: threadInput.runtimePolicy,
                   }),
@@ -8061,7 +8139,11 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 ...codexThreadRuntimeParams({
                   threadId: appThreadId,
                   mcpSession: yield* readMcpSession(appThreadId),
-                  stdioMcpServers: yield* readStdioMcpServers(threadInput.runtimePolicy?.cwd),
+                  // fork: full access can review flagged commands.
+                  ...(yield* readMcpServers(
+                    threadInput.runtimePolicy?.cwd,
+                    threadInput.runtimePolicy,
+                  )),
                   ...(threadInput.modelSelection === undefined
                     ? {}
                     : { modelSelection: threadInput.modelSelection }),
@@ -8959,7 +9041,8 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                   ...codexThreadRuntimeParams({
                     threadId: threadInput.providerThread.appThreadId,
                     mcpSession: yield* readMcpSession(threadInput.providerThread.appThreadId),
-                    stdioMcpServers: yield* readStdioMcpServers(undefined),
+                    // fork: full access can review flagged commands.
+                    ...(yield* readMcpServers(undefined, input.runtimePolicy)),
                   }),
                 });
               }
@@ -9008,7 +9091,11 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 ...codexThreadRuntimeParams({
                   threadId: threadInput.targetThreadId,
                   mcpSession: yield* mcpSessions.read(threadInput.targetThreadId),
-                  stdioMcpServers: yield* readStdioMcpServers(threadInput.runtimePolicy?.cwd),
+                  // fork: full access can review flagged commands.
+                  ...(yield* readMcpServers(
+                    threadInput.runtimePolicy?.cwd,
+                    threadInput.runtimePolicy,
+                  )),
                   ...(threadInput.modelSelection === undefined
                     ? {}
                     : { modelSelection: threadInput.modelSelection }),
