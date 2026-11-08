@@ -1207,6 +1207,20 @@ machine needs no patch: stock `t3_thread_launch` already takes that strategy.
   starts from the parent's commit and refuses `baseRef`. Upstream's "refuses worktree isolation for a task there"
   in `RemoteDelegation.test.ts` passes unchanged, as the missing `baseRef` refusal.
 
+### Open approval opens a child on its own machine (`fork:`)
+
+A parent's "Subagent waiting" line lists children waiting on the user, including tasks delegated to a linked
+machine and their subagents. Its Open approval or Open question button, and each child's name, opened the
+child under the parent's machine, so a task waiting on another machine opened nowhere. Each child now opens on
+the machine its shell came from. The phone's banner had the same mistake and gets the same fix. Other links to a
+remote task, such as its timeline card and the relationships menu, already used the task's machine.
+
+- `apps/web/src/components/chat/ThreadActivityBanners.tsx`: `childInputNowItem` passes each child's machine.
+- `apps/web/src/components/chat/useThreadLifecycle.tsx`: the related-thread opener takes an optional machine,
+  defaulting to the open thread's, and reads that machine's connection and settings.
+- `apps/mobile/src/features/threads/ThreadDetailScreen.tsx`: the child-input banner opens the child's machine.
+- Test: `apps/web/src/components/chat/ThreadActivityBanners.fork.test.tsx`.
+
 ## Versions
 
 A release is `vX.Y.Z-alice.N`. `X.Y.Z` is the upstream stable tag the stack sits on, and `N` counts the fork's
