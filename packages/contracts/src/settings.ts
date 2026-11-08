@@ -774,6 +774,15 @@ export const CodexSettings = makeProviderSettingsSchema(
         description: "Additional CLI arguments passed to codex app-server on session start.",
       }),
     ),
+    // fork: see "Full access can review flagged commands" in FORK.md.
+    reviewFlaggedCommandsInFullAccess: Schema.optionalKey(Schema.Boolean).pipe(
+      Schema.annotateKey({
+        title: "Review flagged commands in full access",
+        description:
+          "Send commands Codex flags in full access to its auto-review instead of running them. Connector calls aren't reviewed unless their own config asks. Takes effect after T3 restarts.",
+        providerSettingsForm: { control: "switch" },
+      }),
+    ),
     customModels: Schema.Array(CustomModelSetting).pipe(
       Schema.withDecodingDefault(Effect.succeed([])),
       Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
