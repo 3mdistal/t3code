@@ -80,6 +80,14 @@ import type {
 import * as CodexClient from "effect-codex-app-server/client";
 import * as CodexErrors from "effect-codex-app-server/errors";
 import * as CodexSchema from "effect-codex-app-server/schema";
+// fork: full access can review flagged commands.
+import {
+  CODEX_REVIEWED_FULL_ACCESS_T3_SERVER,
+  CODEX_REVIEWED_FULL_ACCESS_TURN_DEFAULTS,
+  codexAutoReviewNotice,
+  codexReviewedFullAccessThreadConfig,
+  readCodexConfiguredMcpServers,
+} from "./CodexReviewedFullAccess.ts";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
@@ -748,8 +756,15 @@ export const buildCodexTurnStartParams = Effect.fn("CodexAdapterV2.buildCodexTur
     /** ChatGPT token sharing does not accept service tiers. */
     readonly omitServiceTier?: boolean;
     readonly appContext?: ProviderAdapter.ProviderAdapterV2TurnInput["appContext"];
+    // fork: full access can review flagged commands.
+    readonly reviewFlaggedCommandsInFullAccess?: boolean | undefined;
   }) {
-    const runtimeModeDefaults = codexRuntimeModeTurnDefaults(input.runtimePolicy.runtimeMode);
+    // fork: full access can review flagged commands.
+    const runtimeModeDefaults =
+      input.reviewFlaggedCommandsInFullAccess === true &&
+      input.runtimePolicy.runtimeMode === "full-access"
+        ? CODEX_REVIEWED_FULL_ACCESS_TURN_DEFAULTS
+        : codexRuntimeModeTurnDefaults(input.runtimePolicy.runtimeMode);
     const approvalPolicy =
       input.runtimePolicy.approvalPolicy === undefined
         ? runtimeModeDefaults.approvalPolicy
@@ -1337,17 +1352,23 @@ function codexThreadRuntimeParams(input: {
   readonly mcpSession: McpProviderSession.McpProviderSessionConfig | undefined;
   readonly modelSelection?: { readonly model: string };
   readonly runtimePolicy?: ProviderAdapter.ProviderAdapterV2RuntimePolicy;
+  // fork: set only when full access reviews flagged commands; these servers skip that review.
+  readonly unreviewedMcpServers?: ReadonlyArray<string> | undefined;
 }): {
   readonly cwd?: string;
   readonly model?: string;
   readonly config: Readonly<Record<string, Schema.Json>>;
 } {
-  const { mcpSession } = input;
+  const { mcpSession, unreviewedMcpServers } = input;
   return {
     ...(input.runtimePolicy?.cwd == null ? {} : { cwd: input.runtimePolicy.cwd }),
     ...(input.modelSelection === undefined ? {} : { model: input.modelSelection.model }),
     config: {
       ...CODEX_THREAD_CONFIG,
+      // fork: full access can review flagged commands.
+      ...(unreviewedMcpServers === undefined
+        ? {}
+        : codexReviewedFullAccessThreadConfig(unreviewedMcpServers)),
       ...(mcpSession === undefined
         ? {}
         : {
@@ -1358,6 +1379,8 @@ function codexThreadRuntimeParams(input: {
               http_headers: {
                 Authorization: mcpSession.authorizationHeader,
               },
+              // fork: full access can review flagged commands.
+              ...(unreviewedMcpServers === undefined ? {} : CODEX_REVIEWED_FULL_ACCESS_T3_SERVER),
             },
           }),
     },
@@ -1758,6 +1781,19 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
         );
         // A failed open is discarded, so the next turn spawns the updated binary.
         if (adapterOptions.compatibility !== undefined) yield* ensureInitialized;
+        // fork: full access can review flagged commands; connector calls stay unreviewed.
+        const readUnreviewedMcpServers = Effect.fnUntraced(function* (
+          runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy | undefined,
+        ) {
+          if (
+            adapterOptions.settings.reviewFlaggedCommandsInFullAccess !== true ||
+            runtimePolicy?.runtimeMode !== "full-access"
+          ) {
+            return undefined;
+          }
+          yield* ensureInitialized;
+          return yield* readCodexConfiguredMcpServers(client, runtimePolicy.cwd);
+        });
         const now = yield* DateTime.now;
         const session = providerSession({
           providerSessionId: input.providerSessionId,
@@ -4304,6 +4340,44 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           return { node, request, turnItem };
         });
 
+        // fork: show what auto-review stopped, since the rejection otherwise only reaches the model.
+        yield* client.handleServerNotification("item/autoApprovalReview/completed", (payload) =>
+          Effect.gen(function* () {
+            const notice = codexAutoReviewNotice(payload);
+            if (notice === undefined) return;
+            const resolved = yield* resolveItemEventContext(payload.turnId);
+            if (resolved === undefined) return;
+            const { context } = resolved;
+            const nativeItemId = `auto-review:${payload.reviewId}`;
+            const completedAt = DateTime.makeUnsafe(payload.completedAtMs);
+            yield* emitProviderEvent({
+              type: "turn_item.updated",
+              driver: CODEX_PROVIDER,
+              turnItem: {
+                id: idAllocator.derive.turnItemFromProviderItem({
+                  driver: CODEX_PROVIDER,
+                  nativeItemId,
+                }),
+                threadId: context.projectionThreadId,
+                runId: context.projectionRunId,
+                nodeId: context.providerNodeId,
+                providerThreadId: context.providerThread.id,
+                providerTurnId: context.providerTurnId,
+                nativeItemRef: { driver: CODEX_PROVIDER, nativeId: nativeItemId, strength: "weak" },
+                parentItemId: null,
+                ordinal: yield* resolveItemOrdinal(context, nativeItemId),
+                type: "system_notice",
+                status: "completed",
+                title: notice.title,
+                message: notice.message,
+                startedAt: completedAt,
+                completedAt,
+                updatedAt: completedAt,
+              },
+            });
+          }),
+        );
+
         yield* client.handleServerNotification("item/agentMessage/delta", (payload) =>
           Effect.gen(function* () {
             const context = (yield* Ref.get(activeTurns)).get(payload.turnId);
@@ -6652,6 +6726,9 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               deviceToolsAvailable: mcpSession?.capabilities?.has("device") ?? false,
               omitServiceTier: adapterOptions.resolveRuntime !== undefined,
               ...(turnInput.appContext === undefined ? {} : { appContext: turnInput.appContext }),
+              // fork: full access can review flagged commands.
+              reviewFlaggedCommandsInFullAccess:
+                adapterOptions.settings.reviewFlaggedCommandsInFullAccess,
             });
             yield* Ref.update(pendingRootTurns, (current) => {
               const updated = new Map(current);
@@ -6953,14 +7030,20 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           ensureThread: (threadInput) =>
             ensureInitialized.pipe(
               Effect.andThen(mcpSessions.read(threadInput.threadId)),
+              // fork: full access can review flagged commands.
               Effect.flatMap((mcpSession) =>
-                client.request(
-                  "thread/start",
-                  codexThreadRuntimeParams({
-                    mcpSession,
-                    modelSelection: threadInput.modelSelection,
-                    runtimePolicy: threadInput.runtimePolicy,
-                  }),
+                readUnreviewedMcpServers(threadInput.runtimePolicy).pipe(
+                  Effect.flatMap((unreviewedMcpServers) =>
+                    client.request(
+                      "thread/start",
+                      codexThreadRuntimeParams({
+                        mcpSession,
+                        modelSelection: threadInput.modelSelection,
+                        runtimePolicy: threadInput.runtimePolicy,
+                        unreviewedMcpServers,
+                      }),
+                    ),
+                  ),
                 ),
               ),
               Effect.map((response): OrchestrationV2ProviderThread =>
@@ -6985,10 +7068,15 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           resumeThread: Effect.fn("CodexAdapterV2.resumeThread")(
             function* (threadInput) {
               const nativeThreadId = yield* getNativeThreadId(threadInput.providerThread);
+              // fork: full access can review flagged commands.
+              const unreviewedMcpServers = yield* readUnreviewedMcpServers(
+                threadInput.runtimePolicy,
+              );
               const resume = client.raw.request("thread/resume", {
                 threadId: nativeThreadId,
                 excludeTurns: true,
                 ...codexThreadRuntimeParams({
+                  unreviewedMcpServers,
                   mcpSession: yield* readMcpSession(
                     threadInput.threadId ?? threadInput.providerThread.appThreadId,
                   ),
@@ -7772,10 +7860,13 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               }
               // thread/revert requires the thread loaded in this app-server; resume after restart or idle release.
               if (!loaded) {
+                // fork: full access can review flagged commands.
+                const unreviewedMcpServers = yield* readUnreviewedMcpServers(input.runtimePolicy);
                 yield* client.raw.request("thread/resume", {
                   threadId,
                   excludeTurns: true,
                   ...codexThreadRuntimeParams({
+                    unreviewedMcpServers,
                     mcpSession: yield* readMcpSession(threadInput.providerThread.appThreadId),
                     modelSelection: input.modelSelection,
                     runtimePolicy: input.runtimePolicy,
@@ -7820,6 +7911,19 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             function* (threadInput) {
               const threadId = yield* getNativeThreadId(threadInput.sourceProviderThread);
               const boundary = yield* resolveCodexForkBoundary(threadInput);
+              // fork: full access can review flagged commands.
+              const unreviewedMcpServers = yield* readUnreviewedMcpServers(
+                threadInput.runtimePolicy,
+              ).pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new ProviderAdapter.ProviderAdapterForkThreadError({
+                      driver: CODEX_PROVIDER,
+                      providerThreadId: threadInput.sourceProviderThread.id,
+                      cause,
+                    }),
+                ),
+              );
               const response = yield* ensureInitialized.pipe(
                 Effect.andThen(
                   client.request("thread/fork", {
@@ -7828,6 +7932,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                       ? {}
                       : { lastTurnId: boundary.lastTurnId }),
                     ...codexThreadRuntimeParams({
+                      unreviewedMcpServers,
                       mcpSession: yield* mcpSessions.read(threadInput.targetThreadId),
                       ...(threadInput.modelSelection === undefined
                         ? {}

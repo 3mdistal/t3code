@@ -1020,6 +1020,52 @@ changing it requires updating all three.
   The existing badge browser fixture returns an explicit empty projection; fork tests control delayed reads
   across reconnects, so completion assertions do not depend on a missing fixture server's response timing.
 
+### Full access can review flagged commands (`fork:`)
+
+A full-access Codex thread runs with `approvalPolicy: "never"`, so Codex refuses any command its classifier flags,
+such as a forced delete, with "blocked by policy". The thread can't ask anyone, and agents tend to wrap the command
+in another shell to get past the classifier. The new Codex setting "Review flagged commands in full access" sends
+those commands to Codex's auto-review instead, using a granular approval policy with the sandbox still off. Unflagged
+commands run as before. A command Codex's own rules forbid stays forbidden.
+
+Off `never`, Codex also reviews any MCP call not annotated as safe, whatever the granular flags say. So the setting
+adds `default_tools_approval_mode = "approve"` to the thread config for T3's server, each server `config/read`
+lists, and `apps._default`, at thread start, resume and native fork. A server or tool with its own approval mode keeps
+it. Some calls stay reviewed: plugin servers, and project-level servers in a thread with no folder, aren't in
+`config/read`; a dot in a server name would split the config path; and nested elicitations (from `node_repl`, say) are
+reviewed, which `never` accepted when empty. If `config/read` fails, the thread still starts, with a warning, and those
+calls are reviewed. A server removed from the config between that read and the thread start would fail the start,
+since the override leaves it with no transport.
+
+Codex ignores thread config when T3 rejoins a thread it still has loaded. So a loaded thread switched into full access
+has its connector calls reviewed, and one switched out of it keeps skipping review for them, until T3 unloads it when
+idle and Codex loads it again.
+
+The setting is read when Codex's session opens, and all threads on a Codex instance share one session, so a change
+applies after T3 restarts, or after every thread on the instance has gone idle long enough for the session to close.
+The setting's description says so. Reading it per turn would put a loaded thread on the reviewed policy without its
+connector exemption.
+
+Two more things change with the setting on. Codex's instructions to the model describe the approval policy, so they
+differ from `never`'s. And Codex's reviewer interrupts the whole turn after 3 denials in a row or 10 of its last 50, and
+sooner on cyber models.
+
+When a review denies or times out, in any runtime mode, the thread shows a `system_notice` with what was stopped,
+the risk and reason, and how to try again. A reply approving the exact command is what the reviewer reads next. An
+agent's `t3_thread_send` also arrives as a user message, so that reply doesn't prove a person wrote it.
+
+The setting is off by default and stored under a new key. Off, every request matches upstream's, which is why the
+recorded Codex fixtures that pin `never` stay untouched. There is no migration or new event type.
+
+- `apps/server/src/orchestration-v2/Adapters/CodexReviewedFullAccess.ts` holds the policy, thread config, server
+  read and notice text. `CodexAdapterV2.ts` calls it at turn start, thread start, resume, fork and rollback, and handles
+  `item/autoApprovalReview/completed`.
+- `packages/contracts/src/settings.ts` adds `reviewFlaggedCommandsInFullAccess`, which the provider settings form
+  shows as a switch on the Codex card.
+- Tests: `Adapters/CodexReviewedFullAccess.fork.test.ts` runs sessions against a scripted Codex with the setting on
+  and off, using a real 0.167.0 denial, and compares the requests sent exactly, because replay matching ignores MCP
+  server config. `ProviderSettingsForm.fork.test.ts` covers the switch.
+
 ## Versions
 
 A release is `vX.Y.Z-alice.N`. `X.Y.Z` is the upstream stable tag the stack sits on, and `N` counts the fork's
