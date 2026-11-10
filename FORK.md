@@ -104,6 +104,14 @@ call signs in afresh and a request key is scoped to its session, so a retry can'
 send once records its attempt first. File: `apps/server/src/cli/thread.ts`. Test:
 `apps/server/src/cli/thread.fork.test.ts`.
 
+### `t3 thread list --environment` (`fork:`)
+
+`--environment <id>` lists threads on a linked machine, so the PR poller on the PC can find the Mac thread that owns
+an approved PR and wake it with `t3 thread send --environment`. `t3_thread_list` already routes on `environmentId`.
+A path names a project on this machine only, so with the flag `--project` takes that machine's project id, and
+without one the list covers all of its projects (`allProjects`). File: `apps/server/src/cli/thread.ts`. Test:
+`apps/server/src/cli/thread.fork.test.ts`.
+
 ### Codex's `$` menu hides `user-invocable: false` skills (`fork:`)
 
 Skills Alice doesn't type carry `user-invocable: false` in their SKILL.md frontmatter. T3 already hides those
