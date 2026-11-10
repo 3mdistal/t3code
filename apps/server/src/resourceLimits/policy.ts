@@ -226,8 +226,25 @@ export function releaseDue(input: {
 
 export type Provenance = Pick<
   OrchestrationV2ConversationMessage,
-  "createdBy" | "creationSource" | "scheduledTaskId" | "senderThreadId"
+  | "createdBy"
+  | "creationSource"
+  | "scheduledTaskId"
+  | "senderThreadId"
+  | "notification"
+  | "delegatedCompletion"
 >;
+
+/**
+ * A wake a provider buffered, like `isBufferedProviderNotification`: output from a turn its CLI started on its
+ * own, as Claude does when a background command finishes. Holding its run saves no memory, since that turn runs
+ * anyway, and leaves the turn without T3's tools until the hold lifts. Codex's wakes are prompted by T3, so they
+ * arrive as server messages and are still held.
+ */
+export const isBufferedWake = (message: Provenance) =>
+  message.createdBy === "agent" &&
+  message.creationSource === "provider" &&
+  message.notification !== undefined &&
+  message.delegatedCompletion === undefined;
 
 /**
  * Whether Alice typed this message herself in T3's app, on her PC or her phone. The server stamps
