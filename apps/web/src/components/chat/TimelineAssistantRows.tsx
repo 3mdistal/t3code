@@ -36,6 +36,8 @@ import { MESSAGE_HEADING_LEVEL, MessageAuthorHeading } from "./TimelineRowParts"
 import { useAtomValue } from "@effect/atom-react";
 import { AsyncResult, Atom } from "effect/reactivity";
 import { vcsEnvironment } from "../../state/vcs";
+// fork: pull request numbers in replies link. See FORK.md.
+import { useReplyPullRequestLinkPlugins } from "./useReplyPullRequestLinks";
 
 const NO_VCS_STATUS = Atom.make(AsyncResult.initial());
 
@@ -50,6 +52,9 @@ export function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind
   const text = liveText ?? row.message.text;
   const messageText =
     text || (row.message.streaming || row.suppressEmptyResponse ? "" : gt("(empty response)"));
+  // fork: bare pull request numbers link once the reply finishes; extra plugins would cost a streaming reply its
+  // incremental parse. See FORK.md.
+  const pullRequestLinkPlugins = useReplyPullRequestLinkPlugins(ctx.threadRef ?? null);
 
   return (
     <>
@@ -77,6 +82,7 @@ export function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind
               lineBreaks={shouldPreserveAssistantLineBreaks(messageText)}
               skills={ctx.skills}
               headingLevelOffset={MESSAGE_HEADING_LEVEL}
+              {...(row.message.streaming ? {} : { extraRemarkPlugins: pullRequestLinkPlugins })}
               onUseArtifactTemplate={ctx.onUseArtifactTemplate}
               onRunShellCommand={ctx.onRunShellCommand}
               onImageExpand={ctx.onImageExpand}
