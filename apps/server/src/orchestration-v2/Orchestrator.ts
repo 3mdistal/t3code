@@ -538,6 +538,7 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
     case "prepared-run.fail":
     case "prepared-run.retry":
     case "run.pool-failover": // fork: see FORK.md.
+    case "run.start-retry": // fork: see FORK.md.
     case "subagent.stop":
     case "run.interrupt":
     case "queued-message.promote-to-steer":
@@ -5022,7 +5023,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     readonly selectionTransition: {
       readonly type: "apply_on_next_turn" | "restart_session" | "create_with_handoff";
     } | null;
-    readonly reason: "steering_restart" | "provider_recovery";
+    readonly reason: "steering_restart" | "provider_recovery" | "retry"; // fork: see FORK.md.
     readonly priorAttempt: {
       readonly attempt: "superseded" | "failed";
       readonly node: "interrupted" | "failed";
@@ -5548,6 +5549,98 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         } satisfies PendingOrchestrationEffectV2,
       ]);
     }
+    yield* Ref.update(effects, (existing) => [
+      ...existing,
+      {
+        id: `effect:${command.commandId}:provider-turn.start:${run.id}`,
+        commandId: command.commandId,
+        threadId: command.threadId,
+        request: { type: "provider-turn.start", runId: run.id },
+      } satisfies PendingOrchestrationEffectV2,
+    ]);
+  });
+
+  // fork: start retry, see FORK.md.
+  /**
+   * A Claude turn failed to start before its prompt reached Claude. Attempt n
+   * closes as failed and attempt n+1 opens on the same account with the same
+   * message, once per run, so one failed start doesn't end the run.
+   */
+  const dispatchRunStartRetry = Effect.fn("Orchestrator.dispatchRunStartRetry")(function* (
+    command: Extract<OrchestrationV2InternalCommand, { readonly type: "run.start-retry" }>,
+    events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+    effects: Ref.Ref<Array<PendingOrchestrationEffectV2>>,
+  ) {
+    const projection = yield* getProjectionWithPendingEvents(command.threadId, events);
+    const run = projection.runs.find((candidate) => candidate.id === command.runId);
+    const rootNodeId = run?.rootNodeId ?? null;
+    const providerThread = projection.providerThreads.find(
+      (candidate) => candidate.id === run?.providerThreadId,
+    );
+    if (
+      run === undefined ||
+      rootNodeId === null ||
+      providerThread === undefined ||
+      run.activeAttemptId !== command.attemptId ||
+      (run.status !== "running" && run.status !== "starting") ||
+      projection.attempts.some((attempt) => attempt.runId === run.id && attempt.reason === "retry")
+    ) {
+      return;
+    }
+    const rootNode = projection.nodes.find((candidate) => candidate.id === rootNodeId);
+    const replaced = yield* replaceRunAttempt({
+      command,
+      events,
+      effects,
+      projection,
+      run,
+      rootNodeId,
+      providerThread,
+      modelSelection: run.modelSelection,
+      selectionTransition: null,
+      reason: "retry",
+      priorAttempt: { attempt: "failed", node: "failed" },
+      messageId: run.userMessageId,
+      createdBy: "system",
+      cwdFallback:
+        projection.checkpointScopes.find((scope) => scope.id === rootNode?.checkpointScopeId)
+          ?.cwd ?? process.cwd(),
+    });
+    const now = yield* DateTime.now;
+    const emitEvent = emit(events, command);
+    const providers = yield* poolRouting.getPublishedProviders;
+    const name =
+      providers.find((provider) => provider.instanceId === run.providerInstanceId)?.displayName ??
+      run.providerInstanceId;
+    yield* emitEvent({
+      type: "turn-item.updated",
+      threadId: command.threadId,
+      runId: run.id,
+      nodeId: replaced.rootNodeId,
+      providerInstanceId: run.providerInstanceId,
+      occurredAt: now,
+      payload: {
+        id: idAllocator.derive.runSignalTurnItem({
+          runId: run.id,
+          signal: `start-retry:${replaced.attemptId}`,
+        }),
+        threadId: command.threadId,
+        runId: run.id,
+        nodeId: replaced.rootNodeId,
+        providerThreadId: replaced.providerThread.id,
+        providerTurnId: null,
+        nativeItemRef: null,
+        parentItemId: null,
+        ordinal: yield* nextTurnItemOrdinal(projection),
+        status: "completed",
+        title: null,
+        startedAt: now,
+        completedAt: now,
+        updatedAt: now,
+        type: "system_notice",
+        message: `${name} could not start this turn. Trying once more.`,
+      },
+    });
     yield* Ref.update(effects, (existing) => [
       ...existing,
       {
@@ -13443,6 +13536,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         break;
       case "run.pool-failover": // fork: see FORK.md.
         yield* dispatchRunPoolFailover(command, events, effects); // fork: see FORK.md.
+        break; // fork: see FORK.md.
+      case "run.start-retry": // fork: see FORK.md.
+        yield* dispatchRunStartRetry(command, events, effects); // fork: see FORK.md.
         break; // fork: see FORK.md.
       case "runtime-request.respond":
         yield* dispatchRuntimeRequestRespond(command, events, effects);

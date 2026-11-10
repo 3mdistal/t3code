@@ -3549,12 +3549,23 @@ const OrchestrationV2InternalCommand = Schema.Union([
     attemptId: RunAttemptId,
     failure: OrchestrationV2ProviderFailure,
   }),
+  Schema.Struct({
+    type: Schema.Literal("run.start-retry"), // fork: see FORK.md.
+    commandId: CommandId,
+    threadId: ThreadId,
+    runId: RunId,
+    attemptId: RunAttemptId,
+  }),
 ]);
 export type OrchestrationV2InternalCommand = typeof OrchestrationV2InternalCommand.Type;
 
 // fork: keyed by attempt so the hook and the recovery sweep collapse onto one receipt. See FORK.md.
 export const runPoolFailoverCommandId = (attemptId: RunAttemptId): CommandId =>
   CommandId.make(`command:system:pool-failover:${attemptId}`);
+
+// fork: keyed by the failed attempt, so one failure dispatches one retry. See FORK.md.
+export const runStartRetryCommandId = (attemptId: RunAttemptId): CommandId =>
+  CommandId.make(`command:system:start-retry:${attemptId}`);
 
 export type OrchestrationV2ServerCommand = OrchestrationV2Command | OrchestrationV2InternalCommand;
 

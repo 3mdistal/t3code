@@ -55,6 +55,7 @@ import {
 } from "@t3tools/provider-core/server/failure";
 import * as RunFinalizationService from "./RunFinalizationService.ts";
 import { ProviderUsageLimitHook } from "./ProviderPoolFailover.ts"; // fork: see FORK.md.
+import { ProviderStartFailureHook } from "./ProviderStartRetry.ts"; // fork: see FORK.md.
 import * as TurnItemPositionStore from "./TurnItemPositionStore.ts";
 import { userFacingDatabaseErrorMessage } from "./UserFacingErrors.ts";
 
@@ -618,6 +619,7 @@ export const layer: Layer.Layer<
     const turnItemPositions = yield* TurnItemPositionStore.TurnItemPositionStoreV2;
     const finalizationObserver = yield* RunFinalizationService.RunFinalizationObserver;
     const usageLimitHook = yield* ProviderUsageLimitHook; // fork: see FORK.md.
+    const startFailureHook = yield* ProviderStartFailureHook; // fork: see FORK.md.
 
     const writeFinalRunEvents = Effect.fn("RunExecutionService.writeFinalRunEvents")(
       function* (input: {
@@ -1737,6 +1739,30 @@ export const layer: Layer.Layer<
               }),
             ))
           : input.session.startTurn(turnInput);
+        // fork: a failed start is logged and may be retried once, see FORK.md. A
+        // retry moves the run to a new attempt, so the failure written below no
+        // longer matches the run and commits nothing.
+        const startRequestedAt = DateTime.toEpochMillis(yield* DateTime.now);
+        const reportStartFailure = Effect.fn("RunExecutionService.reportStartFailure")(function* (
+          cause: Cause.Cause<unknown>,
+        ) {
+          if (Exit.isFailure(shouldStart) || Cause.hasInterruptsOnly(cause)) return;
+          yield* startFailureHook.onStartFailure({
+            threadId: input.run.threadId,
+            runId: input.run.id,
+            attemptId: input.attempt.id,
+            attemptReason: input.attempt.reason,
+            driver: input.session.driver,
+            providerInstanceId: input.run.providerInstanceId,
+            model: input.modelSelection.model,
+            elapsedMs: DateTime.toEpochMillis(yield* DateTime.now) - startRequestedAt,
+            cause,
+            providerTurnReported: (yield* Ref.get(latestRootProviderTurn)) !== null,
+            continuation:
+              input.message.createdBy === "agent" && input.message.creationSource === "provider",
+            compact,
+          });
+        });
         yield* Effect.andThen(shouldStart, startTurn).pipe(
           // Wait for acceptance so abandoned startup cannot leave a refresher
           // on the already-detached ingestion fiber.
@@ -1752,6 +1778,7 @@ export const layer: Layer.Layer<
               cause,
             }).pipe(
               Effect.andThen(Fiber.interrupt(providerEventFiber)),
+              Effect.andThen(reportStartFailure(cause)), // fork: see FORK.md.
               Effect.andThen(Ref.get(latestProviderThread)),
               Effect.flatMap((providerThread) =>
                 Ref.get(latestTurnItemOrdinal).pipe(

@@ -1068,6 +1068,43 @@ migration or new event type.
   and off, using a real 0.167.0 denial, and compares the requests sent exactly, because replay matching ignores MCP
   server config. `ProviderSettingsForm.fork.test.ts` covers the switch and its default.
 
+### A Claude turn that fails to start gets one retry (`fork:`)
+
+When Claude couldn't start a turn, for example because Claude Code never answered its MCP server registration, the
+run failed with "The provider could not start this turn." The reason was only in the server log, which on a busy
+machine rolls over within minutes, and a message another agent sent died with the run.
+
+Claude queues the prompt as the last step of starting a turn, so a start that failed never sent its prompt. Run
+execution now hands the failure to a hook before the run fails. For a Claude turn, the hook dispatches the internal
+`run.start-retry` command, which closes the attempt as failed and opens a second one on the same account with the
+same message, through the `replaceRunAttempt` path that pool failover uses. The thread shows "Claude could not start
+this turn. Trying once more." If the second start fails too, the run fails as before, with its error on the second
+attempt. A run is retried at most once.
+
+There's no retry for other drivers, which don't promise that a failed start sent nothing. There's none for a turn
+Claude already reported, a provider wake, `/compact` or a Stop. Refusals that would repeat get none either:
+background work blocking a new query, an unreadable appended system prompt or settings argument, or a turn still
+active.
+
+Every failed start, retried or not, is appended to `logs/turn-start-failures.ndjson` in the state directory. Each
+line has the thread, run, attempt, account, model, time to failure, whether it was retried, the chain of error
+names, and the error text, redacted and capped at 8,000 characters. The file keeps 1 MB and one backup, and storage
+cleanup only removes the backup. Failures before the run starts, such as a session that won't open, already retry
+through the effect worker and show their reason in the thread, so they aren't logged here.
+
+The retry writes only existing events: the `retry` attempt reason was already in the schema, and the notice is a
+`system_notice` turn item. There is no migration, event type or setting.
+
+- `apps/server/src/orchestration-v2/ProviderStartRetry.ts` decides whether to retry, dispatches the command and
+  writes the log. `RunExecutionService.ts` calls it from the start failure handler. Its failure write that follows is
+  gated on the attempt, so after a retry it commits nothing.
+- `Orchestrator.ts` handles `run.start-retry` and lets `replaceRunAttempt` take the `retry` reason;
+  `packages/contracts/src/orchestrationV2.ts` adds the command. `packages/provider-core/src/server/failure.ts`
+  exports its redaction. `runtimeLayer.ts` and the replay harness provide the hook.
+- Tests: `ProviderStartRetry.fork.test.ts` covers which failures retry, the log line and the log file.
+  `ProviderStartRetry.integration.fork.test.ts` runs the orchestrator over SQLite with a Claude adapter whose first
+  start fails, then whose first two starts fail.
+
 ## Versions
 
 A release is `vX.Y.Z-alice.N`. `X.Y.Z` is the upstream stable tag the stack sits on, and `N` counts the fork's
