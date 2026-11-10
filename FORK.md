@@ -1054,8 +1054,10 @@ When a review denies or times out, in any runtime mode, the thread shows a `syst
 the risk and reason, and how to try again. A reply approving the exact command is what the reviewer reads next. An
 agent's `t3_thread_send` also arrives as a user message, so that reply doesn't prove a person wrote it.
 
-The setting is off by default and stored under a new key. Off, every request matches upstream's, which is why the
-recorded Codex fixtures that pin `never` stay untouched. There is no migration or new event type.
+The setting is on by default, as Alice asked on Nov 10, 2026, and stored under a new key; turning it off stores
+`false`. Off, every request matches upstream's, so the shared settings in `CodexAdapterV2.test.ts` and
+`CodexAdapterV2.testkit.ts` turn it off and the recorded Codex fixtures that pin `never` stay untouched. There is no
+migration or new event type.
 
 - `apps/server/src/orchestration-v2/Adapters/CodexReviewedFullAccess.ts` holds the policy, thread config, server
   read and notice text. `CodexAdapterV2.ts` calls it at turn start, thread start, resume, fork and rollback, and handles
@@ -1064,7 +1066,7 @@ recorded Codex fixtures that pin `never` stay untouched. There is no migration o
   shows as a switch on the Codex card.
 - Tests: `Adapters/CodexReviewedFullAccess.fork.test.ts` runs sessions against a scripted Codex with the setting on
   and off, using a real 0.167.0 denial, and compares the requests sent exactly, because replay matching ignores MCP
-  server config. `ProviderSettingsForm.fork.test.ts` covers the switch.
+  server config. `ProviderSettingsForm.fork.test.ts` covers the switch and its default.
 
 ## Versions
 

@@ -94,8 +94,12 @@ describe("reviewed full access turn policy", () => {
     }),
   );
 
-  it("is off unless the setting is stored", () => {
-    assert.isUndefined(decodeCodexSettings({}).reviewFlaggedCommandsInFullAccess);
+  it("is on unless the setting is turned off", () => {
+    assert.isTrue(decodeCodexSettings({}).reviewFlaggedCommandsInFullAccess);
+    assert.isFalse(
+      decodeCodexSettings({ reviewFlaggedCommandsInFullAccess: false })
+        .reviewFlaggedCommandsInFullAccess,
+    );
   });
 });
 

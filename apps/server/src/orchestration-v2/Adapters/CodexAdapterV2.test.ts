@@ -476,7 +476,10 @@ describe("CodexAdapterV2 fork boundary", () => {
   );
 });
 
-const DEFAULT_CODEX_SETTINGS = Schema.decodeSync(CodexSettings)({});
+// fork: the recorded transcripts pin upstream's full access policy; see FORK.md.
+const DEFAULT_CODEX_SETTINGS = Schema.decodeSync(CodexSettings)({
+  reviewFlaggedCommandsInFullAccess: false,
+});
 const CODEX_TEST_MODEL_SELECTION = {
   instanceId: CodexAdapterV2.CODEX_DEFAULT_INSTANCE_ID,
   model: "gpt-5.4",

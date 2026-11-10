@@ -680,7 +680,8 @@ export const CodexSettings = makeProviderSettingsSchema(
       }),
     ),
     // fork: see "Full access can review flagged commands" in FORK.md.
-    reviewFlaggedCommandsInFullAccess: Schema.optionalKey(Schema.Boolean).pipe(
+    reviewFlaggedCommandsInFullAccess: Schema.Boolean.pipe(
+      Schema.withDecodingDefault(Effect.succeed(true)),
       Schema.annotateKey({
         title: "Review flagged commands in full access",
         description:
