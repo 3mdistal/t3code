@@ -576,6 +576,22 @@ export const decodeEnvironment = Effect.fn("cli.thread.decodeEnvironment")(funct
   );
 });
 
+// fork: lets a script on this machine read a linked one's threads, such as the
+// PR poller finding the Mac thread that owns an approved PR (see FORK.md). A
+// path names a project on this machine only, so a linked machine's project goes
+// by its id, and without one the list covers all of that machine's projects.
+export const decodeListScope = Effect.fn("cli.thread.decodeListScope")(function* (
+  project: Option.Option<string>,
+  environment: Option.Option<string>,
+) {
+  const environmentId = yield* decodeEnvironment(environment, false);
+  if (environmentId === undefined) {
+    return { kind: "local", project: Option.getOrElse(project, () => ".") } as const;
+  }
+  const projectId = Option.getOrUndefined(project)?.trim();
+  return { kind: "linked", environmentId, projectId: projectId || undefined } as const;
+});
+
 // fork: lets scripts start a thread at a chosen effort, such as the sync
 // script's conflict thread (see FORK.md).
 export const decodeModelOptions = (values: ReadonlyArray<string>) =>
@@ -595,36 +611,57 @@ export const decodeModelOptions = (values: ReadonlyArray<string>) =>
 const threadListCommand = Command.make("list", {
   ...projectLocationFlags,
   project: Flag.String("project").pipe(
-    Flag.withDescription("Project id or a path inside the project. Defaults to this directory."),
-    Flag.withDefault("."),
+    // fork: see decodeListScope.
+    Flag.withDescription(
+      "Project id or a path inside the project. Defaults to this directory, or with --environment to all of that machine's projects.",
+    ),
+    Flag.optional,
+  ),
+  // fork: see decodeListScope.
+  environment: Flag.String("environment").pipe(
+    Flag.withDescription("Linked environment to list. Defaults to this one."),
+    Flag.optional,
   ),
   json: jsonFlag,
 }).pipe(
   Command.withDescription("List a project's threads, newest first."),
   Command.withHandler((flags) =>
-    withThreadTools(
-      flags,
-      Effect.fn("cli.thread.list")(function* (tools) {
-        const project = yield* resolveProject(tools, flags.project);
-        const threads: Array<OrchestratorMcpThreadListItem> = [];
-        let cursor: number | null = 0;
-        while (cursor !== null) {
-          const page: OrchestratorMcpThreadListResult = yield* tools.call(
-            "t3_thread_list",
-            { projectId: project.id, includeSubagents: false, limit: 100, cursor },
-            OrchestratorMcpThreadListResult,
-          );
-          threads.push(...page.threads);
-          cursor = page.nextCursor;
-        }
-        if (flags.json) {
-          return yield* printJson(threads);
-        }
-        for (const thread of threads) {
-          yield* Console.log(`${thread.threadId}  ${thread.status.padEnd(11)}  ${thread.title}`);
-        }
-      }),
-    ).pipe(reportThreadErrors),
+    // fork: see decodeListScope.
+    Effect.gen(function* () {
+      const scope = yield* decodeListScope(flags.project, flags.environment);
+      yield* withThreadTools(
+        flags,
+        Effect.fn("cli.thread.list")(function* (tools) {
+          // fork: see decodeListScope.
+          const target =
+            scope.kind === "local"
+              ? { projectId: (yield* resolveProject(tools, scope.project)).id }
+              : {
+                  environmentId: scope.environmentId,
+                  ...(scope.projectId === undefined
+                    ? { allProjects: true }
+                    : { projectId: scope.projectId }),
+                };
+          const threads: Array<OrchestratorMcpThreadListItem> = [];
+          let cursor: number | null = 0;
+          while (cursor !== null) {
+            const page: OrchestratorMcpThreadListResult = yield* tools.call(
+              "t3_thread_list",
+              { ...target, includeSubagents: false, limit: 100, cursor },
+              OrchestratorMcpThreadListResult,
+            );
+            threads.push(...page.threads);
+            cursor = page.nextCursor;
+          }
+          if (flags.json) {
+            return yield* printJson(threads);
+          }
+          for (const thread of threads) {
+            yield* Console.log(`${thread.threadId}  ${thread.status.padEnd(11)}  ${thread.title}`);
+          }
+        }),
+      );
+    }).pipe(reportThreadErrors),
   ),
 );
 
