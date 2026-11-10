@@ -1809,7 +1809,12 @@ it.effect("P5: an order asks no model for a title, and leaves the next message's
   }).pipe(Effect.provide(layerTest)),
 );
 
-const sendProviderWake = (threadId: ThreadId, text: string) =>
+/** A buffered wake, as Claude's adapter sends one; Codex's wakes arrive as `server` messages. */
+const sendProviderWake = (
+  threadId: ThreadId,
+  text: string,
+  creationSource: "provider" | "server" = "provider",
+) =>
   Effect.gen(function* () {
     const orchestrator = yield* Orchestrator.OrchestratorV2;
     yield* orchestrator.dispatch({
@@ -1822,8 +1827,59 @@ const sendProviderWake = (threadId: ThreadId, text: string) =>
       attachments: [],
       dispatchMode: { type: "queue_after_active" },
       createdBy: "agent",
-      creationSource: "provider",
+      creationSource,
     });
+  });
+
+it.effect("P6: a buffered wake starts over the limits and in a pause, and a Codex wake waits", () =>
+  Effect.gen(function* () {
+    const governor = yield* makeGovernor;
+    const [buffered, codex, paused] = ["buffered", "codex", "paused"].map((name) =>
+      ThreadId.make(`thread:p6:wake-${name}`),
+    ) as [ThreadId, ThreadId, ThreadId];
+    yield* Effect.forEach([buffered, codex, paused], createThread);
+    yield* governor.pass(yield* tight);
+
+    // Claude's CLI started this turn itself; its run only gives the turn T3's tools.
+    yield* sendProviderWake(buffered, "Background command finished");
+    // T3 prompts Codex's wake, so holding it holds the work.
+    yield* sendProviderWake(codex, "Background command finished", "server");
+    assert.deepEqual(yield* runs(buffered), ["starting"]);
+    assert.deepEqual(yield* notices(buffered), []);
+    assert.deepEqual(yield* runs(codex), ["queued:held"]);
+    assert.deepEqual(yield* waitingThreads, [codex]);
+
+    yield* writePause("stop");
+    yield* governor.followPause;
+    yield* sendProviderWake(paused, "Background command finished");
+    assert.deepEqual(yield* runs(paused), ["starting"]);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+/** A wake as versions before `isBufferedWake` held it, which the restart that installs this one can find. */
+const sendHeldWake = (threadId: ThreadId, text: string) =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const limits = yield* ResourceLimits.ResourceLimits;
+    const sink = yield* EventSink.EventSinkV2;
+    yield* sendProviderWake(threadId, text);
+    const { thread, runs: all } = yield* orchestrator.getThreadProjection(threadId);
+    const run = all.at(-1)!;
+    yield* sink.write({
+      events: [
+        {
+          id: EventId.make(`held:${run.id}`),
+          type: "run.updated",
+          threadId,
+          runId: run.id,
+          ...(run.rootNodeId === null ? {} : { nodeId: run.rootNodeId }),
+          providerInstanceId: run.providerInstanceId,
+          occurredAt: yield* DateTime.now,
+          payload: { ...run, status: "queued", queueHeld: true, queuePosition: run.ordinal },
+        },
+      ],
+    });
+    yield* limits.admit({ thread, message: agent });
   });
 
 const cancelQueuedRun = (threadId: ThreadId) =>
@@ -1848,7 +1904,7 @@ it.effect("P6: a wake the restart dropped comes back as a note, held like any ot
     yield* createThread(threadId);
     yield* writePause("finish");
     yield* governor.followPause;
-    yield* sendProviderWake(threadId, "Background command finished");
+    yield* sendHeldWake(threadId, "Background command finished");
     yield* TestClock.adjust("15 seconds");
     yield* governor.pass(yield* comfortable);
     assert.deepEqual(yield* runs(threadId), ["queued:held"]);
@@ -1880,7 +1936,7 @@ it.effect("P6: Alice cancelling a held wake herself doesn't bring it back", () =
     // The governor's first pass has already run by the time she can.
     yield* TestClock.adjust("15 seconds");
     yield* governor.pass(yield* comfortable);
-    yield* sendProviderWake(threadId, "Background command finished");
+    yield* sendHeldWake(threadId, "Background command finished");
     yield* TestClock.adjust("15 seconds");
     yield* governor.pass(yield* comfortable);
     yield* cancelQueuedRun(threadId);
