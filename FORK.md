@@ -1142,6 +1142,34 @@ The retry writes only existing events: the `retry` attempt reason was already in
   and its retry for an MCP registration timeout: the native session is kept, and the next turn carries the missed
   request once, as upstream's refused-start test expects without the retry.
 
+### Pull request numbers in replies link (`fork:`)
+
+Agents often name a pull request by its number alone ("#554 is green"). Upstream links GitHub references like that
+only in a pull request's own body and comments, so in a reply the number stayed plain text unless the agent wrote
+the URL out. A finished assistant reply now links a bare `#123`, or `owner/repo#123`, using what T3 already knows:
+
+1. A pull request linked to the reply's own thread.
+2. A pull request linked to any other thread, when only one repository has that number, or when one of them is the
+   thread's repository.
+3. The thread's repository, when T3 has seen a pull request there numbered that high. T3 can't tell a pull request
+   from an issue by its number, so this link carries upstream's reference marker: clicking it checks GitHub and
+   opens the pull request, or the issue when it isn't one.
+
+The thread's repository is the one its linked pull requests belong to, or else its project's GitHub repository.
+Nothing else links: a number past the highest T3 has seen there, a number two other repositories share, and
+anything in code or already in a link stay as written. GitHub's own grammar decides what counts as a reference, so
+`a#12`, `#12abc` and `#0` don't. A reply that is still streaming isn't linked, since extra remark plugins turn off
+its incremental parse; it links when it finishes. The plugins come from the quiet thread-shell atoms and keep their
+identity while a thread's pull requests don't change, so a running thread's ticks don't re-render or re-parse
+finished replies.
+
+- `apps/web/src/components/chat/replyPullRequestLinks.ts`: matching, the remark plugin and its cached plugin list.
+- `apps/web/src/components/chat/useReplyPullRequestLinks.ts`: the atoms that gather every thread's pull requests and
+  the reply thread's repository.
+- `apps/web/src/components/chat/TimelineAssistantRows.tsx`: passes the plugins to a finished reply's
+  `ChatMarkdown`.
+- Tests: `apps/web/src/components/chat/replyPullRequestLinks.fork.test.ts`.
+
 ## Versions
 
 A release is `vX.Y.Z-alice.N`. `X.Y.Z` is the upstream stable tag the stack sits on, and `N` counts the fork's
