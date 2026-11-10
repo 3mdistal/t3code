@@ -97,6 +97,8 @@ const makeCodexConfig = (overrides: Partial<CodexSettings>): CodexSettings => ({
   homePath: "",
   shadowHomePath: "",
   launchArgs: "",
+  // fork: see "Full access can review flagged commands" in FORK.md.
+  reviewFlaggedCommandsInFullAccess: true,
   customModels: [],
   ...overrides,
 });

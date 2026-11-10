@@ -20,7 +20,10 @@ import {
 import type { ProviderReplayGate } from "@t3tools/provider-testing/replayGate";
 import * as CodexAdapterV2 from "./CodexAdapterV2.ts";
 
-const DEFAULT_CODEX_SETTINGS = Schema.decodeSync(CodexSettings)({});
+// fork: the recorded transcripts pin upstream's full access policy; see FORK.md.
+const DEFAULT_CODEX_SETTINGS = Schema.decodeSync(CodexSettings)({
+  reviewFlaggedCommandsInFullAccess: false,
+});
 
 export class CodexReplayTranscriptDecodeError extends Schema.TaggedError<CodexReplayTranscriptDecodeError>()(
   "CodexReplayTranscriptDecodeError",
