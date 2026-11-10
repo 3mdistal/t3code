@@ -1083,8 +1083,12 @@ attempt. A run is retried at most once.
 
 There's no retry for other drivers, which don't promise that a failed start sent nothing. There's none for a turn
 Claude already reported, a provider wake, `/compact` or a Stop. Refusals that would repeat get none either:
-background work blocking a new query, an unreadable appended system prompt or settings argument, or a turn still
-active.
+background work blocking a new query, an unreadable appended system prompt or settings argument, a turn still
+active, or an attachment Claude can't take (an unsupported image type, or an attachment that's missing or
+unreadable). The adapter gives the first two attachment refusals no reason, so they're matched on their text.
+
+An MCP registration timeout is retried. A resumed session already retries that once inside the adapter, so a
+resumed turn whose registration keeps timing out now waits up to four 90-second timeouts before it fails, not two.
 
 Every failed start, retried or not, is appended to `logs/turn-start-failures.ndjson` in the state directory. Each
 line has the thread, run, attempt, account, model, time to failure, whether it was retried, the chain of error
@@ -1106,7 +1110,9 @@ The retry writes only existing events: the `retry` attempt reason was already in
   `ProviderStartRetry.integration.fork.test.ts` runs the orchestrator over SQLite with a Claude adapter whose first
   start fails, then whose first two starts fail. Two more switch a thread from Codex to Claude: when the start fails
   after the history was injected, the retry reuses the native thread without injecting it again, and when the
-  injection fails, the retry moves to a new native thread with the history.
+  injection fails, the retry moves to a new native thread with the history. A last one has Claude refuse a start
+  and its retry for an MCP registration timeout: the native session is kept, and the next turn carries the missed
+  request once, as upstream's refused-start test expects without the retry.
 
 ## Versions
 

@@ -105,6 +105,30 @@ describe("startFailureRetryable", () => {
           ),
         },
       ],
+      ...(
+        [
+          [
+            "an image type Claude doesn't take",
+            "Unsupported Claude image attachment type 'image/tiff'",
+            undefined,
+          ],
+          ["an attachment id that resolves nowhere", "Invalid attachment id '../x'", undefined],
+          ["an unreadable attachment", "Failed to read attachment 'a'", "attachment_unreadable"],
+        ] as const
+      ).map(([name, detail, reason]): [string, Partial<ProviderStartFailure>] => [
+        name,
+        {
+          cause: Cause.fail(
+            turnStartError(
+              new ProviderAdapter.ProviderAdapterProtocolError({
+                driver: claude,
+                detail,
+                ...(reason === undefined ? {} : { reason }),
+              }),
+            ),
+          ),
+        },
+      ]),
     ];
     for (const [name, overrides] of cases) {
       assert.isFalse(startFailureRetryable(failure(overrides)), name);

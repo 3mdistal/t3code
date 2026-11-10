@@ -36,6 +36,27 @@ const REPEATING_FAILURE_TAGS = [
   "ClaudeAppendSystemPromptMissingValueError",
   "ClaudeSettingsLaunchArgError",
 ] as const;
+const REPEATING_PROTOCOL_REASONS = ["previous_turn_active", "attachment_unreadable"] as const;
+/**
+ * The adapter gives these attachment refusals no reason, so they're matched on
+ * their fixed text. If that text changes, the cost is a retry that fails again.
+ */
+const REPEATING_PROTOCOL_DETAILS = [
+  "Unsupported Claude image attachment type",
+  "Invalid attachment id",
+] as const;
+
+const repeatsEveryTime = (link: unknown): boolean => {
+  if (REPEATING_FAILURE_TAGS.some((tag) => Predicate.isTagged(link, tag))) return true;
+  if (!Predicate.isTagged(link, "ProviderAdapterProtocolError")) return false;
+  const reason = Predicate.hasProperty(link, "reason") ? link.reason : undefined;
+  const detail =
+    Predicate.hasProperty(link, "detail") && typeof link.detail === "string" ? link.detail : "";
+  return (
+    REPEATING_PROTOCOL_REASONS.some((known) => reason === known) ||
+    REPEATING_PROTOCOL_DETAILS.some((known) => detail.startsWith(known))
+  );
+};
 
 export interface ProviderStartFailure {
   readonly threadId: ThreadId;
@@ -65,10 +86,10 @@ const causeChain = (error: unknown): ReadonlyArray<unknown> => {
 };
 
 /**
- * Claude queues the prompt as the last step of starting a turn, so a Claude
- * start that failed never sent its prompt and can run again without doubling
- * it. Other drivers make no such promise. A turn Claude already reported holds
- * its active-turn slot, so a retry would only be refused.
+ * Nothing after Claude queues a turn's prompt fails with a typed error, so a
+ * Claude start that failed with one never sent its prompt and can run again
+ * without doubling it. Stops, defects and other drivers make no such promise.
+ * A turn Claude already reported holds its active-turn slot; a retry would fail.
  */
 export function startFailureRetryable(failure: ProviderStartFailure): boolean {
   if (
@@ -83,13 +104,7 @@ export function startFailureRetryable(failure: ProviderStartFailure): boolean {
   }
   const error = Cause.squash(failure.cause);
   if (!Predicate.isTagged(error, "ProviderAdapterTurnStartError")) return false;
-  return !causeChain(error).some(
-    (link) =>
-      REPEATING_FAILURE_TAGS.some((tag) => Predicate.isTagged(link, tag)) ||
-      (Predicate.isTagged(link, "ProviderAdapterProtocolError") &&
-        Predicate.hasProperty(link, "reason") &&
-        link.reason === "previous_turn_active"),
-  );
+  return !causeChain(error).some(repeatsEveryTime);
 }
 
 const describeLink = (link: unknown): string =>

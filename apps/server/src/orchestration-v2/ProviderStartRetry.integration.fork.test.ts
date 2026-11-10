@@ -28,7 +28,10 @@ import type { ProviderInstance } from "@t3tools/provider-core/server/driver";
 import { historyResponseItems } from "@t3tools/provider-core/server/handoffBudget";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 
-import { ClaudeProviderCapabilitiesV2 } from "./Adapters/ClaudeAdapterV2.ts";
+import {
+  ClaudeAgentSdkQueryRunnerError,
+  ClaudeProviderCapabilitiesV2,
+} from "./Adapters/ClaudeAdapterV2.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as EffectWorker from "./EffectWorker.ts";
 import * as EventSink from "./EventSink.ts";
@@ -50,12 +53,15 @@ const CODEX: ModelSelection = { instanceId: ProviderInstanceId.make("codex"), mo
 interface Script {
   /** How many Claude starts fail before Claude reports the turn, so before any prompt is sent. */
   readonly failStarts: number;
+  /** What those starts fail with. */
+  readonly refusal: unknown;
   /** How many history injections fail after writing, as if the acknowledgement was lost. */
   readonly failInjections: number;
   readonly started: ReadonlyArray<{
     readonly driver: string;
     readonly prompt: string;
     readonly nativeThreadId: string | null;
+    readonly failed: boolean;
   }>;
   readonly injected: ReadonlyArray<unknown>;
   readonly nativeThreads: number;
@@ -148,7 +154,7 @@ function makeAdapter(
             : {}),
           startTurn: (input) =>
             Effect.gen(function* () {
-              const { failStarts } = yield* Ref.getAndUpdate(script, (current) => ({
+              const { failStarts, refusal } = yield* Ref.getAndUpdate(script, (current) => ({
                 ...current,
                 failStarts: claude ? Math.max(0, current.failStarts - 1) : current.failStarts,
                 started: [
@@ -157,6 +163,7 @@ function makeAdapter(
                     driver: driverName,
                     prompt: input.message.text,
                     nativeThreadId: input.providerThread.nativeThreadRef?.nativeId ?? null,
+                    failed: claude && current.failStarts > 0,
                   },
                 ],
               }));
@@ -166,7 +173,7 @@ function makeAdapter(
                   threadId: input.threadId,
                   providerThreadId: input.providerThread.id,
                   runId: input.runId,
-                  cause: "Claude Code did not answer the MCP server registration.",
+                  cause: refusal,
                 });
               }
               const providerTurnId = ProviderTurnId.make(`provider-turn:${input.attemptId}`);
@@ -298,18 +305,23 @@ interface Message {
   readonly text: string;
   readonly selection: ModelSelection;
   readonly settles: "completed" | "failed";
+  /** Fails this many Claude starts, from this message on. */
+  readonly failStarts?: number;
 }
 
 /** Sends each message in turn on a fresh thread and waits for its run to settle. */
 const runScript = (
   name: string,
-  setup: Pick<Script, "failStarts" | "failInjections">,
+  setup: Partial<Pick<Script, "failStarts" | "failInjections" | "refusal">>,
   messages: ReadonlyArray<Message>,
 ) =>
   Effect.gen(function* () {
     const cwd = yield* checkpointWorkspace(name);
     const threadId = ThreadId.make(`thread:${name}`);
     const script = yield* Ref.make<Script>({
+      failStarts: 0,
+      failInjections: 0,
+      refusal: "Claude Code did not answer the MCP server registration.",
       ...setup,
       started: [],
       injected: [],
@@ -333,6 +345,8 @@ const runScript = (
         worktreePath: cwd,
       });
       for (const [index, message] of messages.entries()) {
+        const failStarts = message.failStarts;
+        if (failStarts !== undefined) yield* Ref.update(script, (s) => ({ ...s, failStarts }));
         const settled = yield* awaitRunStatus(threadId, message.settles);
         yield* orchestrator.dispatch({
           type: "message.dispatch",
@@ -480,6 +494,66 @@ it.live.each([
           sent.nativeThreadId,
         );
       }
+    }),
+  ),
+);
+
+// Same tag as the adapter's unexported error raised when Claude never answers setMcpServers.
+class ClaudeMcpRegistrationTimeoutError extends Schema.TaggedError<ClaudeMcpRegistrationTimeoutError>()(
+  "ClaudeMcpRegistrationTimeoutError",
+  {},
+) {}
+
+// Upstream keeps the native session after a start Claude refused before reading the
+// prompt, and hands the missed request to the next turn. That holds when the retry is
+// refused too.
+it.live("keeps the native session and the missed request when the retry is refused too", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { projection, script } = yield* runScript(
+        "start-retry-refused",
+        {
+          refusal: new ClaudeAgentSdkQueryRunnerError({
+            method: "setMcpServers",
+            cause: new ClaudeMcpRegistrationTimeoutError(),
+          }),
+        },
+        [
+          { text: "Request 1", selection: CLAUDE, settles: "completed" },
+          { text: "Request 2", selection: CLAUDE, settles: "failed", failStarts: 2 },
+          { text: "Request 3", selection: CLAUDE, settles: "completed" },
+        ],
+      );
+      assert.deepEqual(
+        projection.runs.map((run) => run.status),
+        ["completed", "failed", "completed"],
+      );
+      assert.deepEqual(
+        projection.attempts
+          .filter((attempt) => attempt.runId === projection.runs[1]?.id)
+          .map((attempt) => [attempt.status, attempt.reason]),
+        [
+          ["failed", "initial"],
+          ["failed", "retry"],
+        ],
+      );
+      const sent = script.started.filter((turn) => !turn.failed);
+      assert.lengthOf(sent, 2);
+      assert.equal(sent[1]!.prompt, "Request 3");
+      // This fake Claude takes history, so the missed request arrives that way, once.
+      const missed = projection.contextHandoffs.filter(
+        (handoff) => handoff.targetRunId === projection.runs[2]?.id,
+      );
+      assert.deepEqual(
+        missed.map((handoff) => [handoff.strategy, handoff.delivery?.status]),
+        [["delta_since_target_last_seen", "injected"]],
+      );
+      const history = yield* encodeJson(script.injected);
+      assert.equal(history.split("Request 2").length - 1, 1);
+      assert.equal(script.nativeThreads, 1);
+      assert.isTrue(
+        script.started.every((turn) => turn.nativeThreadId === sent[0]!.nativeThreadId),
+      );
     }),
   ),
 );
