@@ -8,7 +8,7 @@ import {
 } from "./ProviderSettingsForm";
 
 describe("Codex provider settings", () => {
-  it("offers reviewing flagged commands in full access as a switch that starts off", () => {
+  it("offers reviewing flagged commands in full access as a switch that starts on", () => {
     const field = deriveProviderSettingsFields({ settingsSchema: CodexSettings }).find(
       ({ key }) => key === "reviewFlaggedCommandsInFullAccess",
     );
@@ -16,13 +16,14 @@ describe("Codex provider settings", () => {
     expect(field).toMatchObject({
       control: "switch",
       label: "Review flagged commands in full access",
+      defaultBooleanValue: true,
     });
     if (field === undefined) throw new Error("Missing field");
-    expect(nextProviderConfigWithFieldValue({}, field, true)).toEqual({
-      reviewFlaggedCommandsInFullAccess: true,
+    expect(nextProviderConfigWithFieldValue({}, field, false)).toEqual({
+      reviewFlaggedCommandsInFullAccess: false,
     });
     expect(
-      nextProviderConfigWithFieldValue({ reviewFlaggedCommandsInFullAccess: true }, field, false),
+      nextProviderConfigWithFieldValue({ reviewFlaggedCommandsInFullAccess: false }, field, true),
     ).toBeUndefined();
   });
 });

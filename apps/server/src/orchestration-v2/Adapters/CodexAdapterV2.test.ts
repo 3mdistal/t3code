@@ -593,7 +593,10 @@ describe("CodexAdapterV2 fork boundary", () => {
   );
 });
 
-const DEFAULT_CODEX_SETTINGS = Schema.decodeSync(CodexSettings)({});
+// fork: the recorded transcripts pin upstream's full access policy; see FORK.md.
+const DEFAULT_CODEX_SETTINGS = Schema.decodeSync(CodexSettings)({
+  reviewFlaggedCommandsInFullAccess: false,
+});
 const CHATGPT_SHARING_LIMIT_MESSAGE =
   "stream disconnected before completion: The ChatGPT user has reached their Subscription Sharing usage limit. Ask the user to try again after their usage limit resets or use an API key instead.";
 const CODEX_TEST_MODEL_SELECTION = {
