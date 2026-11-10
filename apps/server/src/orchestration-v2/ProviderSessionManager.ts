@@ -213,8 +213,8 @@ export interface ProviderSessionManagerV2Shape {
   }) => Effect.Effect<ReadonlyArray<ThreadId>>;
   /**
    * fork: limits, see FORK.md. Closes idle sessions now, oldest first, to free memory. A session
-   * is idle with no turn running and no background work pending; one attached to a `keepThreadIds`
-   * thread (waiting on Alice) stays. Resolves to the ids it released.
+   * is idle with no run in progress in its threads and no background work pending; one attached to
+   * a `keepThreadIds` thread (waiting on Alice) stays. Resolves to the ids it released.
    */
   readonly releaseIdleSessions?: (input: {
     readonly keepThreadIds: ReadonlySet<ThreadId>;
@@ -2351,6 +2351,19 @@ export const layerWithOptions = (
                       Effect.catchCause(() => Effect.succeed(true)),
                     );
               if (pendingWork) continue;
+              // A run marks its session busy only once its turn starts, so opening, resuming or
+              // compacting looked idle. Read just before closing: a run written after this read
+              // reaches its session only once its start checks are done.
+              const working = yield* Effect.filter([...entry.attachedThreadIds], (threadId) =>
+                projectionStore.getThreadRecords(threadId, ["runs"]).pipe(
+                  Effect.map(({ runs }) =>
+                    runs.some((run) => WORKING_RUN_STATUSES.has(run.status)),
+                  ),
+                  // An unreadable thread may still be working; never close it unseen.
+                  Effect.orElseSucceed(() => true),
+                ),
+              );
+              if (working.length > 0) continue;
               // The generation guard keeps a session that started a turn since the list was read.
               const exit = yield* Effect.exit(
                 releaseEntry({

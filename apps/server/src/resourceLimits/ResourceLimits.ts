@@ -24,6 +24,7 @@ import {
   effectiveLimits,
   type HostReading,
   isAlicesMessage,
+  isBufferedWake,
   latestUserMessage,
   launchAnyway,
   manualPause,
@@ -166,6 +167,8 @@ const make = Effect.fn("makeResourceLimits")(function* () {
     readonly message: Provenance;
     readonly writtenAt?: number;
   }) {
+    // A buffered wake's turn is already running, paused or not; its run only gives it T3's tools.
+    if (isBufferedWake(input.message)) return ADMITTED;
     const now = yield* Clock.currentTimeMillis;
     const current = yield* Ref.get(snapshot);
     const { pause } = current;
