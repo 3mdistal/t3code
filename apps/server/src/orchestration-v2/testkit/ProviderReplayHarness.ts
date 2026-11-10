@@ -299,6 +299,8 @@ export function layerWithRegistry<Error>(
     readonly poolFailoverDispatch?: (
       dispatch: Orchestrator.OrchestratorV2Shape["dispatch"],
     ) => Orchestrator.OrchestratorV2Shape["dispatch"];
+    // fork: retry a failed Claude start once, as the server does. See FORK.md.
+    readonly startRetry?: boolean;
   } = {},
 ): Layer.Layer<
   | Orchestrator.OrchestratorV2
@@ -423,7 +425,8 @@ export function layerWithRegistry<Error>(
         layerStores,
         // fork: the failover layer is defined after the orchestrator, see FORK.md.
         Layer.suspend(() => layerPoolFailover),
-        Layer.suspend(() => layerStartRetry), // fork: see FORK.md.
+        // fork: opt-in, so upstream tests keep their failed starts. See FORK.md.
+        options.startRetry === true ? Layer.suspend(() => layerStartRetry) : Layer.empty,
       ),
     ),
   );

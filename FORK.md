@@ -1100,10 +1100,13 @@ The retry writes only existing events: the `retry` attempt reason was already in
   gated on the attempt, so after a retry it commits nothing.
 - `Orchestrator.ts` handles `run.start-retry` and lets `replaceRunAttempt` take the `retry` reason;
   `packages/contracts/src/orchestrationV2.ts` adds the command. `packages/provider-core/src/server/failure.ts`
-  exports its redaction. `runtimeLayer.ts` and the replay harness provide the hook.
+  exports its redaction. `runtimeLayer.ts` provides the hook. The replay harness provides it only with its
+  `startRetry` option, because upstream's provider switch tests fail a start on purpose to test the manual resend.
 - Tests: `ProviderStartRetry.fork.test.ts` covers which failures retry, the log line and the log file.
   `ProviderStartRetry.integration.fork.test.ts` runs the orchestrator over SQLite with a Claude adapter whose first
-  start fails, then whose first two starts fail.
+  start fails, then whose first two starts fail. Two more switch a thread from Codex to Claude: when the start fails
+  after the history was injected, the retry reuses the native thread without injecting it again, and when the
+  injection fails, the retry moves to a new native thread with the history.
 
 ## Versions
 
