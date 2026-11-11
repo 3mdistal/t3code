@@ -1856,7 +1856,10 @@ it.effect("P6: a buffered wake starts over the limits and in a pause, and a Code
   }).pipe(Effect.provide(layerTest)),
 );
 
-/** A wake as versions before `isBufferedWake` held it, which the restart that installs this one can find. */
+/**
+ * A held wake, written directly: admission no longer holds one, but versions before `isBufferedWake` did, and the
+ * restart that installs this one can find theirs.
+ */
 const sendHeldWake = (threadId: ThreadId, text: string) =>
   Effect.gen(function* () {
     const orchestrator = yield* Orchestrator.OrchestratorV2;
