@@ -826,17 +826,21 @@ Users read about it in the Memory and CPU limits section of `docs/user/remote-ac
   last two minutes, and the next one, grows by 2 GiB (`releaseDue`). Without a reading or a release line,
   the 90 s spacing holds. On Oct 29, 18 threads waited on the PC with 30 to 50 GB free, because new work
   joined the line faster than one every 90 s.
-- An idle session stays open while one of its threads has a run preparing, starting, running or waiting. A run
-  marks its session busy only once its turn starts, so opening, resuming or compacting looked idle: on Nov 9 the
-  pass closed one session during Alice's `/compact` and another while her next message was reopening it, and both
-  messages failed with nothing retrying them. The pass reads a session's runs just before it closes the session. A
-  run written after that read reaches its session only once its start checks are done, and from then on the
-  release's idle-generation guard keeps the session.
+- An idle session stays open while one of its threads has a run preparing, starting, running or waiting, or while
+  an open is attaching a thread to it. A run marks its session busy only once its turn starts, so opening, resuming
+  or compacting looked idle: on Nov 9 the pass closed one session during Alice's `/compact` and another while her
+  next message was reopening it, and both messages failed with nothing retrying them. The pass reads a session's
+  runs just before it closes the session. A run written after that read still has to open the session, and `open`
+  marks a live session (`opening`) in the same step as it looks it up, so an idle release, this pass's or the idle
+  timer's, leaves the session alone until the open ends. From then on the release's idle-generation guard keeps
+  it. Checkpoint rollback opens a session and rolls back with no run, so a pass during a slow rollback can still
+  close it, as before this patch.
 - A wake a provider buffered (`isBufferedWake`) starts at once, over the limits and during a pause. It records a
   turn Claude's CLI started by itself when a background command finished, so holding it saved no memory: the turn
   ran anyway, with no T3 run, and every T3 tool it called failed with `parent_not_active` until the hold lifted
   (13 of 15 such failures in the day to Nov 10). Codex's wakes are prompted by T3, arrive as server messages, and
-  are still held.
+  are still held. Upstream's queue still holds a wake that arrives behind held messages once Stop has reached the
+  thread's running turn (`wakeSkipsHold` in `Orchestrator.ts`), Stop now's included; that stays upstream's call.
 - `resourceLimits.usePercent` (50 to 90) sets every memory line from one number. The reserve is (100 - N)% of RAM,
   and each line is the reserve times one of the memory gate's ratios, so 80% of the PC's RAM gives its
   25 / 8 GiB pause, 35 / 12 GiB release and 10 GiB critical lines. A saved line wins over its derived one.
@@ -852,7 +856,9 @@ Users read about it in the Memory and CPU limits section of `docs/user/remote-ac
     `dispatchPreparedRunRelease`. Resume, Send now, and the governor's releases pass `admitted`. A run held with
     nothing to queue behind takes upstream's queue branch, which the patch lets run without an active run.
   - `ProviderSessionManager.ts`: `releaseIdleSessions`, which picks sessions with `idleSessionsToClose`, skips one
-    whose threads have a working run, and closes the rest through upstream's `releaseEntry`. Upstream dropped `lastActivityAtMs` in v0.1.4, since nothing of its
+    whose threads have a working run, and closes the rest through upstream's `releaseEntry`. `open` sets the
+    entry's `opening` while it attaches a thread to a live session, and `removeLiveEntry` keeps an entry so marked
+    when releasing it as idle. Upstream dropped `lastActivityAtMs` in v0.1.4, since nothing of its
     own read it, so the patch keeps it: set when a session opens and each time its idle timer restarts, which
     every path that leaves a session idle goes through. `idleSessionsToClose` closes the oldest first by it.
   - `runtimeLayer.ts` wires the governor. `ws.ts` adds the limits to `serverGetHostResources`.
@@ -893,8 +899,8 @@ Users read about it in the Memory and CPU limits section of `docs/user/remote-ac
     run ends. Cancelling the note reports the interrupted turn. This covers the critical line's interrupts too.
   - A restart cancels a queued wake from a provider session, since that session is gone. The governor's first pass
     after a restart turns one that was being held into a note, so the thread still comes back, in its place in the
-    line. Buffered wakes now start at once, so only a wake an earlier version held reaches this, on the restart that
-    installs this one.
+    line. Buffered wakes now start at once in a hold, but upstream's queue can still hold one after a Stop, and an
+    earlier version of the fork left held ones behind.
   - While paused, every run start waits in its thread's queue: agents, delegated children, schedules, queued
     messages, usage-limit resumes and restart continuations. The off switch and "launch anyway" don't pass it. A
     message Alice types after the pause began still starts: at once in an idle thread, with its older queue waiting
@@ -966,7 +972,8 @@ Users read about it in the Memory and CPU limits section of `docs/user/remote-ac
   - Upstream refuses to snooze a thread with a queued message of its own. So held agent messages stay in the
     inbox, and only threads holding notifications alone (interrupted turns, refused launches) get snoozed.
 - Tests: `apps/server/src/resourceLimits/*.fork.test.ts`,
-  `apps/server/src/orchestration-v2/LimitsSweepKeepsRuns.fork.test.ts`, `packages/shared/src/serverSettings.fork.test.ts`,
+  `apps/server/src/orchestration-v2/LimitsSweepKeepsRuns.fork.test.ts`,
+  `apps/server/src/orchestration-v2/LimitsSweepKeepsOpens.fork.test.ts`, `packages/shared/src/serverSettings.fork.test.ts`,
   `packages/client-runtime/src/load-balancing.fork.test.ts`,
   `packages/provider-core/src/server/subagentProjection.fork.test.ts`, and `MachineLimits.logic.fork.test.ts`.
   `Governor.fork.test.ts` runs the real orchestrator with fake readings and a test clock.

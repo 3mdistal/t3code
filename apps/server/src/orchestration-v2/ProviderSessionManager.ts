@@ -243,6 +243,8 @@ interface LiveSessionEntry {
   readonly busyTurns: ReadonlySet<string>;
   // fork: limits, see FORK.md. When the session last went idle or saw activity.
   readonly lastActivityAtMs: number;
+  // fork: limits, see FORK.md. An open is attaching a thread to this live session; idle releases wait for it.
+  readonly opening: boolean;
   readonly idleFiber: Fiber.Fiber<void, never> | null;
   readonly pinnedSinceMs: number | null;
   readonly idleThreadUnloads: ReadonlyMap<ThreadId, IdleThreadUnload>;
@@ -961,7 +963,8 @@ export const layerWithOptions = (
               if (
                 input.onlyIfIdleGeneration !== undefined &&
                 (existing.busyTurns.size > 0 ||
-                  existing.idleGeneration !== input.onlyIfIdleGeneration)
+                  existing.idleGeneration !== input.onlyIfIdleGeneration ||
+                  existing.opening) // fork: limits, see FORK.md.
               ) {
                 return ["kept", current] as const;
               }
@@ -2176,24 +2179,44 @@ export const layerWithOptions = (
                 }
               }
               const key = sessionKey(input.providerSessionId);
-              const existing = (yield* Ref.get(sessions)).get(key);
+              // fork: limits, see FORK.md. Mark the open in the same step as the lookup, so an idle
+              // release cannot close the session between this read and the activity that ends the open.
+              const existing = yield* Ref.modify(sessions, (current) => {
+                const entry = current.get(key);
+                if (entry === undefined) return [undefined, current] as const;
+                const updated = new Map(current);
+                updated.set(key, { ...entry, opening: true });
+                return [entry, updated] as const;
+              });
               if (existing !== undefined) {
-                const attached = existing.attachedThreadIds.has(input.threadId);
-                if (!attached && !existing.supportsMultipleProviderThreads) {
-                  return yield* new ProviderSessionOpenError({
-                    instanceId: input.modelSelection.instanceId,
-                    providerSessionId: input.providerSessionId,
-                    cause: `Provider ${existing.runtime.driver} does not support attaching multiple app threads to one session.`,
-                  });
-                }
-                if (!attached) yield* agentScope.clear(input.threadId);
-                yield* ensureThreadAttached({
-                  providerSessionId: input.providerSessionId,
-                  threadId: input.threadId,
-                  providerInstanceId: existing.runtime.instanceId,
+                // fork: limits, see FORK.md.
+                const endOpen = Ref.update(sessions, (current) => {
+                  const entry = current.get(key);
+                  if (entry === undefined || entry.runtime !== existing.runtime || !entry.opening) {
+                    return current;
+                  }
+                  const updated = new Map(current);
+                  updated.set(key, { ...entry, opening: false });
+                  return updated;
                 });
-                yield* touchActivity(input.providerSessionId);
-                return existing.exposedRuntime;
+                return yield* Effect.gen(function* () {
+                  const attached = existing.attachedThreadIds.has(input.threadId);
+                  if (!attached && !existing.supportsMultipleProviderThreads) {
+                    return yield* new ProviderSessionOpenError({
+                      instanceId: input.modelSelection.instanceId,
+                      providerSessionId: input.providerSessionId,
+                      cause: `Provider ${existing.runtime.driver} does not support attaching multiple app threads to one session.`,
+                    });
+                  }
+                  if (!attached) yield* agentScope.clear(input.threadId);
+                  yield* ensureThreadAttached({
+                    providerSessionId: input.providerSessionId,
+                    threadId: input.threadId,
+                    providerInstanceId: existing.runtime.instanceId,
+                  });
+                  yield* touchActivity(input.providerSessionId);
+                  return existing.exposedRuntime;
+                }).pipe(Effect.ensuring(endOpen));
               }
 
               const adapter = yield* registry.get(input.modelSelection.instanceId).pipe(
@@ -2293,6 +2316,7 @@ export const layerWithOptions = (
                 idleGeneration: 0,
                 busyTurns: new Set(),
                 lastActivityAtMs: openedAtMs, // fork: limits, see FORK.md.
+                opening: false, // fork: limits, see FORK.md.
                 idleFiber: null,
                 pinnedSinceMs: null,
                 idleThreadUnloads: new Map(),
@@ -2352,19 +2376,22 @@ export const layerWithOptions = (
                     );
               if (pendingWork) continue;
               // A run marks its session busy only once its turn starts, so opening, resuming or
-              // compacting looked idle. Read just before closing: a run written after this read
-              // reaches its session only once its start checks are done.
-              const working = yield* Effect.filter([...entry.attachedThreadIds], (threadId) =>
-                projectionStore.getThreadRecords(threadId, ["runs"]).pipe(
+              // compacting looked idle. A run written after this read still has to open the
+              // session, and the release below keeps one an open has reached.
+              let working = false;
+              for (const threadId of entry.attachedThreadIds) {
+                working = yield* projectionStore.getThreadRecords(threadId, ["runs"]).pipe(
                   Effect.map(({ runs }) =>
                     runs.some((run) => WORKING_RUN_STATUSES.has(run.status)),
                   ),
                   // An unreadable thread may still be working; never close it unseen.
                   Effect.orElseSucceed(() => true),
-                ),
-              );
-              if (working.length > 0) continue;
-              // The generation guard keeps a session that started a turn since the list was read.
+                );
+                if (working) break;
+              }
+              if (working) continue;
+              // The release keeps a session an open is attaching to, or that opened or started a
+              // turn since the list was read.
               const exit = yield* Effect.exit(
                 releaseEntry({
                   providerSessionId: entry.runtime.providerSessionId,
