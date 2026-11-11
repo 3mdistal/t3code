@@ -880,8 +880,8 @@ Users read about it in the Memory and CPU limits section of `docs/user/remote-ac
   - `subagentProjection.ts`: `delegatedTaskProgress` counts a child held with a resume note as still working.
   - `orchestratorMcp.ts` in contracts adds `OrchestratorMcpHeldRun` and the optional `held` fields.
     `OrchestratorMcpService.ts` fills them in `readTask`, `readRemoteTask`, `readThread` and `threadRun`, and the
-    orchestrator toolkit's `tools.ts` names `held` in `task_status` and `t3_thread_read`.
-    `RemoteDelegation.ts` adds `heldThere`.
+    orchestrator toolkit's `tools.ts` names `held` in `task_status` and `t3_thread_read`, which
+    `agentContextBudget.json` records as 121 more bytes of MCP tool list. `RemoteDelegation.ts` adds `heldThere`.
 - **Pause all** is a manual hold on top of the same path, for when Alice wants every agent on a machine quiet, with
   memory to spare or not. It holds until she resumes, and has no expiry.
   - Two modes: `finish` lets running turns end, then everything waits. `stop` also interrupts every running turn at
