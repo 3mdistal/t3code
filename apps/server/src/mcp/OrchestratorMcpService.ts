@@ -123,6 +123,7 @@ import { isLiveCallerShell, threadNotFound } from "./threadAccess.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as PeerForwarding from "../peer/PeerForwarding.ts";
 import * as RemoteDelegation from "../peer/RemoteDelegation.ts";
+import { heldQueuedRun, heldRun, heldRunRecordFilter } from "./heldRuns.ts"; // fork: limits, see FORK.md.
 
 const DEFAULT_WAIT_TIMEOUT_MS = 10 * 60 * 1_000;
 const MAX_WAIT_TIMEOUT_MS = 60 * 60 * 1_000;
@@ -863,6 +864,7 @@ function threadRun(run: OrchestrationV2Run): OrchestratorMcpThreadRun {
     runId: run.id,
     ordinal: run.ordinal,
     status: run.status,
+    ...(run.status === "queued" && run.queueHeld === true ? { held: true as const } : {}), // fork: limits, see FORK.md.
     providerInstanceId: run.modelSelection.instanceId,
     model: run.modelSelection.model,
     requestedAt: DateTime.formatIso(run.requestedAt),
@@ -1452,6 +1454,19 @@ const make = Effect.gen(function* () {
       ? crypto.randomUUIDv4().pipe(Effect.orDie)
       : Effect.succeed(clientRequestId);
 
+  // fork: limits. The thread's next run if T3 holds it, and why; see FORK.md.
+  const readHeldRun = Effect.fn("OrchestratorMcpService.readHeldRun")(function* (
+    threadId: ThreadId,
+    projection: Pick<OrchestrationV2ThreadProjection, "runs">,
+  ) {
+    const run = heldQueuedRun(projection);
+    if (run === undefined) return undefined;
+    const records = yield* threadManagement
+      .getThreadRecords(threadId, ["messages", "turnItems"], heldRunRecordFilter(run))
+      .pipe(Effect.mapError(threadManagementFailure));
+    return heldRun(run, records);
+  });
+
   const readTask = Effect.fn("OrchestratorMcpService.readTask")(function* (
     scope: McpThreadInvocationScope,
     taskId: NodeId,
@@ -1547,6 +1562,9 @@ const make = Effect.gen(function* () {
           : taskStatusForRun(taskResultRun ?? childRun) === "queued"
             ? "queued"
             : "running";
+    // fork: limits. A child whose next run T3 holds is not working; see FORK.md.
+    const held =
+      task.result === null ? yield* readHeldRun(task.childThreadId, childControls) : undefined;
     const derivedResult =
       task.result !== null
         ? task.result
@@ -1592,6 +1610,7 @@ const make = Effect.gen(function* () {
       childNodeId: task.id,
       status,
       workState,
+      ...(held === undefined ? {} : { held }), // fork: limits, see FORK.md.
       hasPendingChildRuns: hasPendingChildRuns(childProjection, childRun),
       providerInstanceId: modelSelection.instanceId,
       model: modelSelection.model,
@@ -1708,6 +1727,8 @@ const make = Effect.gen(function* () {
           ? task.status
           : "completed";
     const terminal = isTerminalTaskStatus(status);
+    // fork: limits. Asked of its thread there, so a held child reads as held; see FORK.md.
+    const held = terminal ? undefined : yield* remoteDelegation.heldThere(scope, task);
     if (
       acknowledgeTerminal &&
       terminal &&
@@ -1750,6 +1771,7 @@ const make = Effect.gen(function* () {
       childNodeId: task.id,
       status,
       workState: terminal ? "result_available" : "working",
+      ...(held === undefined ? {} : { held }), // fork: limits, see FORK.md.
       hasPendingChildRuns: false,
       providerInstanceId: task.providerInstanceId,
       model: task.model,
@@ -2979,14 +3001,18 @@ const make = Effect.gen(function* () {
           }
         }
       }
+      const held = yield* readHeldRun(target.thread.id, target); // fork: limits, see FORK.md.
       return {
-        thread: threadDetail(
-          scope,
-          target,
-          timeline.totalItems,
-          shell,
-          yield* Clock.currentTimeMillis,
-        ),
+        thread: {
+          ...threadDetail(
+            scope,
+            target,
+            timeline.totalItems,
+            shell,
+            yield* Clock.currentTimeMillis,
+          ),
+          ...(held === undefined ? {} : { held }), // fork: limits, see FORK.md.
+        },
         recentRuns: target.runs
           .toSorted((left, right) => right.ordinal - left.ordinal)
           .slice(0, input.runLimit ?? DEFAULT_THREAD_RUN_LIMIT)
