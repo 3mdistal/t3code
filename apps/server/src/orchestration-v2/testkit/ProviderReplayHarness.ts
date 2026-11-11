@@ -43,6 +43,7 @@ import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as Orchestrator from "../Orchestrator.ts";
 import * as ProjectionStore from "../ProjectionStore.ts";
 import * as ProviderPoolFailover from "../ProviderPoolFailover.ts"; // fork: see FORK.md.
+import * as ProviderStartRetry from "../ProviderStartRetry.ts"; // fork: see FORK.md.
 import * as ProjectStore from "../ProjectStore.ts";
 import * as ProviderAdapterRegistry from "../ProviderAdapterRegistry.ts";
 import * as ProviderAuthService from "../../provider/ProviderAuthService.ts";
@@ -315,6 +316,8 @@ export function layerWithRegistry<Error>(
     readonly poolFailoverDispatch?: (
       dispatch: Orchestrator.OrchestratorV2Shape["dispatch"],
     ) => Orchestrator.OrchestratorV2Shape["dispatch"];
+    // fork: retry a failed Claude start once, as the server does. See FORK.md.
+    readonly startRetry?: boolean;
   } = {},
 ): Layer.Layer<
   | Orchestrator.OrchestratorV2
@@ -463,6 +466,8 @@ export function layerWithRegistry<Error>(
         ThreadCommandExecutor.layer,
         // fork: the failover layer is defined after the orchestrator, see FORK.md.
         Layer.suspend(() => layerPoolFailover),
+        // fork: opt-in, so upstream tests keep their failed starts. See FORK.md.
+        options.startRetry === true ? Layer.suspend(() => layerStartRetry) : Layer.empty,
       ),
     ),
   );
@@ -567,6 +572,11 @@ export function layerWithRegistry<Error>(
     Layer.provide(
       Layer.mergeAll(layerFailoverOrchestrator, layerStores, layerServerSettings, layerPoolCatalog),
     ),
+  );
+  // fork: start retry, see FORK.md.
+  const layerStartRetry = ProviderStartRetry.layer.pipe(
+    Layer.provide(Layer.mergeAll(layerOrchestratorProvided, layerServerConfig)),
+    Layer.provide(NodeServices.layer),
   );
   const layerThreadManagementProvided = Layer.unwrap(
     Effect.gen(function* () {
