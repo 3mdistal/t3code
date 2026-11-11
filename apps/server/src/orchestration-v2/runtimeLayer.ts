@@ -36,6 +36,7 @@ import * as ProjectStore from "./ProjectStore.ts";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ProviderPoolCatalog from "./ProviderPoolCatalog.ts"; // fork: see FORK.md.
 import * as ProviderPoolFailover from "./ProviderPoolFailover.ts"; // fork: see FORK.md.
+import * as ProviderStartRetry from "./ProviderStartRetry.ts"; // fork: see FORK.md.
 import * as ProviderContinuationRequests from "@t3tools/provider-core/server/ProviderContinuationRequests";
 import * as ProviderContinuationService from "./ProviderContinuationService.ts";
 import * as ThreadTitleRegenerationService from "./ThreadTitleRegenerationService.ts";
@@ -171,6 +172,8 @@ const layerRunExecutionServiceProvided = RunExecutionService.layer.pipe(
           Layer.provide(Layer.merge(layerOrchestratorProvided, ProjectionStore.layer)),
         ),
       ),
+      // fork: the start failure hook dispatches into the orchestrator too. See FORK.md.
+      Layer.suspend(() => ProviderStartRetry.layer.pipe(Layer.provide(layerOrchestratorProvided))),
     ),
   ),
 );
