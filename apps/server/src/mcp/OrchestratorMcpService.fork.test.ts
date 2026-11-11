@@ -9,6 +9,7 @@ import {
   RunId,
   ThreadId,
   type OrchestrationV2ThreadProjection,
+  type Project,
   type ServerProvider,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -240,5 +241,117 @@ describe("OrchestratorMcpService provider resolution", () => {
           assert.equal(request.modelSelection.model, "gpt-5.4");
         }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(layerDependencies))));
       }),
+  );
+
+  it.effect("a local worktree task starts from this thread's commit and refuses baseRef", () =>
+    Effect.gen(function* () {
+      const dispatched = yield* Ref.make<ReadonlyArray<unknown>>([]);
+      const task = {
+        id: taskId,
+        threadId: parentThreadId,
+        runId: parentRunId,
+        parentNodeId,
+        origin: "app_owned",
+        createdBy: "agent",
+        driver: ProviderDriverKind.make("codex"),
+        providerInstanceId: codexInstanceId,
+        providerThreadId: null,
+        childThreadId,
+        nativeTaskRef: null,
+        prompt: "Fix the bug.",
+        title: null,
+        model: "gpt-5.4",
+        status: "running",
+        result: null,
+        startedAt: null,
+        completedAt: null,
+      };
+      let delegated = false;
+      const layerDependencies = Layer.mergeAll(
+        NodeServices.layer,
+        Layer.mock(ThreadManagementService.ThreadManagementService)({
+          hasReceipt: () => Effect.succeed(false),
+          assertProviderInstanceEnabled: () => Effect.void,
+          isProviderInstanceEnabledForProject: () => Effect.succeed(true),
+          getThreadRecords: (threadId) =>
+            Effect.succeed(
+              threadId === parentThreadId
+                ? parentProjection(delegated ? [task] : [])
+                : childProjection,
+            ),
+          dispatch: (command) =>
+            Ref.update(dispatched, (commands) => [...commands, command]).pipe(
+              Effect.andThen(
+                Effect.sync(() => {
+                  delegated = true;
+                }),
+              ),
+              Effect.as({
+                sequence: 1,
+                storedEvents: [
+                  {
+                    sequence: 1,
+                    commandId: null,
+                    event: { type: "subagent.updated", payload: task },
+                  },
+                ],
+              } as never),
+            ),
+        }),
+        ServerSettings.layerTest(),
+        providerRegistryLayer([
+          providerSnapshot({
+            instanceId: codexInstanceId,
+            driver: ProviderDriverKind.make("codex"),
+            model: "gpt-5.4",
+          }),
+        ]),
+        adapterRegistryLayer([codexInstanceId]),
+        Layer.mock(ProjectService.ProjectService)({
+          getById: () =>
+            Effect.succeedSome({
+              id: projectId,
+              title: "Project",
+              workspaceRoot: "/repo",
+            } as unknown as Project),
+        }),
+        Layer.mock(SecretRequests.SecretRequests)({}),
+        // A local task never reaches the linked-environment path.
+        Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+        Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+      );
+      const layerService = OrchestratorMcpService.layer.pipe(
+        Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
+        Layer.provide(
+          Layer.mock(GitVcsDriver.GitVcsDriver)({
+            resolveCommit: () => Effect.succeed({ commitSha: "parent-commit" } as never),
+          }),
+        ),
+      );
+
+      yield* Effect.gen(function* () {
+        const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+        const refused = yield* service
+          .delegateTask(scope, { task: "Fix the bug.", isolation: "worktree", baseRef: "main" })
+          .pipe(Effect.flip);
+        assert.equal(refused.code, "invalid_request");
+        assert.include(refused.message, "omit baseRef");
+        assert.lengthOf(yield* Ref.get(dispatched), 0);
+
+        yield* service.delegateTask(scope, {
+          task: "Fix the bug.",
+          isolation: "worktree",
+          clientRequestId: "local-worktree",
+        });
+        const [request] = (yield* Ref.get(dispatched)) as ReadonlyArray<{
+          workspaceStrategy?: unknown;
+        }>;
+        assert.deepEqual(request?.workspaceStrategy, {
+          type: "worktree",
+          baseRef: "parent-commit",
+          startFromOrigin: false,
+        });
+      }).pipe(Effect.provide(layerService.pipe(Layer.provide(layerDependencies))));
+    }),
   );
 });

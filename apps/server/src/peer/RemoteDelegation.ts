@@ -212,13 +212,20 @@ const make = Effect.gen(function* () {
       }
       const parentNodeId = parentRun.rootNodeId;
       const { target } = input;
-      // A worktree there would branch from a commit this checkout has and the
-      // other may not, so a remote task runs in that project's checkout.
-      if (input.isolation === "worktree") {
+      // fork: a worktree there starts from a ref on its project's origin, never this
+      // checkout's commit, which the other machine may not have; see FORK.md.
+      if (input.isolation === "worktree" && input.baseRef === undefined) {
         return yield* new OrchestratorMcpFailure({
           code: "invalid_request",
           message:
-            'A task in a linked environment runs in that project\'s checkout; isolation "worktree" is not supported there. Omit isolation, or use t3_thread_launch with environmentId and a worktree workspaceStrategy.',
+            'Pass baseRef with isolation "worktree" in a linked environment: the branch, tag or commit on that project\'s origin to start from, such as the PR\'s branch or "main". Nothing was launched.',
+        });
+      }
+      if (input.isolation !== "worktree" && input.baseRef !== undefined) {
+        return yield* new OrchestratorMcpFailure({
+          code: "invalid_request",
+          message:
+            'baseRef needs isolation "worktree"; a shared task runs in that project\'s checkout. Nothing was launched.',
         });
       }
       // The provider and model inherit as they do for a task here. Another
@@ -270,6 +277,16 @@ const make = Effect.gen(function* () {
           modelSelection: { instanceId, model, ...(options === undefined ? {} : { options }) },
           ...(runtimeMode === undefined ? {} : { runtimeMode }),
           ...(interactionMode === undefined ? {} : { interactionMode }),
+          // fork: see FORK.md.
+          ...(input.baseRef === undefined
+            ? {}
+            : {
+                workspaceStrategy: {
+                  type: "worktree" as const,
+                  baseRef: input.baseRef,
+                  startFromOrigin: true,
+                },
+              }),
           message: task,
           clientRequestId: `delegate:${scope.thread.threadId}:${key}`,
           // The thread there shows it is this thread's subagent, with a way back.
