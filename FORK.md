@@ -1170,6 +1170,28 @@ finished replies.
   `ChatMarkdown`.
 - Tests: `apps/web/src/components/chat/replyPullRequestLinks.fork.test.ts`.
 
+### A delegated task on a linked machine can have its own worktree (`fork:`)
+
+Alice's agents send code work to her cloud machine when the PC is short of memory, and each child there needs a
+checkout T3 makes and tracks. Upstream refused `isolation: "worktree"` for a `delegate_task` with
+`target.environmentId`: a local worktree starts from the parent's commit, which the other machine may not have.
+Such a task now needs `baseRef`, a branch, tag or commit on that project's origin, such as the PR's branch or `main`,
+and the launch there gets `workspaceStrategy: { type: "worktree", baseRef, startFromOrigin: true }`, which fetches the
+ref from origin when that machine doesn't have it. There's no default: the caller always knows whether it means the
+PR or `main`, and a silent `main` would test the wrong code. A missing `baseRef` is refused before anything launches,
+and so is `baseRef` on a shared task there or on any local task, whose worktree still starts from the parent's
+commit. A retry reuses the launch's key, which the other side replays as the same thread and worktree. The other
+machine needs no patch: stock `t3_thread_launch` already takes that strategy.
+
+- `packages/contracts/src/orchestratorMcp.ts`: `baseRef` on `delegate_task`, and the `isolation` description.
+- `apps/server/src/peer/RemoteDelegation.ts` forwards the strategy; `apps/server/src/mcp/OrchestratorMcpService.ts`
+  refuses `baseRef` for a local task; `apps/server/src/mcp/toolkits/orchestrator/tools.ts` names it in the tool
+  description. `apps/server/src/provider/agentContextBudget.json` records the longer tool list.
+- Tests: `apps/server/src/peer/RemoteDelegation.fork.test.ts` covers the forwarded strategy, a shared task, both
+  refusals and a retry. `apps/server/src/mcp/OrchestratorMcpService.fork.test.ts` shows a local worktree task still
+  starts from the parent's commit and refuses `baseRef`. Upstream's "refuses worktree isolation for a task there"
+  in `RemoteDelegation.test.ts` passes unchanged, as the missing `baseRef` refusal.
+
 ## Versions
 
 A release is `vX.Y.Z-alice.N`. `X.Y.Z` is the upstream stable tag the stack sits on, and `N` counts the fork's

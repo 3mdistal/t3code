@@ -2255,6 +2255,13 @@ const make = Effect.gen(function* () {
           ? awaitTask(scope, taskId, input.timeoutMs)
           : readTask(scope, taskId, false, true);
       }
+      // fork: baseRef is for a linked environment's worktree; see FORK.md.
+      if (input.baseRef !== undefined) {
+        return yield* failure(
+          "invalid_request",
+          "baseRef is only for a task in a linked environment (target.environmentId). A worktree here starts from this thread's commit; omit baseRef. Nothing was launched.",
+        );
+      }
       const { scope, parent } = yield* loadThreadCaller(callerScope, "delegate_task");
       if (
         input.target?.projectId !== undefined &&
