@@ -10,6 +10,7 @@ import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as DateTime from "effect/DateTime";
 
 import { isBufferedProviderNotification } from "../orchestration-v2/NotificationMailbox.ts";
+import { queuedRunsInDeliveryOrder } from "../orchestration-v2/QueuedRunOrder.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 
 /** Said for a hold without the limits' notice: Stop, a failed run, a missing worktree or a restart. */
@@ -21,37 +22,38 @@ const SESSION_WORKING =
   " This run is the session's own wake after its background work ended: the session may still be working outside T3, where T3 tools fail, until the run starts.";
 
 /**
- * The queued run T3 holds that would start next, when nothing runs on the thread. A thread with a
- * run going is working, whatever waits behind it.
+ * The thread's queued runs, when T3 holds every one and nothing runs. The scheduler starts the first
+ * queued run it doesn't hold (`Orchestrator`'s `nextQueuedRun`), so one it can start, or a run going,
+ * means the thread is working, whatever waits behind it.
  */
-export function heldQueuedRun(
+export function heldQueue(
   projection: Pick<OrchestrationV2ThreadProjection, "runs">,
-): OrchestrationV2Run | undefined {
-  if (ThreadManagementService.latestActiveRun(projection) !== undefined) return undefined;
-  return projection.runs
-    .filter((run) => run.status === "queued" && run.queueHeld === true)
-    .toSorted(
-      (left, right) =>
-        (left.queuePosition ?? left.ordinal) - (right.queuePosition ?? right.ordinal) ||
-        left.ordinal - right.ordinal,
-    )[0];
+): ReadonlyArray<OrchestrationV2Run> {
+  if (ThreadManagementService.latestActiveRun(projection) !== undefined) return [];
+  const queued = projection.runs.filter((run) => run.status === "queued");
+  return queued.every((run) => run.queueHeld === true) ? queued : [];
 }
 
-/** The records `heldRun` reads: the run's message and its system notices. */
-export const heldRunRecordFilter = (run: OrchestrationV2Run) => ({
-  messageIds: [run.userMessageId],
-  turnItemRunIds: [run.id],
+/** The records `heldRun` reads: the queued runs' messages and their system notices. */
+export const heldRunRecordFilter = (queue: ReadonlyArray<OrchestrationV2Run>) => ({
+  messageIds: queue.map((run) => run.userMessageId),
+  turnItemRunIds: queue.map((run) => run.id),
   turnItemTypes: ["system_notice" as const],
 });
 
-/** `run`, held, with the limits' notice as its reason when they hold it. */
+/**
+ * The held run that starts first once the hold ends, in the scheduler's order, with the limits' notice
+ * as its reason when they hold it.
+ */
 export function heldRun(
-  run: OrchestrationV2Run,
+  queue: ReadonlyArray<OrchestrationV2Run>,
   records: {
     readonly messages: ReadonlyArray<OrchestrationV2ConversationMessage>;
     readonly turnItems: ReadonlyArray<OrchestrationV2TurnItem>;
   },
-): OrchestratorMcpHeldRun {
+): OrchestratorMcpHeldRun | undefined {
+  const run = queuedRunsInDeliveryOrder({ runs: queue, messages: records.messages })[0];
+  if (run === undefined) return undefined;
   const noticeId = IdAllocator.derive.runSignalTurnItem({ runId: run.id, signal: "limits-hold" });
   const notice = records.turnItems.find((item) => item.id === noticeId);
   const message = records.messages.find((candidate) => candidate.id === run.userMessageId);

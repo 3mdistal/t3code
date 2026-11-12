@@ -27,7 +27,7 @@ import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
-import { heldQueuedRun, heldRun } from "./heldRuns.ts";
+import { heldQueue, heldRun } from "./heldRuns.ts";
 import type { McpInvocationScope } from "./McpInvocationContext.ts";
 import * as OrchestratorMcpService from "./OrchestratorMcpService.ts";
 
@@ -68,47 +68,88 @@ const bufferedWake = {
   notification: { source: { kind: "background_task" }, outcome: "updated", summary: "CI ended" },
 };
 
-describe("heldQueuedRun", () => {
-  it("is the queued run T3 holds that would start next", () => {
-    const held = heldQueuedRun({
+const thirdRunId = RunId.make("run:held-child-3");
+
+describe("heldQueue", () => {
+  it("is every queued run when T3 holds them all", () => {
+    const queue = heldQueue({
       runs: [
         run({ id: firstRunId, ordinal: 1 }),
         run({ id: wakeRunId, ordinal: 2, status: "queued", queueHeld: true, queuePosition: 2 }),
-        run({
-          id: RunId.make("run:held-child-3"),
-          ordinal: 3,
-          status: "queued",
-          queueHeld: true,
-          queuePosition: 1,
-        }),
+        run({ id: thirdRunId, ordinal: 3, status: "queued", queueHeld: true, queuePosition: 1 }),
       ],
     });
-    assert.equal(held?.id, RunId.make("run:held-child-3"));
+    assert.deepStrictEqual(
+      queue.map((queued) => queued.id),
+      [wakeRunId, thirdRunId],
+    );
   });
 
-  it("is nothing while a run goes or the queue just waits its turn", () => {
-    assert.isUndefined(
-      heldQueuedRun({
+  it("is nothing while a run goes, or while T3 can start a queued run", () => {
+    assert.deepStrictEqual(
+      heldQueue({
         runs: [
           run({ id: firstRunId, ordinal: 1, status: "running" }),
           run({ id: wakeRunId, ordinal: 2, status: "queued", queueHeld: true }),
         ],
       }),
+      [],
     );
-    assert.isUndefined(
-      heldQueuedRun({ runs: [run({ id: firstRunId, ordinal: 1, status: "queued" })] }),
+    // The scheduler starts the run it doesn't hold, whatever T3 holds behind it.
+    assert.deepStrictEqual(
+      heldQueue({
+        runs: [
+          run({ id: firstRunId, ordinal: 1, status: "queued", queuePosition: 1 }),
+          run({ id: wakeRunId, ordinal: 2, status: "queued", queueHeld: true, queuePosition: 2 }),
+        ],
+      }),
+      [],
+    );
+    assert.deepStrictEqual(
+      heldQueue({ runs: [run({ id: firstRunId, ordinal: 1, status: "queued" })] }),
+      [],
     );
   });
 });
 
 describe("heldRun", () => {
+  const held = (input: Partial<OrchestrationV2Run> & Pick<OrchestrationV2Run, "id" | "ordinal">) =>
+    run({ status: "queued", queueHeld: true, ...input });
+
+  it("names the held run that starts first", () => {
+    const named = heldRun(
+      [
+        held({ id: wakeRunId, ordinal: 2, queuePosition: 2 }),
+        held({ id: thirdRunId, ordinal: 3, queuePosition: 1 }),
+      ],
+      { messages: [], turnItems: [] },
+    );
+    assert.equal(named?.runId, thirdRunId);
+  });
+
+  it("puts a child's finished result first, as the scheduler does", () => {
+    const resultMessageId = MessageId.make("message:held-child-result");
+    const named = heldRun(
+      [
+        held({ id: wakeRunId, ordinal: 2, queuePosition: 1 }),
+        held({ id: thirdRunId, ordinal: 3, queuePosition: 2, userMessageId: resultMessageId }),
+      ],
+      {
+        messages: [
+          { id: resultMessageId, createdBy: "system", delegatedCompletion: { taskId } },
+        ] as never,
+        turnItems: [],
+      },
+    );
+    assert.equal(named?.runId, thirdRunId);
+  });
+
   it("gives the limits' notice as the reason", () => {
-    const queued = run({ id: wakeRunId, ordinal: 2, status: "queued", queueHeld: true });
-    const held = heldRun(queued, {
+    const named = heldRun([held({ id: wakeRunId, ordinal: 2 })], {
       messages: [],
       turnItems: [noticeFor(wakeRunId, limitsNotice)] as never,
     });
-    assert.deepStrictEqual(held, {
+    assert.deepStrictEqual(named, {
       runId: wakeRunId,
       since: "2026-11-09T19:21:42.000Z",
       reason: limitsNotice,
@@ -116,16 +157,12 @@ describe("heldRun", () => {
   });
 
   it("says a Claude wake's session may still be working outside T3", () => {
-    const queued = run({
-      id: wakeRunId,
-      ordinal: 2,
-      status: "queued",
-      queueHeld: true,
-      userMessageId: wakeMessageId,
+    const named = heldRun([held({ id: wakeRunId, ordinal: 2, userMessageId: wakeMessageId })], {
+      messages: [bufferedWake] as never,
+      turnItems: [],
     });
-    const held = heldRun(queued, { messages: [bufferedWake] as never, turnItems: [] });
-    assert.match(held.reason, /^T3 holds this thread's queue/);
-    assert.match(held.reason, /may still be working outside T3/);
+    assert.match(named?.reason ?? "", /^T3 holds this thread's queue/);
+    assert.match(named?.reason ?? "", /may still be working outside T3/);
   });
 });
 

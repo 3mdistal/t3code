@@ -123,7 +123,7 @@ import { isLiveCallerShell, threadNotFound } from "./threadAccess.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as PeerForwarding from "../peer/PeerForwarding.ts";
 import * as RemoteDelegation from "../peer/RemoteDelegation.ts";
-import { heldQueuedRun, heldRun, heldRunRecordFilter } from "./heldRuns.ts"; // fork: limits, see FORK.md.
+import { heldQueue, heldRun, heldRunRecordFilter } from "./heldRuns.ts"; // fork: limits, see FORK.md.
 
 const DEFAULT_WAIT_TIMEOUT_MS = 10 * 60 * 1_000;
 const MAX_WAIT_TIMEOUT_MS = 60 * 60 * 1_000;
@@ -1459,12 +1459,12 @@ const make = Effect.gen(function* () {
     threadId: ThreadId,
     projection: Pick<OrchestrationV2ThreadProjection, "runs">,
   ) {
-    const run = heldQueuedRun(projection);
-    if (run === undefined) return undefined;
+    const queue = heldQueue(projection);
+    if (queue.length === 0) return undefined;
     const records = yield* threadManagement
-      .getThreadRecords(threadId, ["messages", "turnItems"], heldRunRecordFilter(run))
+      .getThreadRecords(threadId, ["messages", "turnItems"], heldRunRecordFilter(queue))
       .pipe(Effect.mapError(threadManagementFailure));
-    return heldRun(run, records);
+    return heldRun(queue, records);
   });
 
   const readTask = Effect.fn("OrchestratorMcpService.readTask")(function* (

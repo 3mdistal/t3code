@@ -843,9 +843,10 @@ Users read about it in the Memory and CPU limits section of `docs/user/remote-ac
   thread's running turn (`wakeSkipsHold` in `Orchestrator.ts`), Stop now's included; that stays upstream's call.
 - A parent can tell a held child from a working one. On Nov 9 a PC child's wake waited 9 hours behind the limits
   while its session kept working, and the parent on the Mac read `running` and `working` the whole time, so nobody
-  looked. `task_status` and `t3_thread_read` now carry `held` (`runId`, `since`, `reason`) while T3 holds a thread's
-  next queued run with nothing else running there (`mcp/heldRuns.ts`). The reason is the limits' notice when they
-  hold it, and otherwise says the queue waits to be resumed, as after a Stop. A held run that is a buffered Claude wake
+  looked. `task_status` and `t3_thread_read` now carry `held` (`runId`, `since`, `reason`) while T3 holds every
+  queued run on a thread and nothing runs there (`mcp/heldRuns.ts`): the scheduler starts any queued run it doesn't
+  hold. `held` names the run that starts first once the hold ends, in the scheduler's order (`QueuedRunOrder.ts`).
+  The reason is the limits' notice when they hold it, and otherwise says the queue waits to be resumed, as after a Stop. A held run that is a buffered Claude wake
   also says the session may still be working outside T3. `t3_thread_read`'s runs mark each held one `held: true`.
   A task in a linked environment asks its thread there, as its follower does, for at most 3 s (`heldThere` in
   `RemoteDelegation.ts`); a machine asleep, a dropped route or an older peer reads as before. `status` and
