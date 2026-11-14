@@ -1238,7 +1238,7 @@ export const recordingEncoderScript = (frameRate: BrowserRecordingFrameRate) => 
   let cursor = null;
   let ring = null;
   const AGENT_CURSOR_PATH = new Path2D("M4.037 4.688a.495.495 0 0 1 .651-.651l16 6.5a.5.5 0 0 1-.063.947l-6.124 1.58a2 2 0 0 0-1.438 1.435l-1.579 6.126a.5.5 0 0 1-.947.063z");
-  let ringTimer = null;
+  let ticker = null;
   let scale = 1;
   let offsetX = 0;
   let offsetY = 0;
@@ -1301,14 +1301,15 @@ export const recordingEncoderScript = (frameRate: BrowserRecordingFrameRate) => 
           recorder.onstart = resolve;
           recorder.onerror = (event) => reject(event.error);
         });
-        stopped = new Promise((resolve) => { recorder.onstop = resolve; });
+        // fork: a recorder that stops on its own also ends the repaint. See FORK.md.
+        stopped = new Promise((resolve) => { recorder.onstop = () => { clearInterval(ticker); resolve(); }; });
         recorder.ondataavailable = (event) => {
           if (tooLarge || event.data.size === 0) return;
           sizeBytes += event.data.size;
           if (sizeBytes > ${PROVIDER_SEND_TURN_MAX_FILE_BYTES}) {
             tooLarge = true;
             chunks.length = 0;
-            clearInterval(ringTimer);
+            clearInterval(ticker);
             frame?.close();
             frame = null;
             if (recorder.state !== "inactive") recorder.stop();
@@ -1318,6 +1319,9 @@ export const recordingEncoderScript = (frameRate: BrowserRecordingFrameRate) => 
           chunks.push(event.data);
         };
         recorder.start(1000);
+        // fork: screencasts send frames only when the page changes; repainting the newest one
+        // keeps the video at a steady frame rate through still stretches. See FORK.md.
+        ticker = setInterval(paint, ${1000 / frameRate});
       }
       // Frame px per page CSS px, before fitting into the canvas.
       bitmap.cssScale = bitmap.width / cssWidth;
@@ -1330,14 +1334,8 @@ export const recordingEncoderScript = (frameRate: BrowserRecordingFrameRate) => 
     cursor(x, y, click) {
       if (tooLarge) return;
       cursor = { x, y };
-      if (click) {
-        ring = { x, y, at: performance.now() };
-        clearInterval(ringTimer);
-        ringTimer = setInterval(() => {
-          paint();
-          if (performance.now() - ring.at > 400) { ring = null; clearInterval(ringTimer); paint(); }
-        }, 33);
-      }
+      // fork: the ring fades on the steady repaint. See FORK.md.
+      if (click) ring = { x, y, at: performance.now() };
       paint();
     },
     async stop() {
@@ -1361,6 +1359,7 @@ export const recordingEncoderScript = (frameRate: BrowserRecordingFrameRate) => 
           paint();
           await delivered;
         }
+        clearInterval(ticker);
         video.pause();
         video.srcObject = null;
         if (recorder.state !== "inactive") recorder.stop();

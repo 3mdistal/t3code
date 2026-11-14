@@ -1142,6 +1142,25 @@ machine needs no patch: stock `t3_thread_launch` already takes that strategy.
   starts from the parent's commit and refuses `baseRef`. Upstream's "refuses worktree isolation for a task there"
   in `RemoteDelegation.test.ts` passes unchanged, as the missing `baseRef` refusal.
 
+### Agent recordings keep a steady frame rate (`fork:`)
+
+An agent's recording (`preview_recording_start`) comes from the tab's screencast, which sends a frame only when the
+page changes. The encoder paints each frame onto a canvas that a `MediaRecorder` captures, and the canvas gives the
+video a frame only when something paints it, so a still page recorded at a few frames a second with gaps of up to a
+minute, and tools that cut the video at a timestamp landed on the wrong moment. The encoder now repaints its newest
+frame at the recording's frame rate, so a still stretch records as repeated frames, and the click ring fades on
+those repaints instead of its own timer. A recorder that stops on its own, as on an encoding error, ends the
+repaint too. In headless Chromium on the PC, a still page with clicks went from 6.6 fps
+with a 1.5 s gap to 30.1 fps with no gap over 65 ms; the file grew about 20%.
+
+The patch also kept a late decode from painting over a newer frame and bounded a recording's first frame on a
+hidden tab. Upstream v0.1.11 covers both, so the fork cut them: its #36215 hands the encoder one frame at a time,
+and its #25862 bounds every capture of the tab at 3 s, with the advice to show the T3 window.
+
+- `apps/server/src/preview/ServerBrowserPage.ts`: the repaint in `recordingEncoderScript`.
+- Tests: `apps/server/src/preview/ServerBrowserPage.fork.test.ts`. In `ServerBrowser.test.ts`, upstream's encoder
+  sandbox gets idle timer stubs.
+
 ## Versions
 
 A release is `vX.Y.Z-alice.N`. `X.Y.Z` is the upstream stable tag the stack sits on, and `N` counts the fork's

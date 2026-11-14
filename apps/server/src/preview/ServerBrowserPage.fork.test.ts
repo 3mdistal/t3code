@@ -1,0 +1,110 @@
+// @effect-diagnostics nodeBuiltinImport:off - Runs the encoder script with fake browser globals.
+import * as NodeVM from "node:vm";
+
+import { describe, expect, it, vi } from "vite-plus/test";
+
+import * as ServerBrowserPage from "./ServerBrowserPage.ts";
+
+interface Bitmap {
+  readonly id: number;
+  readonly width: number;
+  readonly height: number;
+  closed: boolean;
+  close(): void;
+}
+
+interface Recorder {
+  frame(base64: string, cssWidth: number): Promise<boolean>;
+}
+
+const FRAME = "ZnJhbWU=";
+
+const fakeTimers = () => {
+  vi.useFakeTimers();
+  return { [Symbol.dispose]: () => vi.useRealTimers() };
+};
+
+/** Runs the real encoder script on a fake canvas; each decode finishes when `decode(index)` says. */
+function makeEncoder() {
+  const drawn: Array<number> = [];
+  const decodes: Array<PromiseWithResolvers<Bitmap>> = [];
+  const recorders: Array<{ onstop: (() => void) | null }> = [];
+  const canvas = {
+    width: 0,
+    height: 0,
+    getContext: () => ({ drawImage: (image: Bitmap) => drawn.push(image.id), fillRect() {} }),
+    captureStream: () => ({ getTracks: () => [] }),
+  };
+  class FakeMediaRecorder {
+    static isTypeSupported = (type: string) => type === "video/webm";
+    onstart: (() => void) | null = null;
+    onstop: (() => void) | null = null;
+    constructor() {
+      recorders.push(this);
+    }
+    start() {
+      this.onstart?.();
+    }
+  }
+  const sandbox: Record<string, unknown> = {
+    document: { createElement: () => canvas },
+    Path2D: function Path2D() {},
+    MediaRecorder: FakeMediaRecorder,
+    createImageBitmap: () => {
+      const decoded = Promise.withResolvers<Bitmap>();
+      decodes.push(decoded);
+      return decoded.promise;
+    },
+    atob,
+    Blob,
+    performance,
+    setInterval,
+    clearInterval,
+  };
+  sandbox.window = sandbox;
+  NodeVM.runInContext(ServerBrowserPage.recordingEncoderScript(30), NodeVM.createContext(sandbox));
+  const decode = (index: number) => {
+    const bitmap: Bitmap = {
+      id: index + 1,
+      width: 1280,
+      height: 800,
+      closed: false,
+      close() {
+        this.closed = true;
+      },
+    };
+    decodes[index]!.resolve(bitmap);
+    return bitmap;
+  };
+  return { recorder: sandbox.__t3Recorder as Recorder, drawn, decode, recorders };
+}
+
+describe("agent recording encoder", () => {
+  it("repaints the newest frame at the frame rate while the page is still", async () => {
+    using _timers = fakeTimers();
+    const encoder = makeEncoder();
+    const first = encoder.recorder.frame(FRAME, 1280);
+    encoder.decode(0);
+    await first;
+    encoder.drawn.length = 0;
+
+    vi.advanceTimersByTime(1_000);
+
+    expect(encoder.drawn).toEqual(Array.from({ length: 30 }, () => 1));
+  });
+
+  it("stops repainting when the recorder stops on its own", async () => {
+    using _timers = fakeTimers();
+    const encoder = makeEncoder();
+    const first = encoder.recorder.frame(FRAME, 1280);
+    encoder.decode(0);
+    await first;
+    encoder.drawn.length = 0;
+
+    // As when an encoding error ends the MediaRecorder mid-recording.
+    encoder.recorders[0]!.onstop?.();
+    vi.advanceTimersByTime(1_000);
+
+    expect(encoder.drawn).toEqual([]);
+  });
+});
