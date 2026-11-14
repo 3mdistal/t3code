@@ -84,8 +84,9 @@ const OrchestratorCapabilitiesTool = Tool.make("orchestrator_capabilities", {
   .annotate(Tool.Idempotent, true);
 
 const DelegateTaskTool = Tool.make("delegate_task", {
+  // fork: a linked machine's worktree needs `baseRef`; see FORK.md.
   description:
-    "Start one child agent with only `task`. No parent history. Separate checkout or PR per child: `isolation:'worktree'`. Keep `taskId` for `task_status` and `task_cancel`.",
+    "Start one child agent with only `task`. No parent history. Separate checkout or PR per child: `isolation:'worktree'`, plus `baseRef` on a linked machine. Keep `taskId` for `task_status` and `task_cancel`.",
   parameters: OrchestratorMcpDelegateTaskInput,
   success: OrchestratorMcpDelegateTaskResult,
   failure: OrchestratorMcpFailure,

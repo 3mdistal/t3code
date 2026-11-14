@@ -1157,6 +1157,56 @@ The retry writes only existing events: the `retry` attempt reason was already in
   and its retry for an MCP registration timeout: the native session is kept, and the next turn carries the missed
   request once, as upstream's refused-start test expects without the retry.
 
+### Pull request numbers in replies link (`fork:`)
+
+Agents often name a pull request by its number alone ("#554 is green"). Upstream links GitHub references like that
+only in a pull request's own body and comments, so in a reply the number stayed plain text unless the agent wrote
+the URL out. A finished assistant reply now links a bare `#123`, or `owner/repo#123`, using what T3 already knows:
+
+1. A pull request linked to the reply's own thread.
+2. A pull request linked to any other thread, when only one repository has that number, or when one of them is the
+   thread's repository.
+3. The thread's repository, when T3 has seen a pull request there numbered that high. T3 can't tell a pull request
+   from an issue by its number, so this link carries upstream's reference marker: clicking it checks GitHub and
+   opens the pull request, or the issue when it isn't one.
+
+The thread's repository is the one its linked pull requests belong to, or else its project's GitHub repository.
+Nothing else links: a number past the highest T3 has seen there, a number two other repositories share, and
+anything in code or already in a link stay as written. GitHub's own grammar decides what counts as a reference, so
+`a#12`, `#12abc` and `#0` don't. A reply that is still streaming isn't linked, since extra remark plugins turn off
+its incremental parse; it links when it finishes. The plugins come from the quiet thread-shell atoms and keep their
+identity while a thread's pull requests don't change, so a running thread's ticks don't re-render or re-parse
+finished replies.
+
+- `apps/web/src/components/chat/replyPullRequestLinks.ts`: matching, the remark plugin and its cached plugin list.
+- `apps/web/src/components/chat/useReplyPullRequestLinks.ts`: the atoms that gather every thread's pull requests and
+  the reply thread's repository.
+- `apps/web/src/components/chat/TimelineAssistantRows.tsx`: passes the plugins to a finished reply's
+  `ChatMarkdown`.
+- Tests: `apps/web/src/components/chat/replyPullRequestLinks.fork.test.ts`.
+
+### A delegated task on a linked machine can have its own worktree (`fork:`)
+
+Alice's agents send code work to her cloud machine when the PC is short of memory, and each child there needs a
+checkout T3 makes and tracks. Upstream refused `isolation: "worktree"` for a `delegate_task` with
+`target.environmentId`: a local worktree starts from the parent's commit, which the other machine may not have.
+Such a task now needs `baseRef`, a branch, tag or commit on that project's origin, such as the PR's branch or `main`,
+and the launch there gets `workspaceStrategy: { type: "worktree", baseRef, startFromOrigin: true }`, which fetches the
+ref from origin when that machine doesn't have it. There's no default: the caller always knows whether it means the
+PR or `main`, and a silent `main` would test the wrong code. A missing `baseRef` is refused before anything launches,
+and so is `baseRef` on a shared task there or on any local task, whose worktree still starts from the parent's
+commit. A retry reuses the launch's key, which the other side replays as the same thread and worktree. The other
+machine needs no patch: stock `t3_thread_launch` already takes that strategy.
+
+- `packages/contracts/src/orchestratorMcp.ts`: `baseRef` on `delegate_task`, and the `isolation` description.
+- `apps/server/src/peer/RemoteDelegation.ts` forwards the strategy; `apps/server/src/mcp/OrchestratorMcpService.ts`
+  refuses `baseRef` for a local task; `apps/server/src/mcp/toolkits/orchestrator/tools.ts` names it in the tool
+  description. `apps/server/src/provider/agentContextBudget.json` records the longer tool list.
+- Tests: `apps/server/src/peer/RemoteDelegation.fork.test.ts` covers the forwarded strategy, a shared task, both
+  refusals and a retry. `apps/server/src/mcp/OrchestratorMcpService.fork.test.ts` shows a local worktree task still
+  starts from the parent's commit and refuses `baseRef`. Upstream's "refuses worktree isolation for a task there"
+  in `RemoteDelegation.test.ts` passes unchanged, as the missing `baseRef` refusal.
+
 ## Versions
 
 A release is `vX.Y.Z-alice.N`. `X.Y.Z` is the upstream stable tag the stack sits on, and `N` counts the fork's

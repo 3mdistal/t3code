@@ -23,6 +23,8 @@ import { formatChatTimestampTooltip, formatDayAwareTimestamp } from "../../times
 import { useV2ItemSupport } from "../../state/v2ItemSupport";
 import { TimelineRowCtx, TimelineRowActivityCtx, type TimelineRow } from "./timelineRowContext";
 import { MESSAGE_HEADING_LEVEL, MessageAuthorHeading } from "./TimelineRowParts";
+// fork: pull request numbers in replies link. See FORK.md.
+import { useReplyPullRequestLinkPlugins } from "./useReplyPullRequestLinks";
 
 export function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" }> }) {
   const ctx = use(TimelineRowCtx);
@@ -33,6 +35,9 @@ export function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind
   );
   const text = liveText ?? row.message.text;
   const messageText = text || (row.message.streaming ? "" : "(empty response)");
+  // fork: bare pull request numbers link once the reply finishes; extra plugins would cost a streaming reply its
+  // incremental parse. See FORK.md.
+  const pullRequestLinkPlugins = useReplyPullRequestLinkPlugins(ctx.threadRef ?? null);
 
   return (
     <>
@@ -54,6 +59,7 @@ export function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind
               lineBreaks={shouldPreserveAssistantLineBreaks(messageText)}
               skills={ctx.skills}
               headingLevelOffset={MESSAGE_HEADING_LEVEL}
+              {...(row.message.streaming ? {} : { extraRemarkPlugins: pullRequestLinkPlugins })}
               onUseArtifactTemplate={ctx.onUseArtifactTemplate}
               onRunShellCommand={ctx.onRunShellCommand}
               onImageExpand={ctx.onImageExpand}

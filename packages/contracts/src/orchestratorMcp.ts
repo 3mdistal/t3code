@@ -172,9 +172,17 @@ export const OrchestratorMcpDelegateTaskInput = Schema.Struct({
   title: Schema.optional(OrchestratorMcpTitle),
   role: Schema.optional(OrchestratorMcpTaskRole),
   isolation: Schema.optional(
+    // fork: a linked machine's worktree starts from `baseRef`; see FORK.md.
     Schema.Literals(["shared", "worktree"]).annotate({
       description:
-        "'shared' (default): parent checkout. 'worktree': new prepared checkout from the parent commit, for a separate checkout or PR per child. Uncommitted edits stay out.",
+        "'shared' (default): parent checkout. 'worktree': new prepared checkout from the parent commit, for a separate checkout or PR per child; with `target.environmentId`, from `baseRef`. Uncommitted edits stay out.",
+    }),
+  ),
+  // fork: see FORK.md.
+  baseRef: Schema.optional(
+    TrimmedNonEmptyString.check(Schema.isMaxLength(256)).annotate({
+      description:
+        "Required with `target.environmentId` and isolation 'worktree': the branch, tag or commit on that project's origin to start from, such as the PR's branch or `main`. Refused otherwise.",
     }),
   ),
   mode: Schema.optional(
