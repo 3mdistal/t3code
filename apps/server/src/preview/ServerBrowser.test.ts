@@ -667,7 +667,7 @@ it.live("a recording whose first frame fails detaches its own session and can st
       };
 
       yield* broker
-        .invoke({ scope, tabId, operation: "recordingStart", input: {} })
+        .invoke<void>({ scope, tabId, operation: "recordingStart", input: {} })
         .pipe(Effect.flip);
 
       expect(failed?.send).toHaveBeenCalledWith("Page.captureScreenshot", expect.anything());
