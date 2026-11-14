@@ -1666,18 +1666,21 @@ const make = Effect.gen(function* () {
       let session: CDPSession | null = null;
       try {
         await encoder.evaluate(ServerBrowserPage.recordingEncoderScript(recordingFrameRate));
+        // fork: the first frame comes from the recording's own session, so a capture that times
+        // out is detached with it below instead of left pending on the tab's. See FORK.md.
+        const opened = await tab.page.context().newCDPSession(tab.page);
+        session = opened;
         // Seed idle pages before returning so an immediate stop has a frame to encode.
-        const firstFrame = await ServerBrowserPage.captureViewport(tab.cdp, {
-          format: "jpeg",
-          quality: RECORDING_SCREENCAST.quality,
-        });
+        // fork: a tab hidden from view may never paint it, so the wait is bounded. See FORK.md.
+        const firstFrame = await ServerBrowserPage.recordingFirstFrame(
+          opened,
+          RECORDING_SCREENCAST.quality,
+        );
         await encoder.evaluate(
           ([data, width]) =>
             (globalThis as unknown as EncoderWindow).__t3Recorder.frame(data, width),
           [firstFrame, tab.page.viewportSize()?.width ?? UNATTACHED_FILL_VIEWPORT.width] as const,
         );
-        const opened = await tab.page.context().newCDPSession(tab.page);
-        session = opened;
         const framesInFlight = new Set<Promise<void>>();
         opened.on("Page.screencastFrame", (frame) => {
           const cssWidth = tab.page.viewportSize()?.width ?? frame.metadata.deviceWidth;

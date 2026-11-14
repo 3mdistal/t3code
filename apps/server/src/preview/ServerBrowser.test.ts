@@ -276,6 +276,9 @@ function makeEncoderPage() {
     atob,
     Blob,
     performance,
+    // fork: the encoder repaints on a timer, which these tests leave idle. See FORK.md.
+    setInterval: () => 0,
+    clearInterval: () => {},
   };
   sandbox.window = sandbox;
   const context = NodeVM.createContext(sandbox);
@@ -640,6 +643,39 @@ it.live.each([
         expect(encoderStreams).toEqual([{ frameRate, bitsPerSecond }]);
       }),
     ).pipe(Effect.provide(layer)),
+);
+
+// fork: the first frame comes from the recording's own session, which a failed start detaches,
+// so a capture a hidden tab never answers isn't left pending on the tab's session. See FORK.md.
+it.live("a recording whose first frame fails detaches its own session and can start again", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { broker, tabId } = yield* ready;
+      const context = contexts[0]!;
+      const newCDPSession = context.newCDPSession;
+      let failed: ReturnType<typeof makeSession> | undefined;
+      context.newCDPSession = async (target) => {
+        const session = await newCDPSession(target);
+        if (failed || target !== context.page) return session;
+        failed = session;
+        const send = session.send.getMockImplementation()!;
+        session.send.mockImplementation(async (method, input) => {
+          if (method === "Page.captureScreenshot") throw new Error("The tab painted no frame.");
+          return send(method, input);
+        });
+        return session;
+      };
+
+      yield* broker
+        .invoke<void>({ scope, tabId, operation: "recordingStart", input: {} })
+        .pipe(Effect.flip);
+
+      expect(failed?.send).toHaveBeenCalledWith("Page.captureScreenshot", expect.anything());
+      expect(failed?.detach).toHaveBeenCalled();
+      yield* broker.invoke({ scope, tabId, operation: "recordingStart", input: {} });
+      expect(encoderStreams).toHaveLength(1);
+    }),
+  ).pipe(Effect.provide(layer)),
 );
 
 it.live("enforces provider ownership and explicit targets when a session has multiple tabs", () =>
