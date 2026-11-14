@@ -3559,6 +3559,7 @@ describe("OrchestratorMcpService provider resolution", () => {
                   return { taskId: parent.subagents[0]!.id };
                 }).pipe(Effect.orDie),
               runStatus: () => Effect.succeed(null),
+              heldThere: () => Effect.undefined, // fork: limits, see FORK.md.
             });
           }),
         ).pipe(Layer.provide(layerWatchedThreads));

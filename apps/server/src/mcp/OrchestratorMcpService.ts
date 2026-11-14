@@ -140,6 +140,7 @@ import { assertTargetWithinLimits, isLiveCallerShell, threadNotFound } from "./t
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as PeerForwarding from "../peer/PeerForwarding.ts";
 import * as RemoteDelegation from "../peer/RemoteDelegation.ts";
+import { heldQueue, heldRun, heldRunRecordFilter } from "./heldRuns.ts"; // fork: limits, see FORK.md.
 
 // Return recoverable handles before common MCP client timeouts expire.
 const DEFAULT_WAIT_TIMEOUT_MS = 30_000;
@@ -1093,6 +1094,7 @@ function threadRun(
     runId: run.id,
     ordinal: run.ordinal,
     status: run.status,
+    ...(run.status === "queued" && run.queueHeld === true ? { held: true as const } : {}), // fork: limits, see FORK.md.
     providerInstanceId: run.modelSelection.instanceId,
     model: run.modelSelection.model,
     executedModel: runExecutedModel(projection, run),
@@ -1808,6 +1810,19 @@ const make = Effect.gen(function* () {
   const requestKey = (clientRequestId: string | undefined): Effect.Effect<string> =>
     clientRequestId === undefined ? random.uuidV4() : Effect.succeed(clientRequestId);
 
+  // fork: limits. The thread's next run if T3 holds it, and why; see FORK.md.
+  const readHeldRun = Effect.fn("OrchestratorMcpService.readHeldRun")(function* (
+    threadId: ThreadId,
+    projection: Pick<OrchestrationV2ThreadProjection, "runs">,
+  ) {
+    const queue = heldQueue(projection);
+    if (queue.length === 0) return undefined;
+    const records = yield* threadManagement
+      .getThreadRecords(threadId, ["messages", "turnItems"], heldRunRecordFilter(queue))
+      .pipe(Effect.mapError(threadManagementFailure));
+    return heldRun(queue, records);
+  });
+
   const readTask = Effect.fn("OrchestratorMcpService.readTask")(function* (
     scope: McpThreadInvocationScope,
     taskId: NodeId,
@@ -1924,6 +1939,9 @@ const make = Effect.gen(function* () {
           : runStatus === "queued" || runStatus === "starting"
             ? runStatus
             : "running";
+    // fork: limits. A child whose next run T3 holds is not working; see FORK.md.
+    const held =
+      task.result === null ? yield* readHeldRun(task.childThreadId, childControls) : undefined;
     const derivedResult =
       task.result !== null
         ? task.result
@@ -1974,6 +1992,7 @@ const make = Effect.gen(function* () {
       childNodeId: task.id,
       status,
       workState,
+      ...(held === undefined ? {} : { held }), // fork: limits, see FORK.md.
       hasPendingChildRuns: hasPendingChildRuns(childProjection, childRun),
       providerInstanceId: modelSelection.instanceId,
       model: modelSelection.model,
@@ -2127,6 +2146,8 @@ const make = Effect.gen(function* () {
           ? task.status
           : "completed";
     const terminal = isTerminalTaskStatus(status);
+    // fork: limits. Asked of its thread there, so a held child reads as held; see FORK.md.
+    const held = terminal ? undefined : yield* remoteDelegation.heldThere(scope, task);
     if (
       acknowledgeTerminal &&
       terminal &&
@@ -2173,6 +2194,7 @@ const make = Effect.gen(function* () {
       childNodeId: task.id,
       status,
       workState: terminal ? "result_available" : "working",
+      ...(held === undefined ? {} : { held }), // fork: limits, see FORK.md.
       hasPendingChildRuns: false,
       providerInstanceId: task.providerInstanceId,
       model: task.model,
@@ -3645,8 +3667,9 @@ const make = Effect.gen(function* () {
           }
         }
       }
+      const held = yield* readHeldRun(target.thread.id, target); // fork: limits, see FORK.md.
       return {
-        thread,
+        thread: held === undefined ? thread : { ...thread, held }, // fork: limits, see FORK.md.
         recentRuns,
         items,
         nextPosition: items.at(-1)?.position ?? null,
