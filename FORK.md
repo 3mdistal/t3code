@@ -1228,7 +1228,8 @@ page changes. The encoder paints each frame onto a canvas that a `MediaRecorder`
 video a frame only when something paints it, so a still page recorded at a few frames a second with gaps of up to a
 minute, and tools that cut the video at a timestamp landed on the wrong moment. The encoder now repaints its newest
 frame at the recording's frame rate, so a still stretch records as repeated frames, and the click ring fades on
-those repaints instead of its own timer. In headless Chromium on the PC, a still page with clicks went from 6.6 fps
+those repaints instead of its own timer. A recorder that stops on its own, as on an encoding error, ends the
+repaint too. In headless Chromium on the PC, a still page with clicks went from 6.6 fps
 with a 1.5 s gap to 30.1 fps with no gap over 65 ms; the file grew about 20%.
 
 Each screencast frame decodes on its own, and a large frame can finish after a smaller, newer one. The encoder
@@ -1239,13 +1240,15 @@ A recording starts by capturing the tab once, so a stop right away still has a f
 while its window is minimized, may never paint that frame. The start then waited past the request's timeout while
 holding the tab's capture lock, so the tab's snapshots and recordings waited too, until it painted again. The first
 frame now waits 5 s at most, then fails with an error that tells the agent to show the tab or ask the user to bring
-T3's window into view.
+T3's window into view. That capture goes over the recording's own CDP session, which the failed start detaches, so
+the unanswered capture ends with it instead of staying pending on the tab's session.
 
 - `apps/server/src/preview/ServerBrowserPage.ts`: the repaint and frame order in `recordingEncoderScript`, and
   `recordingFirstFrame`.
-- `apps/server/src/preview/ServerBrowser.ts`: `startRecording` seeds with `recordingFirstFrame`.
-- Tests: `apps/server/src/preview/ServerBrowserPage.fork.test.ts`. Upstream's encoder sandbox in
-  `ServerBrowser.test.ts` gets idle timer stubs.
+- `apps/server/src/preview/ServerBrowser.ts`: `startRecording` opens its session first and seeds with
+  `recordingFirstFrame` over it.
+- Tests: `apps/server/src/preview/ServerBrowserPage.fork.test.ts`. In `ServerBrowser.test.ts`, upstream's encoder
+  sandbox gets idle timer stubs, and a `fork:` test checks that a failed first frame detaches its session.
 
 ## Versions
 

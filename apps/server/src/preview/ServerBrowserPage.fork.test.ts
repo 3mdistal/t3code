@@ -29,6 +29,7 @@ const fakeTimers = () => {
 function makeEncoder() {
   const drawn: Array<number> = [];
   const decodes: Array<PromiseWithResolvers<Bitmap>> = [];
+  const recorders: Array<{ onstop: (() => void) | null }> = [];
   const canvas = {
     width: 0,
     height: 0,
@@ -38,6 +39,10 @@ function makeEncoder() {
   class FakeMediaRecorder {
     static isTypeSupported = (type: string) => type === "video/webm";
     onstart: (() => void) | null = null;
+    onstop: (() => void) | null = null;
+    constructor() {
+      recorders.push(this);
+    }
     start() {
       this.onstart?.();
     }
@@ -72,7 +77,7 @@ function makeEncoder() {
     decodes[index]!.resolve(bitmap);
     return bitmap;
   };
-  return { recorder: sandbox.__t3Recorder as Recorder, drawn, decode };
+  return { recorder: sandbox.__t3Recorder as Recorder, drawn, decode, recorders };
 }
 
 describe("agent recording encoder", () => {
@@ -106,17 +111,38 @@ describe("agent recording encoder", () => {
     expect(encoder.drawn).toEqual([1, 3]);
     expect(late.closed).toBe(true);
   });
+
+  it("stops repainting when the recorder stops on its own", async () => {
+    using _timers = fakeTimers();
+    const encoder = makeEncoder();
+    const first = encoder.recorder.frame(FRAME, 1280);
+    encoder.decode(0);
+    await first;
+    encoder.drawn.length = 0;
+
+    // As when an encoding error ends the MediaRecorder mid-recording.
+    encoder.recorders[0]!.onstop?.();
+    vi.advanceTimersByTime(1_000);
+
+    expect(encoder.drawn).toEqual([]);
+  });
 });
 
 it("gives up on a recording's first frame when the tab paints none", async () => {
   using _timers = fakeTimers();
   const cdp = { send: () => new Promise<never>(() => {}) } as unknown as CDPSession;
-  const firstFrame = expect(ServerBrowserPage.recordingFirstFrame(cdp, 90)).rejects.toMatchObject({
+  let settled = false;
+  const firstFrame = ServerBrowserPage.recordingFirstFrame(cdp, 90).finally(() => {
+    settled = true;
+  });
+  const failed = expect(firstFrame).rejects.toMatchObject({
     tag: "PreviewAutomationExecutionError",
     message: ServerBrowserPage.RECORDING_NO_FRAME,
   });
 
-  await vi.advanceTimersByTimeAsync(5_000);
+  await vi.advanceTimersByTimeAsync(4_999);
+  expect(settled).toBe(false);
+  await vi.advanceTimersByTimeAsync(1);
 
-  await firstFrame;
+  await failed;
 });

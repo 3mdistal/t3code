@@ -1004,7 +1004,8 @@ export const recordingEncoderScript = (frameRate: BrowserRecordingFrameRate) => 
           recorder.onstart = resolve;
           recorder.onerror = (event) => reject(event.error);
         });
-        stopped = new Promise((resolve) => { recorder.onstop = resolve; });
+        // fork: a recorder that stops on its own also ends the repaint. See FORK.md.
+        stopped = new Promise((resolve) => { recorder.onstop = () => { clearInterval(ticker); resolve(); }; });
         recorder.ondataavailable = (event) => {
           if (tooLarge || event.data.size === 0) return;
           sizeBytes += event.data.size;
