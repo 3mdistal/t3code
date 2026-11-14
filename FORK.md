@@ -841,6 +841,16 @@ Users read about it in the Memory and CPU limits section of `docs/user/remote-ac
   (13 of 15 such failures in the day to Nov 10). Codex's wakes are prompted by T3, arrive as server messages, and
   are still held. Upstream's queue still holds a wake that arrives behind held messages once Stop has reached the
   thread's running turn (`wakeSkipsHold` in `Orchestrator.ts`), Stop now's included; that stays upstream's call.
+- A parent can tell a held child from a working one. On Nov 9 a PC child's wake waited 9 hours behind the limits
+  while its session kept working, and the parent on the Mac read `running` and `working` the whole time, so nobody
+  looked. `task_status` and `t3_thread_read` now carry `held` (`runId`, `since`, `reason`) while T3 holds every
+  queued run on a thread and nothing runs there (`mcp/heldRuns.ts`): the scheduler starts any queued run it doesn't
+  hold. `held` names the run that starts first once the hold ends, in the scheduler's order (`QueuedRunOrder.ts`).
+  The reason is the limits' notice when they hold it, and otherwise says the queue waits to be resumed, as after a Stop. A held run that is a buffered Claude wake
+  also says the session may still be working outside T3. `t3_thread_read`'s runs mark each held one `held: true`.
+  A task in a linked environment asks its thread there, as its follower does, for at most 3 s (`heldThere` in
+  `RemoteDelegation.ts`); a machine asleep, a dropped route or an older peer reads as before. `status` and
+  `workState` keep their values, so a client that ignores `held` reads what it read before.
 - `resourceLimits.usePercent` (50 to 90) sets every memory line from one number. The reserve is (100 - N)% of RAM,
   and each line is the reserve times one of the memory gate's ratios, so 80% of the PC's RAM gives its
   25 / 8 GiB pause, 35 / 12 GiB release and 10 GiB critical lines. A saved line wins over its derived one.
@@ -869,6 +879,10 @@ Users read about it in the Memory and CPU limits section of `docs/user/remote-ac
   - `packages/client-runtime/src/load-balancing.ts`: Auto balance skips a machine over its limits.
   - `ProviderAdapter.ts` and `ClaudeAdapterV2.ts`: the optional `stopBackgroundTasks`, for Stop now.
   - `subagentProjection.ts`: `delegatedTaskProgress` counts a child held with a resume note as still working.
+  - `orchestratorMcp.ts` in contracts adds `OrchestratorMcpHeldRun` and the optional `held` fields.
+    `OrchestratorMcpService.ts` fills them in `readTask`, `readRemoteTask`, `readThread` and `threadRun`, and the
+    orchestrator toolkit's `tools.ts` names `held` in `task_status` and `t3_thread_read`, which
+    `agentContextBudget.json` records as 121 more bytes of MCP tool list. `RemoteDelegation.ts` adds `heldThere`.
 - **Pause all** is a manual hold on top of the same path, for when Alice wants every agent on a machine quiet, with
   memory to spare or not. It holds until she resumes, and has no expiry.
   - Two modes: `finish` lets running turns end, then everything waits. `stop` also interrupts every running turn at
@@ -947,7 +961,8 @@ Users read about it in the Memory and CPU limits section of `docs/user/remote-ac
     ahead, over 1 MiB, or malformed counts as no ranks (`priorityRanks`).
 - Stock compatibility: holds, notices and resume notes reuse `run.updated`, `turn-item.updated` and system
   notifications. Pause all adds no event type, and stock T3 ignores `pause.json`, treating a typed order as an
-  ordinary message. Stock T3 drops `resourceLimits` the next time it saves settings.
+  ordinary message. Stock T3 drops `resourceLimits` the next time it saves settings. The `held` fields are tool
+  output only, read from runs and notices already stored.
 - Known gaps:
   - Forks and merge-backs aren't held, during a pause either.
   - Each machine has its own switch. An order typed in a thread pauses the machine that thread runs on, and Linux,
@@ -975,8 +990,8 @@ Users read about it in the Memory and CPU limits section of `docs/user/remote-ac
   `apps/server/src/orchestration-v2/LimitsSweepKeepsRuns.fork.test.ts`,
   `apps/server/src/orchestration-v2/LimitsSweepKeepsOpens.fork.test.ts`, `packages/shared/src/serverSettings.fork.test.ts`,
   `packages/client-runtime/src/load-balancing.fork.test.ts`,
-  `packages/provider-core/src/server/subagentProjection.fork.test.ts`, and `MachineLimits.logic.fork.test.ts`.
-  `Governor.fork.test.ts` runs the real orchestrator with fake readings and a test clock.
+  `packages/provider-core/src/server/subagentProjection.fork.test.ts`, `apps/server/src/mcp/heldRuns.fork.test.ts`,
+  and `MachineLimits.logic.fork.test.ts`. `Governor.fork.test.ts` runs the real orchestrator with fake readings and a test clock.
 
 ### Awaited Claude tasks keep their wake owner (`fork:`)
 
