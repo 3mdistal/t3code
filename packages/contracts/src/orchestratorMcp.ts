@@ -223,6 +223,18 @@ const OrchestratorMcpExecutedModel = Schema.NullOr(Schema.String).annotate({
     "Model the provider reported running, or null when unavailable. Can differ from the requested `model`.",
 });
 
+// fork: limits. A thread's next run that T3 holds in its queue; see FORK.md.
+export const OrchestratorMcpHeldRun = Schema.Struct({
+  runId: RunId,
+  /** When the run was asked for. */
+  since: IsoDateTime,
+  reason: Schema.String,
+}).annotate({
+  description:
+    "T3 holds this thread's next run: nothing runs there in T3 until it starts. `reason`: why, and what starts it.",
+});
+export type OrchestratorMcpHeldRun = typeof OrchestratorMcpHeldRun.Type;
+
 export const OrchestratorMcpDelegateTaskResult = Schema.Struct({
   taskId: NodeId,
   /** Null for a task that runs in a linked environment; see `remoteChild`. */
@@ -239,6 +251,7 @@ export const OrchestratorMcpDelegateTaskResult = Schema.Struct({
       "starting means the child's provider has not started its turn yet, so no work has begun.",
   }),
   workState: Schema.Literals(["working", "waiting_for_children", "result_available"]),
+  held: Schema.optional(OrchestratorMcpHeldRun), // fork: limits, see FORK.md.
   hasPendingChildRuns: Schema.Boolean,
   latestTerminalRunId: Schema.NullOr(RunId),
   latestTerminalStatus: Schema.NullOr(OrchestratorMcpTerminalDelegatedTaskStatus),
@@ -479,6 +492,7 @@ export const OrchestratorMcpThreadDetail = Schema.Struct({
   createdBy: OrchestrationV2Actor,
   creationSource: OrchestrationV2CreationSource,
   status: OrchestratorMcpThreadStatus,
+  held: Schema.optional(OrchestratorMcpHeldRun), // fork: limits, see FORK.md.
   latestRunId: Schema.NullOr(RunId),
   activeRunId: Schema.NullOr(RunId),
   providerInstanceId: ProviderInstanceId,
@@ -521,6 +535,8 @@ export const OrchestratorMcpThreadRun = Schema.Struct({
   runId: RunId,
   ordinal: PositiveInt,
   status: OrchestrationV2RunStatus,
+  /** Queued and held by T3 until something starts it; see `thread.held`. */
+  held: Schema.optional(Schema.Literal(true)), // fork: limits, see FORK.md.
   providerInstanceId: ProviderInstanceId,
   model: Schema.String,
   executedModel: Schema.optional(OrchestratorMcpExecutedModel),

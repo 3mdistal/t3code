@@ -6,6 +6,7 @@ import {
   OrchestratorMcpCapabilitiesResult,
   OrchestratorMcpFailure,
   type OrchestratorMcpDelegateTaskInput,
+  type OrchestratorMcpHeldRun, // fork: limits, see FORK.md.
   type OrchestratorMcpTaskCancelResult,
   type OrchestratorMcpThreadRun,
   type OrchestratorMcpThreadSendInput,
@@ -53,6 +54,8 @@ import { delegatedAttentionCommand } from "../orchestration-v2/DelegatedAttentio
 
 /** How long one follow of a remote task waits on its thread there before checking again. */
 const FOLLOW_WAIT_MS = 10 * 60 * 1_000;
+/** fork: limits. How long `task_status` waits to hear whether a task's run is held there. */
+const HELD_THERE_READ = Duration.seconds(3);
 /** A linked environment that stops answering is retried, backing off to this. */
 const FOLLOW_MAX_BACKOFF = Duration.minutes(5);
 /** A follower that hits this many defects in a row fails its task instead of retrying. */
@@ -130,6 +133,14 @@ export class RemoteDelegation extends Context.Service<
       scope: ThreadScope,
       task: OrchestrationV2Subagent,
     ) => Effect.Effect<OrchestratorMcpThreadRun["status"] | null>;
+    /**
+     * fork: limits. The run T3 holds on the task's thread there, if it answers within a few
+     * seconds; undefined when nothing is held there, or it can't say; see FORK.md.
+     */
+    readonly heldThere: (
+      scope: ThreadScope,
+      task: OrchestrationV2Subagent,
+    ) => Effect.Effect<OrchestratorMcpHeldRun | undefined>;
     /**
      * Follows every open remote task until it ends, including after a
      * restart, and a finished one again when a Stop here owes it a stop there.
@@ -1096,6 +1107,25 @@ const make = Effect.gen(function* () {
     Effect.orElseSucceed(() => null),
   );
 
+  // fork: limits. Read as the follower reads, so it needs nothing the follower lacks; see FORK.md.
+  const heldThere: RemoteDelegation["Service"]["heldThere"] = (scope, task) => {
+    const remote = task.remoteChild;
+    if (remote === undefined || task.result !== null) return Effect.undefined;
+    return Effect.suspend(() =>
+      forwarding.readThread(followScope(scope.thread, remote), remote.environmentId, {
+        threadId: remote.threadId,
+        limit: 1,
+        runLimit: 1,
+      }),
+    ).pipe(
+      Effect.map((read) => read.thread.held),
+      Effect.timeoutOption(HELD_THERE_READ),
+      Effect.map(Option.getOrUndefined),
+      // A machine asleep, a dropped route or an older peer says nothing; the task reads as before.
+      Effect.catchCause(() => Effect.undefined),
+    );
+  };
+
   const start: RemoteDelegation["Service"]["start"] = () =>
     forkParked(
       Effect.gen(function* () {
@@ -1122,7 +1152,7 @@ const make = Effect.gen(function* () {
       }).pipe(Effect.ignoreCause({ log: true })),
     );
 
-  return RemoteDelegation.of({ delegate, followUp, cancel, runStatus, start });
+  return RemoteDelegation.of({ delegate, followUp, cancel, runStatus, heldThere, start }); // fork: limits, see FORK.md.
 });
 
 /** A defect, logged, as a failure, so a retry covers it. */
