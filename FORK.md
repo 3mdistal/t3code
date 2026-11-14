@@ -1221,6 +1221,32 @@ remote task, such as its timeline card and the relationships menu, already used 
 - `apps/mobile/src/features/threads/ThreadDetailScreen.tsx`: the child-input banner opens the child's machine.
 - Test: `apps/web/src/components/chat/ThreadActivityBanners.fork.test.tsx`.
 
+### Agent recordings keep a steady frame rate (`fork:`)
+
+An agent's recording (`preview_recording_start`) comes from the tab's screencast, which sends a frame only when the
+page changes. The encoder paints each frame onto a canvas that a `MediaRecorder` captures, and the canvas gives the
+video a frame only when something paints it, so a still page recorded at a few frames a second with gaps of up to a
+minute, and tools that cut the video at a timestamp landed on the wrong moment. The encoder now repaints its newest
+frame at the recording's frame rate, so a still stretch records as repeated frames, and the click ring fades on
+those repaints instead of its own timer. In headless Chromium on the PC, a still page with clicks went from 6.6 fps
+with a 1.5 s gap to 30.1 fps with no gap over 65 ms; the file grew about 20%.
+
+Each screencast frame decodes on its own, and a large frame can finish after a smaller, newer one. The encoder
+painted whichever finished last, so an older look could briefly replace the page, such as a menu that seemed to
+reopen. It now drops a frame that finishes decoding after a newer one.
+
+A recording starts by capturing the tab once, so a stop right away still has a frame. A tab T3 can't draw, such as
+while its window is minimized, may never paint that frame. The start then waited past the request's timeout while
+holding the tab's capture lock, so the tab's snapshots and recordings waited too, until it painted again. The first
+frame now waits 5 s at most, then fails with an error that tells the agent to show the tab or ask the user to bring
+T3's window into view.
+
+- `apps/server/src/preview/ServerBrowserPage.ts`: the repaint and frame order in `recordingEncoderScript`, and
+  `recordingFirstFrame`.
+- `apps/server/src/preview/ServerBrowser.ts`: `startRecording` seeds with `recordingFirstFrame`.
+- Tests: `apps/server/src/preview/ServerBrowserPage.fork.test.ts`. Upstream's encoder sandbox in
+  `ServerBrowser.test.ts` gets idle timer stubs.
+
 ## Versions
 
 A release is `vX.Y.Z-alice.N`. `X.Y.Z` is the upstream stable tag the stack sits on, and `N` counts the fork's

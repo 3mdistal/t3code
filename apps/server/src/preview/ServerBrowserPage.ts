@@ -457,6 +457,30 @@ export const captureViewport = async (
   return data;
 };
 
+// fork: a tab hidden from view may never paint, so a recording's first frame is bounded.
+// See "Agent recordings keep a steady frame rate" in FORK.md.
+const RECORDING_FIRST_FRAME_MS = 5_000;
+export const RECORDING_NO_FRAME =
+  "Recording did not start: the tab painted no frame in 5 seconds. T3 can't draw a tab while its window is minimized or hidden. Show the tab with preview_open, or ask the user to bring T3's window into view, then try again.";
+
+export const recordingFirstFrame = async (cdp: CDPSession, quality: number) => {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () =>
+        reject(
+          new ServerBrowserOperationError("PreviewAutomationExecutionError", RECORDING_NO_FRAME),
+        ),
+      RECORDING_FIRST_FRAME_MS,
+    );
+  });
+  try {
+    return await Promise.race([captureViewport(cdp, { format: "jpeg", quality }), expired]);
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
 /** Runs in the page's own isolated world, as the server has no image library. */
 const SHRINK_PNG = `async function (png, width, height) {
   const bytes = Uint8Array.from(atob(png), (char) => char.charCodeAt(0));
@@ -912,7 +936,9 @@ export const recordingEncoderScript = (frameRate: BrowserRecordingFrameRate) => 
   let cursor = null;
   let ring = null;
   const AGENT_CURSOR_PATH = new Path2D("M4.037 4.688a.495.495 0 0 1 .651-.651l16 6.5a.5.5 0 0 1-.063.947l-6.124 1.58a2 2 0 0 0-1.438 1.435l-1.579 6.126a.5.5 0 0 1-.947.063z");
-  let ringTimer = null;
+  let ticker = null;
+  let received = 0;
+  let shown = 0;
   let scale = 1;
   let offsetX = 0;
   let offsetY = 0;
@@ -961,9 +987,13 @@ export const recordingEncoderScript = (frameRate: BrowserRecordingFrameRate) => 
   window.__t3Recorder = {
     async frame(base64, cssWidth) {
       if (tooLarge) return false;
+      const sequence = ++received;
       const bytes = Uint8Array.from(atob(base64), (char) => char.charCodeAt(0));
       const bitmap = await createImageBitmap(new Blob([bytes], { type: "image/jpeg" }));
       if (tooLarge) { bitmap.close(); return false; }
+      // fork: decodes can finish out of order; an older frame must not replace a newer one. See FORK.md.
+      if (sequence < shown) { bitmap.close(); return true; }
+      shown = sequence;
       if (!recorder) {
         canvas.width = bitmap.width;
         canvas.height = bitmap.height;
@@ -981,7 +1011,7 @@ export const recordingEncoderScript = (frameRate: BrowserRecordingFrameRate) => 
           if (sizeBytes > ${PROVIDER_SEND_TURN_MAX_FILE_BYTES}) {
             tooLarge = true;
             chunks.length = 0;
-            clearInterval(ringTimer);
+            clearInterval(ticker);
             frame?.close();
             frame = null;
             if (recorder.state !== "inactive") recorder.stop();
@@ -991,6 +1021,9 @@ export const recordingEncoderScript = (frameRate: BrowserRecordingFrameRate) => 
           chunks.push(event.data);
         };
         recorder.start(1000);
+        // fork: screencasts send frames only when the page changes; repainting the newest one
+        // keeps the video at a steady frame rate through still stretches. See FORK.md.
+        ticker = setInterval(paint, ${1000 / frameRate});
       }
       // Frame px per page CSS px, before fitting into the canvas.
       bitmap.cssScale = bitmap.width / cssWidth;
@@ -1003,14 +1036,8 @@ export const recordingEncoderScript = (frameRate: BrowserRecordingFrameRate) => 
     cursor(x, y, click) {
       if (tooLarge) return;
       cursor = { x, y };
-      if (click) {
-        ring = { x, y, at: performance.now() };
-        clearInterval(ringTimer);
-        ringTimer = setInterval(() => {
-          paint();
-          if (performance.now() - ring.at > 400) { ring = null; clearInterval(ringTimer); paint(); }
-        }, 33);
-      }
+      // fork: the ring fades on the steady repaint. See FORK.md.
+      if (click) ring = { x, y, at: performance.now() };
       paint();
     },
     async stop() {
@@ -1034,6 +1061,7 @@ export const recordingEncoderScript = (frameRate: BrowserRecordingFrameRate) => 
           paint();
           await delivered;
         }
+        clearInterval(ticker);
         video.pause();
         video.srcObject = null;
         if (recorder.state !== "inactive") recorder.stop();

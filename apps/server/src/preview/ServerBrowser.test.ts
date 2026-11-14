@@ -276,6 +276,9 @@ function makeEncoderPage() {
     atob,
     Blob,
     performance,
+    // fork: the encoder repaints on a timer, which these tests leave idle. See FORK.md.
+    setInterval: () => 0,
+    clearInterval: () => {},
   };
   sandbox.window = sandbox;
   const context = NodeVM.createContext(sandbox);

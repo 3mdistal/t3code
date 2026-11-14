@@ -1667,10 +1667,11 @@ const make = Effect.gen(function* () {
       try {
         await encoder.evaluate(ServerBrowserPage.recordingEncoderScript(recordingFrameRate));
         // Seed idle pages before returning so an immediate stop has a frame to encode.
-        const firstFrame = await ServerBrowserPage.captureViewport(tab.cdp, {
-          format: "jpeg",
-          quality: RECORDING_SCREENCAST.quality,
-        });
+        // fork: a tab hidden from view may never paint it, so the wait is bounded. See FORK.md.
+        const firstFrame = await ServerBrowserPage.recordingFirstFrame(
+          tab.cdp,
+          RECORDING_SCREENCAST.quality,
+        );
         await encoder.evaluate(
           ([data, width]) =>
             (globalThis as unknown as EncoderWindow).__t3Recorder.frame(data, width),
