@@ -42,8 +42,11 @@ export class NodeStyleChild extends NodeEvents.EventEmitter {
   requestedSignal: NodeJS.Signals | undefined = undefined;
   handle: ChildProcessSpawner.ChildProcessHandle | undefined = undefined;
 
-  constructor(private readonly runFork: (effect: Effect.Effect<void>) => unknown) {
+  private readonly runFork: (effect: Effect.Effect<void>) => unknown;
+
+  constructor(runFork: (effect: Effect.Effect<void>) => unknown) {
     super();
+    this.runFork = runFork;
   }
 
   kill(signal: NodeJS.Signals = "SIGTERM"): boolean {
