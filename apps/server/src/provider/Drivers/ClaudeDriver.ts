@@ -1,6 +1,7 @@
 import { ClaudeSettings, ProviderDriverKind } from "@t3tools/contracts";
 import * as Cache from "effect/Cache";
 import type * as Cause from "effect/Cause";
+import * as Digest from "effect/crypto/Digest"; // fork: see FORK.md.
 import * as Duration from "effect/Duration";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Effect from "effect/Effect";
@@ -28,6 +29,7 @@ import { ProviderDriverError } from "../Errors.ts";
 import { claudeUsageReader } from "./claudeUsage.ts";
 import { makeClaudeScopedLimitNames } from "../claudeUsageLimits.ts";
 import * as ClaudeResetCredits from "../claudeResetCredits.ts";
+import * as ClaudeSignIn from "../claudeSignIn.ts"; // fork: see FORK.md.
 import * as ResetCreditCoordinator from "../resetCreditCoordinator.ts";
 import {
   checkClaudeProviderStatus,
@@ -58,6 +60,7 @@ import {
 import {
   makeClaudeCapabilitiesCacheKey,
   makeClaudeContinuationGroupKey,
+  makeClaudeEnvironment, // fork: see FORK.md.
   mergeClaudeProcessEnvironment,
   resolveClaudeHomePath,
 } from "./ClaudeHome.ts";
@@ -80,6 +83,7 @@ export type ClaudeDriverEnv =
   | ChildProcessSpawner.ChildProcessSpawner
   | ResetCreditCoordinator.ResetCreditCoordinator
   | SecureRandom.SecureRandom
+  | Digest.Digest // fork: see FORK.md.
   | FileSystem.FileSystem
   | HttpClient.HttpClient
   | ProviderLatestVersions.ProviderLatestVersions
@@ -139,6 +143,8 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
     );
     const continuationGroupKey = yield* makeClaudeContinuationGroupKey(effectiveConfig, processEnv);
     const configDir = yield* resolveClaudeHomePath(effectiveConfig, processEnv);
+    const digest = yield* Digest.Digest; // fork: see FORK.md.
+    const claudeEnvironment = yield* makeClaudeEnvironment(effectiveConfig, processEnv); // fork: see FORK.md.
     const accountConfigPath = yield* ClaudeResetCredits.claudeAccountConfigPath(
       effectiveConfig.homePath.trim() || processEnv.CLAUDE_CONFIG_DIR?.trim()
         ? configDir
@@ -284,6 +290,17 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
               (version) =>
                 ClaudeResetCredits.readClaudeResetCredits(configDir, version).pipe(
                   Effect.provideService(HttpClient.HttpClient, httpClient),
+                  Effect.provideService(FileSystem.FileSystem, fileSystem),
+                  Effect.provideService(Path.Path, path),
+                ),
+              // fork: see FORK.md.
+              () =>
+                ClaudeSignIn.readClaudeSignInExpiresAt({
+                  configDir,
+                  environment: claudeEnvironment,
+                }).pipe(
+                  Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+                  Effect.provideService(Digest.Digest, digest),
                   Effect.provideService(FileSystem.FileSystem, fileSystem),
                   Effect.provideService(Path.Path, path),
                 ),

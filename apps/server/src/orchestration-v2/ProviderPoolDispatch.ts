@@ -1,9 +1,11 @@
 import {
   findProviderPool,
+  providerLimitedUntilMs,
   providerPoolDriver,
   type ModelSelection,
   type OrchestrationV2AppThread,
   type OrchestrationV2DomainEvent,
+  type OrchestrationV2ProviderFailure,
   type OrchestrationV2ProviderThread,
   type OrchestrationV2Run,
   type OrchestrationV2ThreadProjection,
@@ -16,7 +18,20 @@ import * as Effect from "effect/Effect";
 
 import * as ServerSettings from "../serverSettings.ts";
 import { ProviderPoolCatalog } from "./ProviderPoolCatalog.ts";
-import { routeModelSelection, type RoutedSelection } from "./ProviderPoolRouting.ts";
+import {
+  limitCooldownUntilMs,
+  routeModelSelection,
+  unavailablePoolNotice,
+  type RoutedSelection,
+} from "./ProviderPoolRouting.ts";
+
+const resetTimeFormat = new Intl.DateTimeFormat("en-US", {
+  month: "short",
+  day: "numeric",
+  hour: "numeric",
+  minute: "2-digit",
+  timeZoneName: "short",
+});
 
 export interface PoolRoutingInput {
   readonly selection: ModelSelection;
@@ -61,7 +76,45 @@ export const makePoolRouting = Effect.gen(function* () {
     });
   });
 
-  return { resolveRouting, getPublishedProviders: poolCatalog.getPublishedProviders };
+  /** Null when the account is in no pool. */
+  const describeUnavailablePool = Effect.fn("Orchestrator.describeUnavailablePool")(
+    function* (input: {
+      readonly limitedInstanceId: ProviderInstanceId;
+      readonly failure: OrchestrationV2ProviderFailure;
+      readonly projectId: OrchestrationV2AppThread["projectId"];
+    }) {
+      const owner = findProviderPool(
+        yield* poolCatalog.getPublishedProviders,
+        input.limitedInstanceId,
+      );
+      if (owner === null) return null;
+      const settings = yield* serverSettings.getSettings.pipe(Effect.orDie);
+      const nowMs = DateTime.toEpochMillis(yield* DateTime.now);
+      // The published list may not show the limit this account just hit yet.
+      const members = owner.members.map((member) => {
+        if (member.instanceId !== input.limitedInstanceId) return member;
+        const untilMs = Math.max(
+          limitCooldownUntilMs(input.failure, nowMs),
+          providerLimitedUntilMs(member, nowMs) ?? 0,
+        );
+        return { ...member, limitedUntil: DateTime.formatIso(DateTime.makeUnsafe(untilMs)) };
+      });
+      return unavailablePoolNotice({
+        pool: owner.pool,
+        members,
+        settings,
+        projectId: input.projectId,
+        nowMs,
+        formatTime: (ms) => resetTimeFormat.format(ms),
+      });
+    },
+  );
+
+  return {
+    resolveRouting,
+    describeUnavailablePool,
+    getPublishedProviders: poolCatalog.getPublishedProviders,
+  };
 });
 
 export const noEligibleMemberCause = (
