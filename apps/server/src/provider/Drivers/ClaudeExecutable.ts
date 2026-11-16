@@ -3,7 +3,7 @@ import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 
 import * as HostProcess from "@t3tools/shared/HostProcess";
-import { SpawnExecutableResolution } from "@t3tools/shared/shell";
+import { resolveSpawnExecutable } from "@t3tools/shared/shell";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 
@@ -48,9 +48,9 @@ export const resolveClaudeSdkExecutablePath = Effect.fn("resolveClaudeSdkExecuta
       return binaryPath;
     }
 
-    const resolveExecutable = yield* SpawnExecutableResolution;
     const isFile = yield* ClaudeExecutableFileCheck;
-    const resolved = resolveExecutable(binaryPath, platform, environment) ?? binaryPath;
+    const resolved =
+      (yield* resolveSpawnExecutable(binaryPath, platform, environment)) ?? binaryPath;
     const extension = NodePath.win32.extname(resolved).toLowerCase();
     if (!WINDOWS_SHIM_EXTENSIONS.has(extension)) {
       return resolved;

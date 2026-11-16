@@ -286,14 +286,21 @@ target's directory for a rename through the same function.
 - `apps/server/src/keybindings.ts`, `apps/server/src/serverSettings.ts`: watch through it.
 - Test: `apps/server/src/watchOneFile.fork.test.ts`, which runs live watches.
 
-### Don't walk PATH for every Claude start (`fork:`)
+### Don't walk PATH on the event loop for each start (`fork:`)
 
-`resolveSpawnExecutableWithNode` stats every candidate in every PATH entry, synchronously, on the main thread: about
-550 stats on the PC, for 46 entries and 12 extensions. Two freezes of 9.6 and 15.9 seconds were inside it, when stats
-were slow. A hit now stands for five minutes and is checked with one stat, and a command that's gone is looked up again.
-Upstream's `CommandResolutionCache` covers only the Effect-based resolver, not this synchronous one.
+`resolveSpawnExecutableWithNode` checks every candidate in every PATH entry: about 550 stats on the PC, for 46
+entries and 12 extensions. Two freezes of 9.6 and 15.9 seconds were inside it, when stats were slow. A hit now
+stands for five minutes and is checked with one stat, and a command that's gone is looked up again. Before each
+start on Windows, `resolveSpawnCommand` runs that search, the Git for Windows check and the npm shim read on the
+file pool, through `resolveSpawnExecutable`, so a slow stat holds up only that start. Other lookups, such as the
+ACP registry's, still block, behind the same cache.
+Upstream v0.1.11 starts programs from its spawn workers (#32260), which replaced the fork's own worker, but the
+lookup before each start still runs on the event loop. Its `CommandResolutionCache` remembers a hit there for
+30 s and covers the Effect-based resolver, not this synchronous one.
 
-- `packages/shared/src/shell.ts`: the cache.
+- `packages/shared/src/shell.ts`: the cache, and `resolveSpawnExecutable`.
+- `apps/server/src/provider/Drivers/ClaudeExecutable.ts`, `packages/provider-muse/src/server/sdk.ts`: look up
+  through it.
 - Test: `packages/shared/src/shell.fork.test.ts`.
 
 ### A CPU profile of each freeze on Windows (`fork:`)
