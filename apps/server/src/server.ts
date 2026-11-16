@@ -86,7 +86,7 @@ import * as DesktopBrowserChannel from "./preview/DesktopBrowserChannel.ts";
 import * as ServerBrowserStream from "./preview/ServerBrowserStream.ts";
 import * as PreviewBrowser from "./preview/PreviewBrowser.ts";
 import * as ProcessRunner from "./processRunner.ts";
-import * as GitSpawnWorker from "./process/GitSpawnWorker.ts"; // fork: see FORK.md.
+import * as ProcessSpawnWorker from "./process/ProcessSpawnWorker.ts"; // fork: see FORK.md.
 import * as GitManager from "./git/GitManager.ts";
 import * as EnvironmentTheme from "./environmentTheme.ts";
 import * as Keybindings from "./keybindings.ts";
@@ -337,8 +337,8 @@ const layerHttpServer = Layer.unwrap(
   }),
 );
 
-// fork: git starts from a worker thread on Windows, see FORK.md.
-const layerPlatformServices = Layer.mergeAll(DocumentText.layer, GitSpawnWorker.layer).pipe(
+// fork: programs start from a worker thread on Windows, see FORK.md.
+const layerPlatformServices = Layer.mergeAll(DocumentText.layer, ProcessSpawnWorker.layer).pipe(
   Layer.provideMerge(NodeServices.layer),
 );
 

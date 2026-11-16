@@ -6,7 +6,7 @@ import * as NodePath from "node:path";
 import { afterEach, assert, beforeEach, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 
-import { SpawnExecutableResolution } from "./shell.ts";
+import { resolveSpawnExecutable, SpawnExecutableResolution } from "./shell.ts";
 
 describe("spawn executable resolution", () => {
   let root: string;
@@ -70,6 +70,25 @@ describe("spawn executable resolution", () => {
       const inSecond = install(second);
       assert.equal(resolve("fork-tool", platform, { ...env, PATH: first }), inFirst);
       assert.equal(resolve("fork-tool", platform, { ...env, PATH: second }), inSecond);
+    }),
+  );
+
+  it.effect("finds the same files off the event loop as on it", () =>
+    Effect.gen(function* () {
+      const resolve = yield* SpawnExecutableResolution;
+      const installed = install(second);
+      const cases: ReadonlyArray<readonly [string, string | undefined]> = [
+        ["fork-tool", installed],
+        ["missing-tool", undefined],
+        [NodePath.join(second, "fork-tool"), installed],
+        [NodePath.join(first, "fork-tool"), undefined],
+      ];
+      for (const [command, expected] of cases) {
+        assert.equal(yield* resolveSpawnExecutable(command, platform, env), expected);
+        // A different PATH string keeps the first answer from being remembered for this one.
+        const uncached = { ...env, PATH: env.PATH + NodePath.delimiter };
+        assert.equal(resolve(command, platform, uncached), expected);
+      }
     }),
   );
 });

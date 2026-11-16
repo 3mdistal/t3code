@@ -1,8 +1,8 @@
 // fork: see FORK.md.
 /**
- * Node's Windows spawn is a synchronous `CreateProcessW` that can take hundreds of milliseconds for
- * a busy `git.exe`, and git is the only program the server starts often enough to stall the event
- * loop on it. So git starts from this worker; more worker threads did not raise throughput.
+ * Node's Windows spawn is a synchronous `CreateProcessW` that can take seconds while Windows is
+ * slow, stalling the whole event loop, so plain programs start from this worker. Its children are
+ * still in libuv's kill-on-close job, so Windows ends them when the server process exits.
  */
 import * as Cause from "effect/Cause";
 import * as Deferred from "effect/Deferred";
@@ -90,19 +90,18 @@ parentPort.on("message", (message) => {
         post({ type: "error", id, error: describe(error) });
         return;
       }
+      // A PID means the child exists. Report it before anything else, rather than on the later
+      // "spawn" event, so a worker that dies next still leaves the server able to end the child.
+      const started = spawned.pid !== undefined;
+      if (started) post({ type: "spawned", id, pid: spawned.pid });
       children.set(id, {
         proc: spawned,
         read: { 1: relay(id, 1, spawned.stdout), 2: relay(id, 2, spawned.stderr) },
       });
-      let started = false;
       spawned.on("error", (error) => {
         if (started) return;
         children.delete(id);
         post({ type: "error", id, error: describe(error) });
-      });
-      spawned.once("spawn", () => {
-        started = true;
-        post({ type: "spawned", id, pid: spawned.pid });
       });
       // A child that exits before reading its input fails later writes; their replies report it.
       spawned.stdin.on("error", () => {});
@@ -216,7 +215,8 @@ export type CreateWorker = (source: string) => NodeWorkerThreads.Worker;
 const createEvalWorker: CreateWorker = (source) =>
   new NodeWorkerThreads.Worker(source, { eval: true });
 
-const GIT_EXECUTABLE = /(?:^|[\\/])git(?:\.exe)?$/i;
+// Node refuses to start these without a shell, so they fail the same way on the ambient spawner.
+const BATCH_SCRIPT = /\.(?:cmd|bat)$/i;
 // Effect's Node spawner waits this long for a signalled process before kill returns.
 const KILL_GRACE_MILLIS = 1_000;
 // Bounds each shutdown step: the worker's own kills, then the server's.
@@ -224,10 +224,11 @@ const STOP_GRACE = Duration.seconds(5);
 
 const isPipe = (option: unknown) => option === undefined || option === "pipe";
 
-// Pipelines, shell commands, `git.cmd` shims, detached runs and non-pipe stdio keep the ambient spawner.
+// Pipelines, shell commands, batch shims, detached runs and non-pipe stdio keep the ambient
+// spawner. Launches meant to outlive the server, such as an editor or a browser, are among them.
 const runsOnWorker = (command: ChildProcess.Command): command is ChildProcess.StandardCommand =>
   command._tag === "StandardCommand" &&
-  GIT_EXECUTABLE.test(command.command) &&
+  !BATCH_SCRIPT.test(command.command) &&
   !command.options.shell &&
   command.options.detached !== true &&
   command.options.additionalFds === undefined &&
@@ -274,7 +275,7 @@ const toPlatformError = (
   });
 };
 
-export const make = Effect.fn("GitSpawnWorker.make")(function* (
+export const make = Effect.fn("ProcessSpawnWorker.make")(function* (
   createWorker: CreateWorker = createEvalWorker,
 ) {
   const fallback = yield* ChildProcessSpawner.ChildProcessSpawner;
@@ -291,6 +292,8 @@ export const make = Effect.fn("GitSpawnWorker.make")(function* (
   const taskkill = path.join(systemRoot ?? "C:\\Windows", "System32", "taskkill.exe");
 
   let worker: NodeWorkerThreads.Worker | undefined;
+  // Set once the server starts stopping the worker, so no child starts after its stop request.
+  let stopping = false;
   const children = new Map<number, WorkerChild>();
   const replies = new Map<number, (error: WorkerError | undefined) => void>();
   let nextId = 0;
@@ -318,8 +321,9 @@ export const make = Effect.fn("GitSpawnWorker.make")(function* (
       ),
     );
 
-  // A child whose spawn reply is still in flight has no PID here and is left running, and a
-  // child that exited just before the worker went may have had its PID reused.
+  // Messages arrive before the worker's exit, so a crashed worker's children all have PIDs here;
+  // only `terminate()` on a stuck stop can drop one, and Windows ends that child with the server.
+  // A child that exited just before the worker went may have had its PID reused.
   const abandon = (error: Error) => {
     const orphans = [...children.values()];
     children.clear();
@@ -392,6 +396,7 @@ export const make = Effect.fn("GitSpawnWorker.make")(function* (
   };
 
   const currentWorker = () => {
+    if (stopping) throw new Error("Spawn worker stopped");
     if (worker !== undefined) return worker;
     const created = createWorker(workerSource(taskkill));
     created.unref();
@@ -402,7 +407,7 @@ export const make = Effect.fn("GitSpawnWorker.make")(function* (
       runFork(abandon(error));
     };
     created.on("error", lost);
-    created.on("exit", (code) => lost(new Error(`Git spawn worker exited with code ${code}`)));
+    created.on("exit", (code) => lost(new Error(`Spawn worker exited with code ${code}`)));
     worker = created;
     return created;
   };
@@ -431,6 +436,7 @@ export const make = Effect.fn("GitSpawnWorker.make")(function* (
     });
 
   yield* Effect.addFinalizer(() => {
+    stopping = true;
     const current = worker;
     if (current === undefined) return Effect.void;
     return request({ type: "stop" }).pipe(
@@ -439,7 +445,7 @@ export const make = Effect.fn("GitSpawnWorker.make")(function* (
       Effect.andThen(
         Effect.suspend(() => {
           worker = undefined;
-          return abandon(new Error("Git spawn worker stopped"));
+          return abandon(new Error("Spawn worker stopped"));
         }),
       ),
       Effect.ensuring(Effect.promise(() => current.terminate())),
@@ -575,7 +581,7 @@ export const make = Effect.fn("GitSpawnWorker.make")(function* (
       all: Stream.merge(stdoutStream, stderrStream),
       getInputFd: () => Sink.drain,
       getOutputFd: () => Stream.empty,
-      // Git runs to completion; nothing detaches it from the server's lifetime.
+      // Detaching launches keep the ambient spawner; nothing here outlives the server.
       unref: Effect.succeed(Effect.void),
     });
   });

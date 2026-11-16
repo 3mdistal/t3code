@@ -130,20 +130,35 @@ models; skills come back unmarked, so visible, when time runs out.
 - Test: `apps/server/src/provider/codexSkillInvocability.fork.test.ts`, with the slow-disk cases on the test
   clock.
 
-### Git starts off the event loop on Windows (`fork:`)
+### Programs start off the event loop on Windows (`fork:`)
 
 Node starts a child process with a synchronous `CreateProcessW` on the event loop. On the PC, one start of Git
 for Windows' `git.exe` took about half a second, and pull request discovery starts hundreds of git processes a
-minute, so the server froze for seconds at a time. On Windows, plain git commands now start from a worker thread
-that relays their stdio, exit codes and kills. Pipelines, shell commands, `git.cmd` shims, detached runs, non-pipe
-stdio and every other program keep Effect's spawner. If the worker dies or the server stops, the server ends the
-git process trees it knows about with taskkill, or a plain kill when taskkill can't run. Proposed upstream; drop
-this patch once upstream ships it or an equivalent.
+minute, so the server froze for seconds at a time. Any program can take seconds to start while Windows itself is
+slow, during a disk stall or Store updates. On Windows, plain programs now start from a worker thread that relays
+their stdio, exit codes and kills. Claude sessions start there too: the Claude Agent SDK's spawn hook gets a
+Node-style child process over the server's spawner. Pipelines, shell commands, `.cmd` and `.bat` shims, detached
+runs and non-pipe stdio keep Effect's spawner, so an editor or browser launched to outlive the server still does.
 
-- `apps/server/src/process/GitSpawnWorker.ts`: the worker and the `ChildProcessSpawner` in front of it.
-- `apps/server/src/server.ts`: provides it inside the HTTP server layer, whose `NodeServices` would otherwise give
-  every layer it wraps Node's spawner, and outside it for `ProcessRunner` and the rest.
-- Test: `apps/server/src/process/GitSpawnWorker.fork.test.ts`, which runs live git.
+Nothing the worker starts is left running when the worker or the server goes:
+
+- The worker reports each program's PID as soon as it starts. If the worker dies, the server ends the tree of
+  every program it knows about with taskkill, or a plain kill when taskkill can't run.
+- When the server stops, it refuses new starts, has the worker end its programs' trees, then ends any left.
+- A program started from the worker is still in the job object libuv puts every child of the server in, so
+  Windows ends it when the server process exits, even after a crash. What that program started itself is
+  outside the job, as before this patch; only the tree kills above reach it.
+
+The git part is proposed upstream; drop this patch once upstream ships it or an equivalent.
+
+- `apps/server/src/process/ProcessSpawnWorker.ts`: the worker and the `ChildProcessSpawner` in front of it.
+- `apps/server/src/process/NodeStyleChild.ts`: a Node `ChildProcess` look-alike over the server's spawner, for
+  spawn hooks that need one back at once.
+- `apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.ts`: the SDK's spawn hook uses it on Windows.
+- `apps/server/src/server.ts`: provides the worker inside the HTTP server layer, whose `NodeServices` would
+  otherwise give every layer it wraps Node's spawner, and outside it for `ProcessRunner` and the rest.
+- Tests: `apps/server/src/process/ProcessSpawnWorker.fork.test.ts`, which runs live git and crashes and stops the
+  worker mid-run, and `apps/server/src/process/NodeStyleChild.fork.test.ts`.
 
 ### Deleting a worktree on Windows no longer starves the file pool (`fork:`)
 
@@ -339,13 +354,18 @@ replaced just as the watch attaches.
 - `apps/server/src/keybindings.ts`, `apps/server/src/serverSettings.ts`: watch through it.
 - Test: `apps/server/src/watchOneFile.fork.test.ts`, which runs live watches.
 
-### Don't walk PATH for every Claude start (`fork:`)
+### Don't walk PATH on the event loop for each start (`fork:`)
 
-`resolveSpawnExecutableWithNode` stats every candidate in every PATH entry, synchronously, on the main thread: about
-550 stats on the PC, for 46 entries and 12 extensions. Two freezes of 9.6 and 15.9 seconds were inside it, when stats
-were slow. A hit now stands for five minutes and is checked with one stat, and a command that's gone is looked up again.
+`resolveSpawnExecutableWithNode` checks every candidate in every PATH entry: about 550 stats on the PC, for 46
+entries and 12 extensions. Two freezes of 9.6 and 15.9 seconds were inside it, when stats were slow. A hit now
+stands for five minutes and is checked with one stat, and a command that's gone is looked up again. Before each
+start on Windows, `resolveSpawnCommand` runs that search, the Git for Windows check and the npm shim read on the
+file pool, through `resolveSpawnExecutable`, so a slow stat holds up only that start. Other lookups, such as the
+ACP registry's, still block, behind the same cache.
 
-- `packages/shared/src/shell.ts`: the cache.
+- `packages/shared/src/shell.ts`: the cache, and `resolveSpawnExecutable`.
+- `apps/server/src/provider/Drivers/ClaudeExecutable.ts`, `packages/provider-muse/src/server/sdk.ts`: look up
+  through it.
 - Test: `packages/shared/src/shell.fork.test.ts`.
 
 ### A CPU profile of each freeze on Windows (`fork:`)

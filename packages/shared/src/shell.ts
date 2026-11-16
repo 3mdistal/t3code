@@ -64,22 +64,28 @@ export interface ResolvedSpawnCommand {
   readonly shell: boolean;
 }
 
-export type SpawnExecutableResolver = (
-  command: string,
-  platform: NodeJS.Platform,
-  env: NodeJS.ProcessEnv,
-) => string | undefined;
+export interface SpawnExecutableResolver {
+  (command: string, platform: NodeJS.Platform, env: NodeJS.ProcessEnv): string | undefined;
+  /** The same search without blocking the event loop; `resolveSpawnExecutable` prefers it. */
+  readonly async?: (
+    command: string,
+    platform: NodeJS.Platform,
+    env: NodeJS.ProcessEnv,
+  ) => Promise<string | undefined>;
+}
 
-// fork: a bare command stats every candidate in every PATH entry, synchronously, on the main thread.
-// A hit stands for five minutes and is checked with one stat; see FORK.md.
+// fork: a bare command checks every candidate in every PATH entry before each start, so the
+// search runs on the file pool when it can, and a stat stalled by a slow disk holds up only that
+// start. A hit stands for five minutes and is checked with one stat; see FORK.md.
 const SPAWN_EXECUTABLE_CACHE_TTL_MS = 5 * 60_000;
 const spawnExecutableCache = new Map<string, { resolved: string; expiresAtMs: number }>();
 
-function resolveSpawnExecutableWithNode(
+/** Yields each path to check and takes back whether it is executable, so it runs blocking or not. */
+function* searchSpawnExecutable(
   command: string,
   platform: NodeJS.Platform,
   env: NodeJS.ProcessEnv,
-): string | undefined {
+): Generator<string, string | undefined, boolean> {
   const path = platform === "win32" ? NodePath.win32 : NodePath.posix;
   const windowsPathExtensions = platform === "win32" ? resolveWindowsPathExtensions(env) : [];
   const candidates = resolveCommandCandidates(
@@ -88,30 +94,20 @@ function resolveSpawnExecutableWithNode(
     windowsPathExtensions,
     path.extname,
   );
-  const isExecutable = (candidate: string) => {
-    try {
-      if (!NodeFS.statSync(candidate).isFile()) return false;
-      if (platform === "win32") {
-        return windowsPathExtensions.includes(path.extname(candidate).toUpperCase());
-      }
-      return canExecuteFile(candidate);
-    } catch {
-      return false;
-    }
-  };
 
   if (command.includes("/") || command.includes("\\")) {
-    return candidates.find(isExecutable);
+    for (const candidate of candidates) if (yield candidate) return candidate;
+    return undefined;
   }
 
   const pathValue = readEnvPath(env) ?? "";
   const cacheKey = [platform, pathValue, windowsPathExtensions.join(";"), command].join(
     COMMAND_RESOLUTION_CACHE_KEY_SEPARATOR,
   );
-  // @effect-diagnostics-next-line globalDate:off - The resolver is a plain synchronous function.
+  // @effect-diagnostics-next-line globalDate:off - The search is plain code under both drivers.
   const nowMs = Date.now();
   const cached = spawnExecutableCache.get(cacheKey);
-  if (cached && cached.expiresAtMs > nowMs && isExecutable(cached.resolved)) {
+  if (cached && cached.expiresAtMs > nowMs && (yield cached.resolved)) {
     return cached.resolved;
   }
 
@@ -120,7 +116,7 @@ function resolveSpawnExecutableWithNode(
     if (normalizedPathEntry.length === 0) continue;
     for (const candidate of candidates) {
       const candidatePath = path.join(normalizedPathEntry, candidate);
-      if (isExecutable(candidatePath)) {
+      if (yield candidatePath) {
         if (spawnExecutableCache.size >= COMMAND_RESOLUTION_CACHE_MAX_ENTRIES) {
           spawnExecutableCache.clear();
         }
@@ -135,12 +131,69 @@ function resolveSpawnExecutableWithNode(
   return undefined;
 }
 
+const hasWindowsPathExtension = (env: NodeJS.ProcessEnv) => {
+  const extensions = resolveWindowsPathExtensions(env);
+  return (candidate: string) =>
+    extensions.includes(NodePath.win32.extname(candidate).toUpperCase());
+};
+
+const resolveSpawnExecutableWithNode: SpawnExecutableResolver = Object.assign(
+  (command: string, platform: NodeJS.Platform, env: NodeJS.ProcessEnv) => {
+    const runsOnWindows = hasWindowsPathExtension(env);
+    const isExecutable = (candidate: string) => {
+      try {
+        if (!NodeFS.statSync(candidate).isFile()) return false;
+        if (platform === "win32") return runsOnWindows(candidate);
+        return canExecuteFile(candidate);
+      } catch {
+        return false;
+      }
+    };
+    const search = searchSpawnExecutable(command, platform, env);
+    let step = search.next();
+    while (!step.done) step = search.next(isExecutable(step.value));
+    return step.value;
+  },
+  {
+    async: async (command: string, platform: NodeJS.Platform, env: NodeJS.ProcessEnv) => {
+      const runsOnWindows = hasWindowsPathExtension(env);
+      const isExecutable = async (candidate: string) => {
+        try {
+          if (!(await NodeFS.promises.stat(candidate)).isFile()) return false;
+          if (platform === "win32") return runsOnWindows(candidate);
+          await NodeFS.promises.access(candidate, NodeFS.constants.X_OK);
+          return true;
+        } catch {
+          return false;
+        }
+      };
+      const search = searchSpawnExecutable(command, platform, env);
+      let step = search.next();
+      while (!step.done) step = search.next(await isExecutable(step.value));
+      return step.value;
+    },
+  },
+);
+
 export const SpawnExecutableResolution = Context.Reference<SpawnExecutableResolver>(
   "@t3tools/shared/shell/SpawnExecutableResolution",
   {
     defaultValue: () => resolveSpawnExecutableWithNode,
   },
 );
+
+/** Runs the current resolver, off the event loop when it can. */
+export const resolveSpawnExecutable = Effect.fnUntraced(function* (
+  command: string,
+  platform: NodeJS.Platform,
+  env: NodeJS.ProcessEnv,
+) {
+  const resolveExecutable = yield* SpawnExecutableResolution;
+  const resolveAsync = resolveExecutable.async;
+  return resolveAsync === undefined
+    ? resolveExecutable(command, platform, env)
+    : yield* Effect.promise(() => resolveAsync(command, platform, env));
+});
 
 export interface WindowsEnvironmentProbeOptions {
   readonly loadProfile?: boolean;
@@ -715,18 +768,21 @@ export function preferGitForWindowsBinary(
   env: NodeJS.ProcessEnv,
   isFile: (filePath: string) => boolean = isFileSync,
 ): string {
-  if (env.MSYSTEM) return executable;
+  return gitForWindowsBinaryCandidates(executable, env).find(isFile) ?? executable;
+}
+
+function gitForWindowsBinaryCandidates(
+  executable: string,
+  env: NodeJS.ProcessEnv,
+): ReadonlyArray<string> {
+  if (env.MSYSTEM) return [];
   const path = NodePath.win32;
-  if (path.basename(executable).toLowerCase() !== "git.exe") return executable;
+  if (path.basename(executable).toLowerCase() !== "git.exe") return [];
   const launcherDirectory = path.dirname(executable);
   const launcherFolder = path.basename(launcherDirectory).toLowerCase();
-  if (launcherFolder !== "cmd" && launcherFolder !== "bin") return executable;
+  if (launcherFolder !== "cmd" && launcherFolder !== "bin") return [];
   const installRoot = path.dirname(launcherDirectory);
-  for (const build of GIT_FOR_WINDOWS_BUILDS) {
-    const candidate = path.join(installRoot, build, "bin", "git.exe");
-    if (isFile(candidate)) return candidate;
-  }
-  return executable;
+  return GIT_FOR_WINDOWS_BUILDS.map((build) => path.join(installRoot, build, "bin", "git.exe"));
 }
 
 // npm cmd-shim format for native executables.
@@ -756,20 +812,46 @@ export function npmShimExecutable(
   readFile: (filePath: string) => string | undefined = readFileSyncOrUndefined,
   isFile: (filePath: string) => boolean = isFileSync,
 ): string | undefined {
+  if (NodePath.win32.extname(shimPath).toLowerCase() !== ".cmd") return undefined;
+  const executable = npmShimTarget(shimPath, readFile(shimPath));
+  return executable !== undefined && isFile(executable) ? executable : undefined;
+}
+
+function npmShimTarget(shimPath: string, contents: string | undefined): string | undefined {
   const path = NodePath.win32;
-  if (path.extname(shimPath).toLowerCase() !== ".cmd") return undefined;
   // Match exactly because preserved SET whitespace can select a different file.
-  const lines = readFile(shimPath)
-    ?.split(/\r?\n/)
-    .filter((line) => line.length > 0);
+  const lines = contents?.split(/\r?\n/).filter((line) => line.length > 0);
   if (lines?.length !== NPM_EXECUTABLE_SHIM_PREFIX.length + 1) return undefined;
   if (NPM_EXECUTABLE_SHIM_PREFIX.some((expected, index) => lines[index] !== expected)) {
     return undefined;
   }
   const target = NPM_EXECUTABLE_SHIM_RUN.exec(lines.at(-1)!)?.[1];
   if (target === undefined) return undefined;
-  const executable = path.join(path.dirname(shimPath), target);
-  return isFile(executable) ? executable : undefined;
+  return path.join(path.dirname(shimPath), target);
+}
+
+// fork: the same checks on the file pool, for the lookup before each Windows spawn; see FORK.md.
+const isFileOffThread = (filePath: string) =>
+  NodeFS.promises.stat(filePath).then(
+    (stats) => stats.isFile(),
+    () => false,
+  );
+
+async function preferGitForWindowsBinaryOffThread(
+  executable: string,
+  env: NodeJS.ProcessEnv,
+): Promise<string> {
+  for (const candidate of gitForWindowsBinaryCandidates(executable, env)) {
+    if (await isFileOffThread(candidate)) return candidate;
+  }
+  return executable;
+}
+
+async function npmShimExecutableOffThread(shimPath: string): Promise<string | undefined> {
+  if (NodePath.win32.extname(shimPath).toLowerCase() !== ".cmd") return undefined;
+  const contents = await NodeFS.promises.readFile(shimPath, "utf8").catch(() => undefined);
+  const executable = npmShimTarget(shimPath, contents);
+  return executable !== undefined && (await isFileOffThread(executable)) ? executable : undefined;
 }
 
 export type XcodeGitLocator = (env: NodeJS.ProcessEnv) => string | undefined;
@@ -886,8 +968,11 @@ export const resolveSpawnCommand = Effect.fnUntraced(function* (
   if (cached !== undefined && cached.expiresAtNanos > nowNanos) {
     resolvedExecutable = cached.resolvedPath;
   } else {
-    const found = resolveExecutable(command, platform, env);
-    resolvedExecutable = found === undefined ? null : preferGitForWindowsBinary(found, env);
+    const found = yield* resolveSpawnExecutable(command, platform, env);
+    resolvedExecutable =
+      found === undefined
+        ? null
+        : yield* Effect.promise(() => preferGitForWindowsBinaryOffThread(found, env));
     if (!explicitPath && resolvedExecutable !== null) {
       cacheCommandResolution(cache, cacheKey, resolvedExecutable, nowNanos);
     }
@@ -897,7 +982,9 @@ export const resolveSpawnCommand = Effect.fnUntraced(function* (
   if (extension !== ".cmd" && extension !== ".bat") {
     return { command: resolvedCommand, args: [...args], shell: false };
   }
-  const shimExecutable = options.bypassNpmShim ? npmShimExecutable(resolvedCommand) : undefined;
+  const shimExecutable = options.bypassNpmShim
+    ? yield* Effect.promise(() => npmShimExecutableOffThread(resolvedCommand))
+    : undefined;
   if (shimExecutable !== undefined) {
     return { command: shimExecutable, args: [...args], shell: false };
   }

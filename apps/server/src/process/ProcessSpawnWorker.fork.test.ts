@@ -7,6 +7,7 @@ import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
 import * as Scope from "effect/Scope";
@@ -19,13 +20,16 @@ import * as NodeChildProcess from "node:child_process";
 import * as NodeNet from "node:net";
 import * as NodeWorkerThreads from "node:worker_threads";
 
-import * as GitSpawnWorker from "./GitSpawnWorker.ts";
+import * as ProcessSpawnWorker from "./ProcessSpawnWorker.ts";
 
 // oxlint-disable-next-line t3code/no-global-process-runtime -- Ending an orphaned tree needs a real Windows host.
 const onWindowsHost = process.platform === "win32";
 
-const makeLayer = (ambientCommands: Array<string>, createWorker?: GitSpawnWorker.CreateWorker) =>
-  Layer.effect(ChildProcessSpawner.ChildProcessSpawner, GitSpawnWorker.make(createWorker)).pipe(
+const makeLayer = (
+  ambientCommands: Array<string>,
+  createWorker?: ProcessSpawnWorker.CreateWorker,
+) =>
+  Layer.effect(ChildProcessSpawner.ChildProcessSpawner, ProcessSpawnWorker.make(createWorker)).pipe(
     Layer.provide(
       Layer.effect(
         ChildProcessSpawner.ChildProcessSpawner,
@@ -71,7 +75,7 @@ const tempDirectory = Effect.gen(function* () {
 
 const recordingWorkers = (onMessage?: (message: unknown) => void) => {
   const workers: Array<NodeWorkerThreads.Worker> = [];
-  const createWorker: GitSpawnWorker.CreateWorker = (source) => {
+  const createWorker: ProcessSpawnWorker.CreateWorker = (source) => {
     const worker = new NodeWorkerThreads.Worker(source, { eval: true });
     if (onMessage !== undefined) worker.on("message", onMessage);
     workers.push(worker);
@@ -140,7 +144,37 @@ const isAlive = (pid: number) => {
   }
 };
 
-describe("GitSpawnWorker", () => {
+const IDLE = "setInterval(() => {}, 1 << 30)";
+// A detached grandchild is outside the child's own kill-on-close job, so only a tree kill ends it.
+const STARTS_A_GRANDCHILD = `const { spawn } = require("node:child_process");
+const grandchild = spawn(process.execPath, ["-e", ${JSON.stringify(IDLE)}], { detached: true, stdio: "ignore" });
+process.stdout.write(grandchild.pid + "\\n");
+${IDLE}`;
+
+/** Starts a program that starts a grandchild, and ends both when the test ends whatever happens. */
+const spawnWithGrandchild = Effect.gen(function* () {
+  const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+  const handle = yield* spawner.spawn(
+    ChildProcess.make(process.execPath, ["-e", STARTS_A_GRANDCHILD]),
+  );
+  const line = yield* handle.stdout.pipe(Stream.decodeText, Stream.splitLines, Stream.runHead);
+  const grandchild = Number(Option.getOrThrow(line));
+  yield* Effect.addFinalizer(() =>
+    Effect.sync(() => {
+      for (const pid of [handle.pid, grandchild]) if (isAlive(pid)) process.kill(pid);
+    }),
+  );
+  return { handle, grandchild };
+});
+
+/** A tree kill can report before Windows has ended every process in the tree. */
+// A grandchild has no handle to wait on, so its end is polled.
+const gone = (pid: number) =>
+  Effect.promise(() => expect.poll(() => isAlive(pid), { timeout: 2_000 }).toBe(false)).pipe(
+    Effect.as(true),
+  );
+
+describe("ProcessSpawnWorker", () => {
   it.live("runs git on the worker and relays output, input and exit codes", () => {
     const ambientCommands: Array<string> = [];
     return Effect.gen(function* () {
@@ -179,26 +213,56 @@ describe("GitSpawnWorker", () => {
     );
   });
 
-  it.live("leaves other programs and other platforms on the ambient spawner", () => {
-    const windowsCommands: Array<string> = [];
-    const linuxCommands: Array<string> = [];
-    return Effect.gen(function* () {
-      const node = yield* run(
-        ChildProcess.make(process.execPath, ["-e", "process.stdout.write('ok')"]),
-      ).pipe(
-        Effect.provide(makeLayer(windowsCommands)),
-        Effect.provideService(HostProcess.Platform, "win32"),
-      );
-      expect(node.stdout).toBe("ok");
-      expect(windowsCommands).toEqual([process.execPath]);
+  it.live(
+    "starts every plain program on the worker, and leaves the rest and other platforms",
+    () => {
+      const windowsCommands: Array<string> = [];
+      const linuxCommands: Array<string> = [];
+      return Effect.gen(function* () {
+        const onWindows = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+          effect.pipe(
+            Effect.provide(makeLayer(windowsCommands)),
+            Effect.provideService(HostProcess.Platform, "win32"),
+          );
+        const node = yield* onWindows(
+          run(ChildProcess.make(process.execPath, ["-e", "process.stdout.write('ok')"])),
+        );
+        expect(node.stdout).toBe("ok");
+        expect(windowsCommands).toEqual([]);
 
-      yield* run(ChildProcess.make("git", ["--version"])).pipe(
-        Effect.provide(makeLayer(linuxCommands)),
-        Effect.provideService(HostProcess.Platform, "linux"),
+        // Ignored stdio is how launches meant to outlive the server are made.
+        const ignoresInput = yield* onWindows(
+          run(
+            ChildProcess.make(process.execPath, ["-e", "process.stdout.write('ok')"], {
+              stdin: "ignore",
+            }),
+          ),
+        );
+        expect(ignoresInput.stdout).toBe("ok");
+        expect(windowsCommands).toEqual([process.execPath]);
+
+        yield* run(ChildProcess.make("git", ["--version"])).pipe(
+          Effect.provide(makeLayer(linuxCommands)),
+          Effect.provideService(HostProcess.Platform, "linux"),
+        );
+        expect(linuxCommands).toEqual(["git"]);
+      });
+    },
+  );
+
+  it.live("relays a long-running program's input and output both ways", () =>
+    Effect.gen(function* () {
+      const input = "x".repeat(4 * ProcessSpawnWorker.UNREAD_LIMIT_BYTES);
+      const echoed = yield* run(
+        ChildProcess.make(process.execPath, ["-e", "process.stdin.pipe(process.stdout)"]),
+        input,
       );
-      expect(linuxCommands).toEqual(["git"]);
-    });
-  });
+      expect(echoed.stdout.length).toBe(input.length);
+      expect(echoed.exitCode).toBe(0);
+      const failed = yield* run(ChildProcess.make(process.execPath, ["-e", "process.exit(7)"]));
+      expect(failed.exitCode).toBe(7);
+    }).pipe(Effect.provide(makeLayer([])), Effect.provideService(HostProcess.Platform, "win32")),
+  );
 
   it.live("fails a missing working directory the way Node's spawner does", () =>
     Effect.gen(function* () {
@@ -271,6 +335,82 @@ describe("GitSpawnWorker", () => {
     );
   });
 
+  it.live.runIf(onWindowsHost)("losing the worker ends every program and what each started", () => {
+    const { workers, createWorker } = recordingWorkers();
+    return Effect.gen(function* () {
+      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const { handle, grandchild } = yield* spawnWithGrandchild;
+      const idle = yield* spawner.spawn(ChildProcess.make(process.execPath, ["-e", IDLE]));
+      expect([handle.pid, grandchild, idle.pid].map(isAlive)).toEqual([true, true, true]);
+
+      yield* Effect.promise(() => Promise.all(workers.map((worker) => worker.terminate())));
+
+      yield* Effect.flip(handle.exitCode);
+      yield* Effect.flip(idle.exitCode);
+      expect(isAlive(handle.pid)).toBe(false);
+      expect(isAlive(idle.pid)).toBe(false);
+      expect(yield* gone(grandchild)).toBe(true);
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(makeLayer([], createWorker)),
+      Effect.provideService(HostProcess.Platform, "win32"),
+    );
+  });
+
+  it.live.runIf(onWindowsHost)(
+    "a worker that crashes just after starting a program still ends it",
+    () => {
+      const report = 'if (started) post({ type: "spawned", id, pid: spawned.pid });';
+      // The worker dies before it handles anything else, as an uncaught error there would.
+      const createWorker: ProcessSpawnWorker.CreateWorker = (source) => {
+        expect(source).toContain(report);
+        return new NodeWorkerThreads.Worker(
+          source.replace(report, `${report} throw new Error("worker crashed");`),
+          { eval: true },
+        );
+      };
+      return Effect.gen(function* () {
+        const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+        const handle = yield* spawner.spawn(ChildProcess.make(process.execPath, ["-e", IDLE]));
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => (isAlive(handle.pid) ? process.kill(handle.pid) : undefined)),
+        );
+
+        yield* Effect.flip(handle.exitCode);
+        expect(yield* gone(handle.pid)).toBe(true);
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(makeLayer([], createWorker)),
+        Effect.provideService(HostProcess.Platform, "win32"),
+      );
+    },
+  );
+
+  it.live.runIf(onWindowsHost)("stopping ends every running program and starts no more", () =>
+    Effect.gen(function* () {
+      const layerScope = yield* Scope.make();
+      const spawner = yield* ProcessSpawnWorker.make().pipe(
+        Effect.provideService(Scope.Scope, layerScope),
+      );
+      const { handle, grandchild } = yield* spawnWithGrandchild.pipe(
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+      );
+
+      yield* Scope.close(layerScope, Exit.void);
+
+      expect(isAlive(handle.pid)).toBe(false);
+      expect(yield* gone(grandchild)).toBe(true);
+      const refused = yield* spawner
+        .spawn(ChildProcess.make(process.execPath, ["-e", IDLE]))
+        .pipe(Effect.scoped, Effect.flip);
+      expect(refused.reason).toMatchObject({ module: "ChildProcess", method: "spawn" });
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(NodeServices.layer),
+      Effect.provideService(HostProcess.Platform, "win32"),
+    ),
+  );
+
   it.live("holds unread output at the limit and resumes once it is read", () => {
     let received = 0;
     let largestChunk = 0;
@@ -280,14 +420,14 @@ describe("GitSpawnWorker", () => {
       if (type !== "data" || chunk === undefined) return;
       received += chunk.byteLength;
       largestChunk = Math.max(largestChunk, chunk.byteLength);
-      if (received >= GitSpawnWorker.UNREAD_LIMIT_BYTES)
+      if (received >= ProcessSpawnWorker.UNREAD_LIMIT_BYTES)
         Deferred.doneUnsafe(reachedLimit, Exit.void);
     });
     return Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const repository = yield* tempDirectory;
-      const blobSize = 8 * GitSpawnWorker.UNREAD_LIMIT_BYTES;
+      const blobSize = 8 * ProcessSpawnWorker.UNREAD_LIMIT_BYTES;
       yield* fileSystem.writeFileString(path.join(repository, "large.txt"), "x".repeat(blobSize));
       const initialized = yield* run(ChildProcess.make("git", ["init", "-q"], { cwd: repository }));
       expect(initialized.exitCode).toBe(0);
@@ -303,7 +443,7 @@ describe("GitSpawnWorker", () => {
       yield* Deferred.await(reachedLimit);
       // The worker answers in order, so this round trip delivers every chunk it had sent.
       yield* Stream.run(Stream.empty, handle.stdin);
-      expect(received).toBeLessThan(GitSpawnWorker.UNREAD_LIMIT_BYTES + largestChunk);
+      expect(received).toBeLessThan(ProcessSpawnWorker.UNREAD_LIMIT_BYTES + largestChunk);
 
       const read = yield* Stream.runFold(
         handle.stdout,
@@ -347,7 +487,7 @@ describe("GitSpawnWorker", () => {
       const owned = yield* ownedProcess;
       let worker: NodeWorkerThreads.Worker | undefined;
       // Reports the owned process as the child it started.
-      const createWorker: GitSpawnWorker.CreateWorker = () => {
+      const createWorker: ProcessSpawnWorker.CreateWorker = () => {
         worker = new NodeWorkerThreads.Worker(
           `const { parentPort } = require("node:worker_threads");
 parentPort.on("message", (message) => {
@@ -381,7 +521,7 @@ parentPort.on("message", (message) => {
       const stopSent = yield* Deferred.make<void>();
       const taskkillStarted = yield* Deferred.make<void>();
       const workerExited = yield* Deferred.make<void>();
-      const createWorker: GitSpawnWorker.CreateWorker = (source) => {
+      const createWorker: ProcessSpawnWorker.CreateWorker = (source) => {
         const worker = new NodeWorkerThreads.Worker(source, { eval: true });
         const post = worker.postMessage.bind(worker);
         // The worker never hears the stop, as if it were stuck.
@@ -399,7 +539,7 @@ parentPort.on("message", (message) => {
           : node.spawn(command),
       );
       const layerScope = yield* Scope.make();
-      const spawner = yield* GitSpawnWorker.make(createWorker).pipe(
+      const spawner = yield* ProcessSpawnWorker.make(createWorker).pipe(
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, hangingTaskkill),
         Effect.provideService(Scope.Scope, layerScope),
       );
