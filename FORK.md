@@ -681,7 +681,14 @@ Users read about it in the Account pools section of `docs/user/providers-claude.
   `packages/shared/src/providerInstanceDisplay.ts`, `apps/server/src/provider/providerPoolSnapshot.ts`, and
   `ProviderPoolCatalog.ts`, `ProviderPoolRouting.ts`, `ProviderPoolDispatch.ts` and `ProviderPoolFailover.ts` in
   `apps/server/src/orchestration-v2/`. On the web, `ProviderPoolsSettings.tsx` and its `.logic.ts`,
-  `ProviderLimitedUntil.tsx`, and `routes/_chat.settings.account-pools.tsx`.
+  `ProviderLimitedUntil.tsx`, `ProviderSignInEnd.tsx` and its `.logic.ts`, and
+  `routes/_chat.settings.account-pools.tsx`.
+- Claude login end dates: `apps/server/src/provider/claudeSignIn.ts` reads `claudeAiOauth.refreshTokenExpiresAt`
+  from `.credentials.json`, or on macOS from the Keychain with the `/usr/bin/security find-generic-password` call
+  and names Claude Code uses, so the item Claude Code created answers without a prompt. It keeps only the date.
+  `ClaudeProvider.ts` publishes it as `auth.expiresAt` for a `claude.ai` login and reports an ended login as
+  unauthenticated, which drops it from pool routing. When failover finds no account, `run.pool-failover` emits a
+  `system_notice` naming what each account waits on, instead of producing no events.
 - Upstream files it changes most:
   - `apps/server/src/orchestration-v2/Orchestrator.ts`: every command that starts or moves a turn routes its
     model choice through `ProviderPoolDispatch.ts`, and failover is the internal `run.pool-failover` command.
@@ -703,6 +710,7 @@ Users read about it in the Account pools section of `docs/user/providers-claude.
 - Stock compatibility:
   - Pools live under the new `providerPools` settings key.
   - Failover emits only `turn-item.updated` and `system_notice`.
+  - `ServerProviderAuth.expiresAt` is optional, so a stock client or server leaves it out.
   - Every saved model choice names an account, never the pool: scheduled tasks, the default model in settings and
     project overrides, the fallback model, the project's own default, and the commit message, title and review
     guide models. Each stores the pool's first enabled account, which stock T3 runs as is. On the fork, a thread

@@ -74,6 +74,8 @@ export const ServerProviderAuth = Schema.Struct({
   workspaceId: Schema.optional(TrimmedNonEmptyString),
   /** Origin of the custom endpoint the instance sends its requests to. */
   endpoint: Schema.optional(TrimmedNonEmptyString),
+  // fork: when the login ends; using it does not extend it. See FORK.md.
+  expiresAt: Schema.optional(IsoDateTime),
 });
 export type ServerProviderAuth = typeof ServerProviderAuth.Type;
 

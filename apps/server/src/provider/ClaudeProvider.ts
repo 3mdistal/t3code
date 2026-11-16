@@ -675,6 +675,7 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
   /** Shared with the adapter so turn events reuse the scoped-bucket names this probe saw. */
   scopedLimitNames?: Ref.Ref<ClaudeScopedLimitNames>,
   resolveResetCredits?: (version: string) => Effect.Effect<ServerProviderResetCredits | undefined>,
+  resolveSignInExpiresAt?: () => Effect.Effect<string | undefined>, // fork: see FORK.md.
 ): Effect.fn.Return<
   ServerProviderDraft,
   never,
@@ -856,6 +857,30 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
     });
   }
 
+  // fork: only a login Claude Code stored itself has an end date. See FORK.md.
+  const signInExpiresAt =
+    resolveSignInExpiresAt && !customApiEndpoint && capabilities.tokenSource === "claude.ai"
+      ? yield* resolveSignInExpiresAt()
+      : undefined;
+  if (signInExpiresAt !== undefined && Date.parse(signInExpiresAt) <= Date.parse(checkedAt)) {
+    return buildServerProvider({
+      presentation: CLAUDE_PRESENTATION,
+      enabled: claudeSettings.enabled,
+      checkedAt,
+      models,
+      updateRequiredModels,
+      slashCommands: dedupedSlashCommands,
+      skills,
+      probe: {
+        installed: true,
+        version: parsedVersion,
+        status: "error",
+        auth: { status: "unauthenticated", expiresAt: signInExpiresAt },
+        message: "This Claude sign-in has ended. Run `claude auth login` to sign in again.",
+      },
+    });
+  }
+
   // A proxy's ANTHROPIC_AUTH_TOKEN reads as an API key; the endpoint is what the token is for.
   const authMetadata =
     apiProviderAuthMetadata(capabilities.apiProvider) ??
@@ -903,6 +928,7 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
         ...(capabilities.email ? { email: capabilities.email } : {}),
         ...(capabilities.workspaceId ? { workspaceId: capabilities.workspaceId } : {}),
         ...(authMetadata ? authMetadata : {}),
+        ...(signInExpiresAt ? { expiresAt: signInExpiresAt } : {}), // fork: see FORK.md.
       },
       ...(versionUpgradeMessage ? { message: versionUpgradeMessage } : {}),
       usageLimits: resetCredits ? { ...usageLimits, resetCredits } : usageLimits,
