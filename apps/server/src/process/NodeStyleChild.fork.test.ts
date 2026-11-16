@@ -40,7 +40,7 @@ const gone = (pid: number) =>
   );
 
 const once = <A extends Array<unknown>>(child: NodeStyleChild.NodeStyleChild, event: string) => {
-  const fired = NodeEvents.once(child, event);
+  const fired = NodeEvents.EventEmitter.once(child, event);
   return Effect.promise(() => fired as Promise<A>);
 };
 
@@ -135,6 +135,7 @@ describe.each(spawners)("a Node-style child from %s", (_name, layer) => {
   live("kills the program once it starts when its signal aborts first", () =>
     Effect.gen(function* () {
       const spawn = yield* NodeStyleChild.make;
+      // @effect-diagnostics-next-line abortControllerInEffect:off - The test aborts it by hand before the program starts.
       const controller = new AbortController();
       const child = spawn(process.execPath, ["-e", IDLE], { env, signal: controller.signal });
       const spawned = once(child, "spawn");
