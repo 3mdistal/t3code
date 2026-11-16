@@ -11,7 +11,7 @@ import {
 } from "@muse-code/sdk";
 import type { RuntimeMode } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
-import { SpawnExecutableResolution } from "@t3tools/shared/shell";
+import { resolveSpawnExecutable } from "@t3tools/shared/shell";
 import * as Effect from "effect/Effect";
 
 export interface MuseSdkHost {
@@ -101,8 +101,7 @@ export const museLaunch = Effect.fn("museLaunch")(function* (
 ): Effect.fn.Return<MuseLaunch> {
   if ((yield* HostProcess.Platform) !== "win32") return { command: binaryPath, args: [] };
   const env = environment ?? (yield* HostProcess.Environment);
-  const resolveExecutable = yield* SpawnExecutableResolution;
-  const resolved = resolveExecutable(binaryPath, "win32", env) ?? binaryPath;
+  const resolved = (yield* resolveSpawnExecutable(binaryPath, "win32", env)) ?? binaryPath;
   if (!/\.(?:cmd|bat)$/i.test(resolved)) return { command: resolved, args: [] };
   const systemRoot = windowsEnvironmentValue(env, "SystemRoot");
   return {

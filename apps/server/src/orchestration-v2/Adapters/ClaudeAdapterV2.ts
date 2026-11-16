@@ -139,6 +139,7 @@ import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { resolveClaudeSdkExecutablePath } from "../../provider/Drivers/ClaudeExecutable.ts";
+import * as NodeStyleChild from "../../process/NodeStyleChild.ts"; // fork: see FORK.md.
 import {
   planClaudeSkillDispatch,
   type ClaudeSkillTarget,
@@ -955,6 +956,7 @@ export const layerQueryRunner: Layer.Layer<
     const runFork = Effect.runForkWith(yield* Effect.context<never>());
     const hostEnvironment = yield* HostProcess.Environment;
     const portDiscovery = yield* PortScanner.PortDiscovery;
+    const spawnNodeStyle = yield* NodeStyleChild.make;
 
     return ClaudeAgentSdkQueryRunner.of({
       // fork: see FORK.md, "A Claude session that was never saved recovers".
@@ -1017,12 +1019,11 @@ export const layerQueryRunner: Layer.Layer<
             options.spawnClaudeCodeProcess ??
             ((spawnOptions: ClaudeSpawnOptions) => {
               if (platform !== "win32") return spawnClaudeProcessGroup(spawnOptions, stopScope);
-              const child = NodeChildProcess.spawn(spawnOptions.command, spawnOptions.args, {
+              // fork: through the server's spawner, so the CLI starts from the spawn worker; see FORK.md.
+              const child = spawnNodeStyle(spawnOptions.command, spawnOptions.args, {
                 cwd: spawnOptions.cwd,
                 env: spawnOptions.env,
                 signal: spawnOptions.signal,
-                windowsHide: true,
-                stdio: ["pipe", "pipe", "pipe"],
               });
               child.stderr
                 .setEncoding("utf8")
