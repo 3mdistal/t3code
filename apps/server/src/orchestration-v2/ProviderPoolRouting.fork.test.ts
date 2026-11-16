@@ -16,6 +16,7 @@ import {
   poolMemberHealth,
   rendezvousScore,
   routeModelSelection,
+  unavailablePoolNotice,
   type PoolMemberHealth,
 } from "./ProviderPoolRouting.ts";
 
@@ -721,5 +722,37 @@ describe("routeModelSelection", () => {
       type: "unrouted",
       selection: { instanceId: id("claudeAgent"), model: "opus" },
     });
+  });
+
+  it("names what each account of a pool with nowhere left to go waits on", () => {
+    const at = (minutes: number) => DateTime.formatIso(DateTime.makeUnsafe(later(minutes)));
+    const notice = unavailablePoolNotice({
+      pool: { ...pool, displayName: "Claude" },
+      members: [
+        stamped("claudeAgent", {
+          displayName: "Mac",
+          auth: { status: "unauthenticated" },
+          limitedUntil: at(30),
+        }),
+        stamped("claudeAgent_work", {
+          displayName: "Work",
+          auth: { status: "authenticated", expiresAt: at(-1) },
+        }),
+        stamped("claudeAgent_apple", {
+          displayName: "Apple",
+          auth: { status: "authenticated", expiresAt: at(60) },
+          limitedUntil: at(90),
+        }),
+        stamped("claudeAgent_off", { displayName: "Off", enabled: false }),
+      ],
+      settings,
+      projectId,
+      nowMs,
+      formatTime: (ms) => `+${(ms - nowMs) / 60_000}m`,
+    });
+    assert.equal(
+      notice,
+      "Every account in the Claude pool is unavailable. Needs sign-in: Mac, Work. Limited: Apple until +90m. Unavailable: Off.",
+    );
   });
 });

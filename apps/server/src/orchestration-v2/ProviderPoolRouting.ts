@@ -7,6 +7,7 @@ import {
   providerPoolDriver,
   resolveProjectProviderInstanceEnabled,
   type ModelSelection,
+  type OrchestrationV2ProviderFailure,
   type ProjectId,
   type ProjectSettingsOverrides,
   ServerSettingsError,
@@ -177,6 +178,22 @@ export function earliestPoolResetAtMs(
   return Math.min(...eligible.map((member) => member.limitedUntilMs ?? nowMs));
 }
 
+const DEFAULT_LIMIT_COOLDOWN_MS = 15 * 60_000;
+// Per-minute burst limits recover quickly and should not park a healthy account.
+const BURST_LIMIT_COOLDOWN_MS = 60_000;
+
+export function limitCooldownUntilMs(
+  failure: OrchestrationV2ProviderFailure,
+  nowMs: number,
+): number {
+  const resetMs = failure.resetAt == null ? Number.NaN : Date.parse(failure.resetAt);
+  if (resetMs > nowMs) return resetMs;
+  return (
+    nowMs +
+    (failure.code === "rateLimitExceeded" ? BURST_LIMIT_COOLDOWN_MS : DEFAULT_LIMIT_COOLDOWN_MS)
+  );
+}
+
 const isMemberHealthy = (provider: ServerProvider): boolean =>
   provider.enabled &&
   provider.installed &&
@@ -258,6 +275,37 @@ export function poolMemberHealth(input: {
       continuationKey: member.continuation?.groupKey ?? null,
     };
   });
+}
+
+/** Names what each account of a pool with nowhere left to go is waiting on. */
+export function unavailablePoolNotice(
+  input: Parameters<typeof poolMemberHealth>[0] & {
+    readonly pool: ServerProvider;
+    readonly formatTime: (ms: number) => string;
+  },
+): string {
+  const health = poolMemberHealth(input);
+  const signIn: Array<string> = [];
+  const limited: Array<string> = [];
+  const unavailable: Array<string> = [];
+  for (const member of input.members) {
+    const name = member.displayName ?? member.instanceId;
+    const signInEndMs = Date.parse(member.auth.expiresAt ?? "");
+    const untilMs = health.find((entry) => entry.instanceId === member.instanceId)?.limitedUntilMs;
+    if (member.auth.status === "unauthenticated" || signInEndMs <= input.nowMs) {
+      signIn.push(name);
+    } else if (untilMs != null && untilMs > input.nowMs) {
+      limited.push(`${name} until ${input.formatTime(untilMs)}`);
+    } else {
+      unavailable.push(name);
+    }
+  }
+  return [
+    `Every account in the ${input.pool.displayName ?? input.pool.driver} pool is unavailable.`,
+    ...(signIn.length > 0 ? [`Needs sign-in: ${signIn.join(", ")}.`] : []),
+    ...(limited.length > 0 ? [`Limited: ${limited.join("; ")}.`] : []),
+    ...(unavailable.length > 0 ? [`Unavailable: ${unavailable.join(", ")}.`] : []),
+  ].join(" ");
 }
 
 export type RoutedSelection =

@@ -17,7 +17,11 @@ import * as ServerSettings from "../serverSettings.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import { ProviderPoolCatalog } from "./ProviderPoolCatalog.ts";
-import { earliestPoolResetAtMs, poolMemberHealth } from "./ProviderPoolRouting.ts";
+import {
+  earliestPoolResetAtMs,
+  limitCooldownUntilMs,
+  poolMemberHealth,
+} from "./ProviderPoolRouting.ts";
 
 export interface UsageLimitedAttempt {
   readonly threadId: ThreadId;
@@ -32,22 +36,6 @@ export type UsageLimitResolution =
   | { readonly type: "failed_over" }
   /** Fail the run as today. For a pooled run `resetAt` is the pool's earliest reset. */
   | { readonly type: "finalize"; readonly resetAt: IsoDateTime | null };
-
-const DEFAULT_LIMIT_COOLDOWN_MS = 15 * 60_000;
-// Per-minute burst limits recover quickly and should not park a healthy account.
-const BURST_LIMIT_COOLDOWN_MS = 60_000;
-
-export function limitCooldownUntilMs(
-  failure: OrchestrationV2ProviderFailure,
-  nowMs: number,
-): number {
-  const resetMs = failure.resetAt == null ? Number.NaN : Date.parse(failure.resetAt);
-  if (resetMs > nowMs) return resetMs;
-  return (
-    nowMs +
-    (failure.code === "rateLimitExceeded" ? BURST_LIMIT_COOLDOWN_MS : DEFAULT_LIMIT_COOLDOWN_MS)
-  );
-}
 
 /**
  * Runs between a usage-limit terminal and the run going terminal. A reference

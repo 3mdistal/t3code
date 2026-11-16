@@ -62,6 +62,7 @@ import {
 import { ProviderModelsSection } from "./ProviderModelsSection";
 import { ProviderInstanceIcon } from "../chat/ProviderInstanceIcon";
 import { ProviderLimitedUntil } from "./ProviderLimitedUntil"; // fork: see FORK.md.
+import { ProviderSignInEnd } from "./ProviderSignInEnd"; // fork: see FORK.md.
 import { ProviderAccentColorPicker } from "./ProviderAccentColorPicker";
 import { RedactedSensitiveText } from "./RedactedSensitiveText";
 import { SettingResetButton, SettingsRow, SettingsSection } from "./settingsLayout";
@@ -916,6 +917,7 @@ export function ProviderInstanceCard({
         <span>Authenticated as</span>
         <ProviderAuthEmail email={authEmail} />
         {authLabel ? <span>· {authLabel}</span> : null}
+        <ProviderSignInEnd auth={liveProvider?.auth} separator="· " />
         {inlineStatusDetail ? (
           <span className="min-w-0 [overflow-wrap:anywhere]">· {inlineStatusDetail}</span>
         ) : null}
@@ -1106,6 +1108,9 @@ export function ProviderInstanceCard({
               <span className="mt-0.5 block truncate text-xs text-muted-foreground">
                 In {poolName} pool
               </span>
+            ) : null}
+            {enabled ? (
+              <ProviderSignInEnd auth={liveProvider?.auth} className="mt-0.5 block text-xs" />
             ) : null}
             <ProviderLimitedUntil
               provider={liveProvider}

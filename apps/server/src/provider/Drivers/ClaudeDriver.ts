@@ -25,6 +25,7 @@ import { ProviderDriverError } from "../Errors.ts";
 import { claudeUsageReader } from "./claudeUsage.ts";
 import { makeClaudeScopedLimitNames } from "../claudeUsageLimits.ts";
 import * as ClaudeResetCredits from "../claudeResetCredits.ts";
+import * as ClaudeSignIn from "../claudeSignIn.ts"; // fork: see FORK.md.
 import * as ResetCreditCoordinator from "../resetCreditCoordinator.ts";
 import {
   checkClaudeProviderStatus,
@@ -58,6 +59,7 @@ import {
 import {
   makeClaudeCapabilitiesCacheKey,
   makeClaudeContinuationGroupKey,
+  makeClaudeEnvironment, // fork: see FORK.md.
   resolveClaudeHomePath,
 } from "./ClaudeHome.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
@@ -156,6 +158,8 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
     );
     const continuationGroupKey = yield* makeClaudeContinuationGroupKey(effectiveConfig, processEnv);
     const configDir = yield* resolveClaudeHomePath(effectiveConfig, processEnv);
+    const crypto = yield* Crypto.Crypto; // fork: see FORK.md.
+    const claudeEnvironment = yield* makeClaudeEnvironment(effectiveConfig, processEnv); // fork: see FORK.md.
     const accountConfigPath = yield* ClaudeResetCredits.claudeAccountConfigPath(
       effectiveConfig.homePath.trim() || processEnv.CLAUDE_CONFIG_DIR?.trim()
         ? configDir
@@ -269,6 +273,17 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
               (version) =>
                 ClaudeResetCredits.readClaudeResetCredits(configDir, version).pipe(
                   Effect.provideService(HttpClient.HttpClient, httpClient),
+                  Effect.provideService(FileSystem.FileSystem, fileSystem),
+                  Effect.provideService(Path.Path, path),
+                ),
+              // fork: see FORK.md.
+              () =>
+                ClaudeSignIn.readClaudeSignInExpiresAt({
+                  configDir,
+                  environment: claudeEnvironment,
+                }).pipe(
+                  Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+                  Effect.provideService(Crypto.Crypto, crypto),
                   Effect.provideService(FileSystem.FileSystem, fileSystem),
                   Effect.provideService(Path.Path, path),
                 ),

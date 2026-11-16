@@ -71,6 +71,8 @@ export const ServerProviderAuth = Schema.Struct({
   subscriptionSharing: Schema.optional(Schema.Boolean),
   profileId: Schema.optional(TrimmedNonEmptyString),
   workspaceId: Schema.optional(TrimmedNonEmptyString),
+  // fork: when the login ends; using it does not extend it. See FORK.md.
+  expiresAt: Schema.optional(IsoDateTime),
 });
 export type ServerProviderAuth = typeof ServerProviderAuth.Type;
 

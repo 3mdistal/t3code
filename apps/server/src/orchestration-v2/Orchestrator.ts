@@ -5454,8 +5454,59 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       projectId: projection.thread.projectId,
       excluded,
     });
+    const emitNotice = Effect.fn("Orchestrator.emitPoolNotice")(function* (notice: {
+      readonly nodeId: NodeId;
+      readonly providerInstanceId: ProviderInstanceId;
+      readonly providerThreadId: OrchestrationV2ProviderThread["id"];
+      readonly signal: string;
+      readonly message: string;
+    }) {
+      const now = yield* DateTime.now;
+      yield* emit(
+        events,
+        command,
+      )({
+        type: "turn-item.updated",
+        threadId: command.threadId,
+        runId: run.id,
+        nodeId: notice.nodeId,
+        providerInstanceId: notice.providerInstanceId,
+        occurredAt: now,
+        payload: {
+          id: idAllocator.derive.runSignalTurnItem({ runId: run.id, signal: notice.signal }),
+          threadId: command.threadId,
+          runId: run.id,
+          nodeId: notice.nodeId,
+          providerThreadId: notice.providerThreadId,
+          providerTurnId: null,
+          nativeItemRef: null,
+          parentItemId: null,
+          ordinal: yield* nextTurnItemOrdinal(projection),
+          status: "completed",
+          title: null,
+          startedAt: now,
+          completedAt: now,
+          updatedAt: now,
+          type: "system_notice",
+          message: notice.message,
+        },
+      });
+    });
     if (routed.type !== "routed" || routed.decision.type !== "member") {
-      return;
+      // The run fails next with the pool's earliest reset; this says what each account waits on.
+      const message = yield* poolRouting.describeUnavailablePool({
+        limitedInstanceId: run.providerInstanceId,
+        failure: command.failure,
+        projectId: projection.thread.projectId,
+      });
+      if (message === null) return;
+      return yield* emitNotice({
+        nodeId: rootNodeId,
+        providerInstanceId: run.providerInstanceId,
+        providerThreadId: providerThread.id,
+        signal: `pool-unavailable:${command.attemptId}`,
+        message,
+      });
     }
     const rootNode = projection.nodes.find((candidate) => candidate.id === rootNodeId);
     const replaced = yield* replaceRunAttempt({
@@ -5486,34 +5537,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     const providers = yield* poolRouting.getPublishedProviders;
     const nameOf = (instanceId: ProviderInstanceId) =>
       providers.find((provider) => provider.instanceId === instanceId)?.displayName ?? instanceId;
-    yield* emitEvent({
-      type: "turn-item.updated",
-      threadId: command.threadId,
-      runId: run.id,
+    yield* emitNotice({
       nodeId: replaced.rootNodeId,
       providerInstanceId: routed.selection.instanceId,
-      occurredAt: now,
-      payload: {
-        id: idAllocator.derive.runSignalTurnItem({
-          runId: run.id,
-          signal: `pool-failover:${replaced.attemptId}`,
-        }),
-        threadId: command.threadId,
-        runId: run.id,
-        nodeId: replaced.rootNodeId,
-        providerThreadId: replaced.providerThread.id,
-        providerTurnId: null,
-        nativeItemRef: null,
-        parentItemId: null,
-        ordinal: yield* nextTurnItemOrdinal(projection),
-        status: "completed",
-        title: null,
-        startedAt: now,
-        completedAt: now,
-        updatedAt: now,
-        type: "system_notice",
-        message: `${nameOf(run.providerInstanceId)} reached its usage limit. Continuing on ${nameOf(routed.selection.instanceId)}.`,
-      },
+      providerThreadId: replaced.providerThread.id,
+      signal: `pool-failover:${replaced.attemptId}`,
+      message: `${nameOf(run.providerInstanceId)} reached its usage limit. Continuing on ${nameOf(routed.selection.instanceId)}.`,
     });
     const releasedSession = projection.providerSessions.find(
       (session) =>
