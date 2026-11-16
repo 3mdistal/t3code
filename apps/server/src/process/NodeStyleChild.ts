@@ -10,6 +10,7 @@ import * as NodeStream from "node:stream";
 
 import * as PlatformNodeStream from "@effect/platform-node/NodeStream";
 import * as Cause from "effect/Cause";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
@@ -58,12 +59,8 @@ export class NodeStyleChild extends NodeEvents.EventEmitter {
   }
 }
 
-const writeChunk = (target: NodeStream.Writable, chunk: Uint8Array) =>
+const drained = (target: NodeStream.Writable) =>
   Effect.callback<void>((resume) => {
-    if (target.destroyed || target.write(chunk)) {
-      resume(Effect.void);
-      return;
-    }
     const done = () => {
       target.off("drain", done);
       target.off("close", done);
@@ -77,11 +74,23 @@ const writeChunk = (target: NodeStream.Writable, chunk: Uint8Array) =>
     });
   });
 
+// A slow reader holds the program back until it exits. What is left then is bounded by the pipe and
+// the worker's unread limit, so it is buffered for the reader rather than dropped.
+const writeChunk = (
+  target: NodeStream.Writable,
+  chunk: Uint8Array,
+  exited: Deferred.Deferred<void>,
+) =>
+  target.destroyed || target.write(chunk) || Deferred.isDoneUnsafe(exited)
+    ? Effect.void
+    : Effect.raceFirst(drained(target), Deferred.await(exited));
+
 const relay = (
   from: Stream.Stream<Uint8Array, PlatformError.PlatformError>,
   target: NodeStream.PassThrough,
+  exited: Deferred.Deferred<void>,
 ) =>
-  Stream.runForEach(from, (chunk) => writeChunk(target, chunk)).pipe(
+  Stream.runForEach(from, (chunk) => writeChunk(target, chunk, exited)).pipe(
     Effect.ignore,
     Effect.ensuring(Effect.sync(() => target.end())),
   );
@@ -133,11 +142,12 @@ export const make = Effect.gen(function* () {
       child.emit("spawn");
       if (child.requestedSignal !== undefined) child.sendKill(handle, child.requestedSignal);
       yield* Effect.forkScoped(sendInput(handle));
+      const exited = Deferred.makeUnsafe<void>();
       const output = yield* Effect.forkScoped(
-        Effect.all([relay(handle.stdout, child.stdout), relay(handle.stderr, child.stderr)], {
-          concurrency: "unbounded",
-          discard: true,
-        }),
+        Effect.all(
+          [relay(handle.stdout, child.stdout, exited), relay(handle.stderr, child.stderr, exited)],
+          { concurrency: "unbounded", discard: true },
+        ),
       );
       const exit = yield* Effect.exit(handle.exitCode);
       // Node ends a child on Windows with TerminateProcess and reports the signal it was asked for.
@@ -146,6 +156,9 @@ export const make = Effect.gen(function* () {
       } else {
         child.signalCode = child.requestedSignal ?? "SIGKILL";
       }
+      // As Node does, so later writes fail instead of piling up.
+      child.stdin.destroy();
+      Deferred.doneUnsafe(exited, Exit.void);
       child.emit("exit", child.exitCode, child.signalCode);
       yield* Fiber.join(output).pipe(Effect.timeoutOption(TRAILING_OUTPUT_GRACE));
       child.stdout.end();

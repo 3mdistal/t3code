@@ -88,6 +88,35 @@ describe.each(spawners)("a Node-style child from %s", (_name, layer) => {
     }),
   );
 
+  live("keeps output a slow reader hasn't read when the program exits", () =>
+    Effect.gen(function* () {
+      const spawn = yield* NodeStyleChild.make;
+      const child = spawn(process.execPath, ["-e", 'process.stdout.write("x".repeat(262144))'], {
+        env,
+      });
+      yield* once(child, "close");
+
+      const output = yield* Effect.promise(() => NodeStreamConsumers.text(child.stdout));
+      expect(output.length).toBe(262144);
+      expect(child.exitCode).toBe(0);
+    }),
+  );
+
+  live("ends stdin when the program exits, as Node does", () =>
+    Effect.gen(function* () {
+      const spawn = yield* NodeStyleChild.make;
+      const child = spawn(process.execPath, ["-e", "0"], { env });
+      yield* once(child, "exit");
+
+      expect(child.stdin.destroyed).toBe(true);
+      const written = yield* Effect.callback<Error | null | undefined>((resume) => {
+        child.stdin.on("error", () => {});
+        child.stdin.write("late", (error) => resume(Effect.succeed(error)));
+      });
+      expect((written as NodeJS.ErrnoException | undefined)?.code).toBe("ERR_STREAM_DESTROYED");
+    }),
+  );
+
   live("reports a kill as the signal it asked for, as Node does on Windows", () =>
     Effect.gen(function* () {
       const spawn = yield* NodeStyleChild.make;
