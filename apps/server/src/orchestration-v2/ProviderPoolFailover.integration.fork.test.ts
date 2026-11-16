@@ -656,6 +656,11 @@ it.live("fails the run with the pool's earliest reset when every account is cool
       assert.lengthOf(projection.attempts, 1);
       const error = projection.turnItems.find((item) => item.type === "error");
       assert.equal(error?.type === "error" ? error.failure.resetAt : null, siblingResetAt);
+      const notice = projection.turnItems.find((item) => item.type === "system_notice");
+      assert.match(
+        notice?.type === "system_notice" ? notice.message : "",
+        /^Every account in the .+ pool is unavailable\. Limited: Claude until .+; Claude - Work until .+\.$/,
+      );
       assert.equal(shell?.usageLimitResetAt, siblingResetAt);
       const armed = limitRecoveryCommand(shell!, true, nowMs);
       assert.equal(armed?.type, "thread.metadata.update");

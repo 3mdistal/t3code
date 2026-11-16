@@ -68,6 +68,14 @@ because that work runs on one account. To bring an account back into the model
 picker, untick it or turn the pool off. Threads stay on the account that last ran
 them.
 
+A Claude login ends on a fixed date, and using the account doesn't extend it.
+**Settings > Providers** shows when each login ends, as in "Signed in until
+Dec 16", turns it into a warning five days before, and shows the account as not
+authenticated once it has ended. Sign in again with the account's own config
+directory, such as `CLAUDE_CONFIG_DIR=~/.claude_personal claude auth login`. When
+no account in a pool can take a turn, the thread names the accounts that need
+signing in and when each limited account resets.
+
 ## Compact long conversations
 
 Set **Auto-compact after** in the Claude provider settings to an integer between
