@@ -4,6 +4,7 @@ import {
   CommandId,
   type EnvironmentId,
   MessageId,
+  type ModelSelection,
   OrchestratorMcpCapabilitiesResult,
   OrchestratorMcpFailure,
   OrchestratorMcpThreadReadResult,
@@ -12,6 +13,7 @@ import {
   type OrchestrationV2ThreadShell,
   type ProjectId,
   type ProviderInteractionMode,
+  RunId,
   type RuntimeMode,
   type ThreadId,
 } from "@t3tools/contracts";
@@ -22,6 +24,7 @@ import {
   renderHistory,
   selectHistory,
 } from "@t3tools/provider-core/server/handoffBudget";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -32,6 +35,7 @@ import * as ServerConfig from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import { ProjectToolkit } from "../mcp/toolkits/project/tools.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
+import * as ThreadCommandExecutor from "../orchestration-v2/ThreadCommandExecutor.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import * as PeerLinks from "../peer/PeerLinks.ts";
 import * as PeerMcpClient from "../peer/PeerMcpClient.ts";
@@ -43,13 +47,14 @@ import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import { makeJsonFiles } from "./jsonFiles.ts";
 import {
   isBufferedWake,
+  isDefiniteRefusal,
   type MoveCandidate,
   moveBlocker,
   moveBrief,
   movedBranchName,
   movePlan,
   type MoveTarget,
-  type ThreadThere,
+  remoteHeadBlocker,
   threadThere,
   TIMING,
   type Upstream,
@@ -58,7 +63,9 @@ import {
 import {
   type MovedThread,
   type MoveLaunch,
+  moveRetries,
   movedThreads,
+  type Outgoing,
   type OverflowMover,
   ResourceLimits,
 } from "./ResourceLimits.ts";
@@ -101,7 +108,7 @@ export interface OverflowHost {
     environmentId: EnvironmentId,
     modes: Modes,
     threadId: string,
-  ) => Effect.Effect<ThreadThere, OrchestratorMcpFailure>;
+  ) => Effect.Effect<OrchestratorMcpThreadReadResult, OrchestratorMcpFailure>;
   readonly send: (
     environmentId: EnvironmentId,
     modes: Modes,
@@ -111,10 +118,22 @@ export interface OverflowHost {
       readonly clientRequestId: string;
     },
   ) => Effect.Effect<void, OrchestratorMcpFailure>;
+  /** The branch's head on its remote (`git ls-remote`), and whether it contains `head`, read from this checkout. */
+  readonly remoteHead: (
+    cwd: string,
+    upstream: Upstream,
+    head: string,
+  ) => Effect.Effect<
+    { readonly remoteHead: string | null; readonly containsHead: boolean | null },
+    OrchestratorMcpFailure
+  >;
 }
 
 /** The notification a move queues, so its notice is the thread's last item; it's cancelled, never sent. */
 const MOVE_NOTE_PREFIX = "limits:moved:";
+
+/** Run statuses that mean the thread is working here. */
+const LIVE_RUN = new Set(["preparing", "starting", "running", "waiting"]);
 
 const modesOf = (shell: OrchestrationV2ThreadShell): Modes => ({
   runtimeMode: shell.runtimeMode,
@@ -123,11 +142,22 @@ const modesOf = (shell: OrchestrationV2ThreadShell): Modes => ({
 
 const failureMessage = (failure: OrchestratorMcpFailure) => failure.message;
 
+/** How the thread a move launched is doing there, from its `t3_thread_read` answer. */
+const threadThereFrom = ({ thread, recentRuns }: OrchestratorMcpThreadReadResult) =>
+  threadThere({
+    worktreePath: thread.worktreePath,
+    firstRun: recentRuns.find((run) => run.ordinal === 1) ?? null,
+  });
+
+const linkFailure = (message: string) =>
+  new OrchestratorMcpFailure({ code: "orchestration_error", message });
+
 export const makeOverflowMover = Effect.fn("makeOverflowMover")(function* (host: OverflowHost) {
   const limits = yield* ResourceLimits;
   const settings = yield* ServerSettings.ServerSettingsService;
   const projections = yield* ProjectionStore.ProjectionStoreV2;
   const threads = yield* ThreadManagement.ThreadManagementService;
+  const threadLocks = yield* ThreadCommandExecutor.ThreadCommandExecutor;
   const config = yield* ServerConfig.ServerConfig;
   const path = yield* Path.Path;
   const { readJson, writeJson } = yield* makeJsonFiles;
@@ -136,11 +166,36 @@ export const makeOverflowMover = Effect.fn("makeOverflowMover")(function* (host:
     ? yield* environment.value.getEnvironmentId
     : "this environment";
   const movedFile = path.join(config.stateDir, "resource-limits", "moved.json");
-  // The file is the record: what a restart left under way carries on from its phase.
-  const saved = movedThreads(yield* readJson(movedFile));
-  yield* limits.update((snapshot) => ({ ...snapshot, moved: saved }));
-  // Threads that couldn't move, or failed to, and when to look at them again.
-  const retryAt = yield* Ref.make<ReadonlyMap<ThreadId, number>>(new Map());
+  // The file is the record: what a restart left under way carries on from its phase, and skipped threads keep waiting.
+  const file = yield* readJson(movedFile);
+  yield* limits.update((snapshot) => ({ ...snapshot, moved: movedThreads(file) }));
+  const retryAt = yield* Ref.make(moveRetries(file));
+  // Once a call to the linked machine times out, the rest of the pass doesn't wait on it again.
+  const stalled = yield* Ref.make(false);
+
+  /** A call to the linked machine, bounded so a stall can't hold the governor's pass. */
+  const call = Effect.fn("Overflow.call")(function* <A>(
+    effect: Effect.Effect<A, OrchestratorMcpFailure>,
+  ) {
+    if (yield* Ref.get(stalled)) {
+      return yield* linkFailure("The linked environment stopped answering earlier this pass.");
+    }
+    return yield* effect.pipe(
+      Effect.timeoutOrElse({
+        duration: Duration.millis(TIMING.overflowCallMs),
+        orElse: () =>
+          Ref.set(stalled, true).pipe(
+            Effect.andThen(
+              Effect.fail(
+                linkFailure(
+                  `The linked environment didn't answer within ${TIMING.overflowCallMs / 1000} s.`,
+                ),
+              ),
+            ),
+          ),
+      }),
+    );
+  });
 
   const dispatch = (
     command: Parameters<ThreadManagement.ThreadManagementService["Service"]["dispatch"]>[0],
@@ -154,15 +209,32 @@ export const makeOverflowMover = Effect.fn("makeOverflowMover")(function* (host:
       ),
     );
 
+  const write = (
+    moved: ReadonlyMap<ThreadId, MovedThread>,
+    retries: ReadonlyMap<ThreadId, number>,
+  ) =>
+    writeJson(movedFile, {
+      version: 2,
+      // A claim has sent nothing yet, so a restart forgets it.
+      threads: Object.fromEntries([...moved].filter(([, entry]) => entry.phase !== "claiming")),
+      retryAt: Object.fromEntries(retries),
+    });
+
   const skip = Effect.fn("Overflow.skip")(function* (
     threadId: ThreadId,
     reason: string,
     now: number,
   ) {
     yield* Effect.logInfo("resource-limits.move-skipped", { threadId, reason });
-    yield* Ref.update(retryAt, (current) =>
-      new Map(current).set(threadId, now + TIMING.moveRetryMs),
+    const retries = yield* Ref.updateAndGet(
+      retryAt,
+      (current) =>
+        new Map(
+          [...current, [threadId, now + TIMING.moveRetryMs] as const].filter(([, at]) => at > now),
+        ),
     );
+    // Kept in memory even when the file can't be written; a restart then looks at the thread again.
+    yield* write((yield* limits.read).moved, retries);
   });
 
   /** Saves the change to `moved.json`, then applies it here; nothing changes when the file can't be written. */
@@ -173,8 +245,7 @@ export const makeOverflowMover = Effect.fn("makeOverflowMover")(function* (host:
     const next = new Map((yield* limits.read).moved);
     if (entry === null) next.delete(threadId);
     else next.set(threadId, entry);
-    const written = yield* writeJson(movedFile, { version: 2, threads: Object.fromEntries(next) });
-    if (!written) return false;
+    if (!(yield* write(next, yield* Ref.get(retryAt)))) return false;
     yield* limits.update((snapshot) => {
       const moved = new Map(snapshot.moved);
       if (entry === null) moved.delete(threadId);
@@ -184,9 +255,20 @@ export const makeOverflowMover = Effect.fn("makeOverflowMover")(function* (host:
     return true;
   });
 
+  /** Ends a claim that didn't become a move; admission holds nothing more for it. */
+  const release = (threadId: ThreadId) =>
+    limits.update((snapshot) => {
+      if (snapshot.moved.get(threadId)?.phase !== "claiming") return snapshot;
+      const moved = new Map(snapshot.moved);
+      moved.delete(threadId);
+      return { ...snapshot, moved };
+    });
+
+  const runsOf = (threadId: ThreadId) =>
+    Effect.map(projections.getThreadRecords(threadId, ["runs"]), ({ runs }) => runs);
+
   const queuedOf = Effect.fn("Overflow.queuedOf")(function* (threadId: ThreadId) {
-    const { runs } = yield* projections.getThreadRecords(threadId, ["runs"]);
-    const queued = runs
+    const queued = (yield* runsOf(threadId))
       .filter((run) => run.status === "queued")
       .toSorted(
         (left, right) =>
@@ -202,6 +284,37 @@ export const makeOverflowMover = Effect.fn("makeOverflowMover")(function* (host:
       const message = messages.find((candidate) => candidate.id === run.userMessageId);
       return message === undefined ? [] : [{ run, message }];
     });
+  });
+
+  const messageOfRun = Effect.fn("Overflow.messageOfRun")(function* (
+    threadId: ThreadId,
+    runId: string,
+  ) {
+    const run = (yield* runsOf(threadId)).find((candidate) => candidate.id === runId);
+    if (run === undefined) return undefined;
+    const { messages } = yield* projections.getThreadRecords(threadId, ["messages"], {
+      messageIds: [run.userMessageId],
+    });
+    return messages.find((candidate) => candidate.id === run.userMessageId);
+  });
+
+  /**
+   * Installs the guard and reads the batch under the thread's command lock, which admission and Resume take too: a
+   * run admitted before the claim has started by the time this reads, and one after it is held.
+   */
+  const claim = Effect.fn("Overflow.claim")(function* (threadId: ThreadId, entry: MovedThread) {
+    return yield* threadLocks.withLock(
+      threadId,
+      Effect.gen(function* () {
+        yield* limits.update((snapshot) => ({
+          ...snapshot,
+          moved: new Map(snapshot.moved).set(threadId, entry),
+        }));
+        const live = (yield* runsOf(threadId)).some((run) => LIVE_RUN.has(run.status));
+        const held = (yield* queuedOf(threadId)).filter(({ message }) => !isBufferedWake(message));
+        return { live, held };
+      }),
+    );
   });
 
   /** The thread's history, as a provider switch hands it on. */
@@ -230,49 +343,98 @@ export const makeOverflowMover = Effect.fn("makeOverflowMover")(function* (host:
     return renderHistory(selected.messages, selected.context);
   });
 
-  /** Cancels these runs here while they're still queued; false when one couldn't be, to try again next pass. */
-  const cancelQueued = Effect.fn("Overflow.cancelQueued")(function* (
+  /**
+   * Cancels a run here under a key, so repeating a cancel that already went through succeeds. False when it failed:
+   * `ours` says whether the run is still queued for this machine to cancel later, rather than cancelled or started by
+   * someone else.
+   */
+  const cancel = Effect.fn("Overflow.cancel")(function* (
     threadId: ThreadId,
-    runIds: ReadonlyArray<string>,
+    runId: string,
+    key: string,
   ) {
-    const { runs } = yield* projections.getThreadRecords(threadId, ["runs"]);
-    const wanted = new Set(runIds);
-    for (const run of runs) {
-      if (!wanted.has(run.id) || run.status !== "queued") continue;
-      const cancelled = yield* dispatch({
-        type: "queued-run.cancel",
-        commandId: CommandId.make(`limits:move-cancel:${run.id}`),
-        threadId,
-        runId: run.id,
-      });
-      if (!cancelled) return false;
-    }
-    return true;
+    const cancelled = yield* dispatch({
+      type: "queued-run.cancel",
+      commandId: CommandId.make(`${key}:${runId}`),
+      threadId,
+      runId: RunId.make(runId),
+    });
+    if (cancelled) return { cancelled: true, retry: false };
+    const run = (yield* runsOf(threadId)).find((candidate) => candidate.id === runId);
+    return { cancelled: false, retry: run?.status === "queued" };
   });
 
-  /** Sends what's queued on a moved thread there, in order, and cancels it here. Stops at the first failure. */
+  const outgoingText = (
+    entry: MovedThread,
+    out: Outgoing,
+    message: {
+      readonly text: string;
+      readonly attachments: ReadonlyArray<{ readonly name: string }>;
+    },
+  ) => {
+    const attached = message.attachments.map((attachment) => attachment.name);
+    const text =
+      attached.length === 0
+        ? message.text
+        : `${message.text}\n\n[Attachments left on the original machine: ${attached.join(", ")}]`;
+    return out.edited
+      ? `A message this thread started with was edited on ${entry.machine} before the move finished. It now reads:\n\n${text}`
+      : text;
+  };
+
+  /**
+   * Sends what's queued on a moved thread there, in order. Each run joins the outbox in `moved.json`, is cancelled
+   * here, and only then is its text read and sent, so an edit can't land between the send and the cancel, and a crash
+   * between them still sends it. Stops at the first failure.
+   */
   const forward = Effect.fn("Overflow.forward")(function* (
     threadId: ThreadId,
-    entry: MovedThread,
+    start: MovedThread,
     shell: OrchestrationV2ThreadShell,
   ) {
-    const batch = new Set(entry.batch);
-    for (const { run, message } of yield* queuedOf(threadId)) {
-      // Its turn already started here; holdQueuedRun lets it run.
-      if (isBufferedWake(message)) continue;
-      if (!batch.has(run.id) && !message.id.startsWith(MOVE_NOTE_PREFIX)) {
-        const attached = message.attachments.map((attachment) => attachment.name);
-        const sent = yield* host
-          .send(entry.environmentId as EnvironmentId, modesOf(shell), {
+    let entry = start;
+    const batch = new Set(entry.batch.map(({ runId }) => runId));
+    const waiting = new Set(entry.outbox.map(({ runId }) => runId));
+    const queued = yield* queuedOf(threadId);
+    const arrived = queued.filter(
+      ({ run, message }) =>
+        // Its turn already started here; holdQueuedRun lets it run.
+        !isBufferedWake(message) &&
+        !batch.has(run.id) &&
+        !message.id.startsWith(MOVE_NOTE_PREFIX) &&
+        !waiting.has(run.id),
+    );
+    if (arrived.length > 0) {
+      const next: MovedThread = {
+        ...entry,
+        outbox: [...entry.outbox, ...arrived.map(({ run }) => ({ runId: run.id, edited: false }))],
+      };
+      if (!(yield* save(threadId, next))) return;
+      entry = next;
+    }
+    // The move's note leaves only its notice; a batch run still queued went with the launch.
+    for (const { run, message } of queued) {
+      if (batch.has(run.id) || message.id.startsWith(MOVE_NOTE_PREFIX)) {
+        yield* cancel(threadId, run.id, "limits:forward-cancel");
+      }
+    }
+    for (const out of entry.outbox) {
+      const cancelled = yield* cancel(
+        threadId,
+        out.runId,
+        out.edited ? "limits:move-cancel" : "limits:forward-cancel",
+      );
+      if (!cancelled.cancelled && cancelled.retry) return;
+      const message = cancelled.cancelled ? yield* messageOfRun(threadId, out.runId) : undefined;
+      if (message !== undefined) {
+        const sent = yield* call(
+          host.send(entry.environmentId as EnvironmentId, modesOf(shell), {
             threadId: entry.threadId!,
-            message:
-              attached.length === 0
-                ? message.text
-                : `${message.text}\n\n[Attachments left on the original machine: ${attached.join(", ")}]`,
-            // A retry after a lost reply, or after the cancel below failed, finds the same message there.
-            clientRequestId: `limits-forward:${run.id}`,
-          })
-          .pipe(Effect.result);
+            message: outgoingText(entry, out, message),
+            // A retry after a lost reply finds the same message there; cancelled, its text no longer changes.
+            clientRequestId: `${out.edited ? "limits-edit" : "limits-forward"}:${out.runId}`,
+          }),
+        ).pipe(Effect.result);
         if (sent._tag === "Failure") {
           yield* Effect.logWarning("resource-limits.forward-failed", {
             threadId,
@@ -280,15 +442,15 @@ export const makeOverflowMover = Effect.fn("makeOverflowMover")(function* (host:
           });
           return;
         }
-        yield* Effect.logInfo("resource-limits.forwarded", { threadId, runId: run.id });
+        yield* Effect.logInfo("resource-limits.forwarded", { threadId, runId: out.runId });
       }
-      const cancelled = yield* dispatch({
-        type: "queued-run.cancel",
-        commandId: CommandId.make(`limits:forward-cancel:${run.id}`),
-        threadId,
-        runId: run.id,
-      });
-      if (!cancelled) return;
+      // Someone else cancelled or started it, so it isn't this machine's to send.
+      const next: MovedThread = {
+        ...entry,
+        outbox: entry.outbox.filter((candidate) => candidate.runId !== out.runId),
+      };
+      if (!(yield* save(threadId, next))) return;
+      entry = next;
     }
   });
 
@@ -302,42 +464,46 @@ export const makeOverflowMover = Effect.fn("makeOverflowMover")(function* (host:
     yield* skip(threadId, reason, now);
   });
 
-  /** One step of one move, from its saved phase, carrying on to the next while each succeeds. */
+  /** One step of one move, from its saved phase, carrying on while each succeeds. True when it launched or landed. */
   const step = Effect.fn("Overflow.step")(function* (
     threadId: ThreadId,
     now: number,
     paused: boolean,
   ) {
+    let entry = (yield* limits.read).moved.get(threadId);
+    if (entry === undefined || entry.phase === "claiming") return false;
     const shell = yield* projections
       .getThreadShell(threadId)
       .pipe(Effect.orElseSucceed(() => null));
-    let entry = (yield* limits.read).moved.get(threadId);
-    if (entry === undefined) return;
     if (shell === null || shell.deletedAt !== null) {
       if (entry.phase !== "moved") yield* abandon(threadId, "the thread is gone", now);
-      return;
+      return false;
     }
     const target = entry.environmentId as EnvironmentId;
     const modes = modesOf(shell);
+    let stepped = false;
     if (entry.phase === "pending") {
-      // Pause all quiets this machine's work, and a move that hasn't launched is new work.
-      if (paused) return;
-      const launch = entry.launch!;
-      const launched = yield* host.launch(target, modes, launch).pipe(Effect.result);
+      // Pause all quiets this machine's work, and a move that hasn't launched is new work; the switch is read again
+      // since the pass began.
+      if (paused || (yield* limits.refreshPause) !== null) return false;
+      const launched = yield* call(host.launch(target, modes, entry.launch!)).pipe(Effect.result);
       if (launched._tag === "Failure") {
-        // The reply may be what was lost, so the same launch is sent again for as long as a move may wait.
-        if (now - entry.at < TIMING.moveRetryMs) {
-          yield* Effect.logWarning("resource-limits.move-launch-failed", {
+        if (isDefiniteRefusal(launched.failure)) {
+          yield* abandon(
             threadId,
-            reason: failureMessage(launched.failure),
-          });
-          return;
+            `the linked machine refused the launch: ${failureMessage(launched.failure)}`,
+            now,
+          );
+          return false;
         }
-        return yield* abandon(
+        // It may have taken the launch and lost the reply, so the batch stays held here until it answers. The same
+        // key finds the same thread there, however long that takes.
+        yield* Effect.logWarning("resource-limits.move-launch-waiting", {
           threadId,
-          `the launch there failed: ${failureMessage(launched.failure)}`,
-          now,
-        );
+          waitingMs: now - entry.at,
+          reason: failureMessage(launched.failure),
+        });
+        return false;
       }
       const next: MovedThread = {
         ...entry,
@@ -346,29 +512,47 @@ export const makeOverflowMover = Effect.fn("makeOverflowMover")(function* (host:
         threadId: launched.success.threadId,
         link: launched.success.link,
       };
-      if (!(yield* save(threadId, next))) return;
+      if (!(yield* save(threadId, next))) return false;
       entry = next;
+      stepped = true;
     }
     if (entry.phase === "launched") {
-      const there = yield* host.readThere(target, modes, entry.threadId!).pipe(Effect.result);
+      const there = yield* call(host.readThere(target, modes, entry.threadId!)).pipe(
+        Effect.map(threadThereFrom),
+        Effect.result,
+      );
       if (there._tag === "Failure") {
         yield* Effect.logWarning("resource-limits.move-read-failed", {
           threadId,
           reason: failureMessage(there.failure),
         });
-        return;
+        return stepped;
       }
-      if (there.success.state === "starting") return;
+      if (there.success.state === "starting") return stepped;
       if (there.success.state === "failed") {
-        return yield* abandon(threadId, `the thread there failed: ${there.success.reason}`, now);
+        yield* abandon(threadId, `the thread there failed: ${there.success.reason}`, now);
+        return stepped;
       }
       const next: MovedThread = { ...entry, phase: "confirmed" };
-      if (!(yield* save(threadId, next))) return;
+      if (!(yield* save(threadId, next))) return stepped;
       entry = next;
     }
     if (entry.phase === "confirmed") {
-      // What it carried there leaves the queue here; anything held since is forwarded below.
-      if (!(yield* cancelQueued(threadId, entry.batch))) return;
+      // What it carried there leaves the queue here. A batch message edited since the launch goes there again as it
+      // now reads; cancelled, it can't change after this.
+      const runs = yield* runsOf(threadId);
+      const edited: Array<Outgoing> = [];
+      for (const { runId, text } of entry.batch) {
+        const run = runs.find((candidate) => candidate.id === runId);
+        if (run === undefined || (run.status !== "queued" && run.status !== "cancelled")) continue;
+        const cancelled = yield* cancel(threadId, runId, "limits:move-cancel");
+        if (!cancelled.cancelled) {
+          if (cancelled.retry) return stepped;
+          continue;
+        }
+        const message = text === null ? undefined : yield* messageOfRun(threadId, runId);
+        if (message !== undefined && message.text !== text) edited.push({ runId, edited: true });
+      }
       // Held with the moved notice, which stays as the thread's last item once forwarding cancels it.
       const noted = yield* dispatch({
         type: "message.dispatch",
@@ -387,10 +571,15 @@ export const makeOverflowMover = Effect.fn("makeOverflowMover")(function* (host:
         createdBy: "agent",
         creationSource: "server",
       });
-      if (!noted) return;
-      const next: MovedThread = { ...entry, phase: "moved" };
-      if (!(yield* save(threadId, next))) return;
+      if (!noted) return stepped;
+      const next: MovedThread = {
+        ...entry,
+        phase: "moved",
+        outbox: [...edited, ...entry.outbox],
+      };
+      if (!(yield* save(threadId, next))) return stepped;
       entry = next;
+      stepped = true;
       yield* Effect.logInfo("resource-limits.moved", {
         threadId,
         environmentId: target,
@@ -398,20 +587,129 @@ export const makeOverflowMover = Effect.fn("makeOverflowMover")(function* (host:
       });
     }
     yield* forward(threadId, entry, shell);
+    return stepped;
   });
 
   /** A failed read or write leaves the move in its phase for the next pass. */
   const stepOrLog = (threadId: ThreadId, now: number, paused: boolean) =>
     step(threadId, now, paused).pipe(
       Effect.catchCause((cause) =>
-        Effect.logWarning("resource-limits.move-step-failed", { threadId, cause }),
+        Effect.logWarning("resource-limits.move-step-failed", { threadId, cause }).pipe(
+          Effect.as(false),
+        ),
       ),
     );
 
   const advance: OverflowMover["advance"] = Effect.fn("Overflow.advance")(function* (now, paused) {
+    yield* Ref.set(stalled, false);
+    let stepped = false;
     for (const threadId of (yield* limits.read).moved.keys()) {
-      yield* stepOrLog(threadId, now, paused);
+      if (yield* stepOrLog(threadId, now, paused)) stepped = true;
     }
+    return stepped;
+  });
+
+  /**
+   * Claims a thread that passed the checks needing no batch, reads its batch under the claim, and starts the move.
+   * "next" looks at the next candidate, "stop" ends moving for this pass.
+   */
+  const start = Effect.fn("Overflow.start")(function* (input: {
+    readonly threadId: ThreadId;
+    readonly shell: OrchestrationV2ThreadShell;
+    readonly cwd: string;
+    readonly upstream: Upstream;
+    readonly head: string;
+    readonly remote: string;
+    readonly target: EnvironmentId;
+    readonly projectId: ProjectId;
+    readonly modelSelection: ModelSelection;
+    readonly now: number;
+  }) {
+    const { threadId, shell, now } = input;
+    const claimed: MovedThread = {
+      phase: "claiming",
+      environmentId: input.target,
+      machine: yield* host.label(input.target),
+      at: now,
+      batch: [],
+      launch: null,
+      threadId: null,
+      link: null,
+      outbox: [],
+    };
+    const { live, held } = yield* claim(threadId, claimed);
+    if (live) return yield* skip(threadId, "it started here", now).pipe(Effect.as("next" as const));
+    if (held.length === 0) {
+      return yield* skip(threadId, "nothing is held", now).pipe(Effect.as("next" as const));
+    }
+    if (held.some(({ message }) => message.attachments.length > 0)) {
+      return yield* skip(threadId, "a held message has attachments", now).pipe(
+        Effect.as("next" as const),
+      );
+    }
+    const localBranch = movedBranchName(input.upstream.branch, threadId, now);
+    const brief = moveBrief({
+      title: shell.title,
+      threadId,
+      environmentId: hereId,
+      machine: (yield* limits.read).machine,
+      remote: input.remote,
+      remoteBranch: input.upstream.branch,
+      localBranch,
+      head: input.head,
+      summary: yield* summaryOf(threadId).pipe(Effect.orElseSucceed(() => "")),
+      held: held.map(({ message }) => message.text),
+    });
+    if (brief === null) {
+      return yield* skip(
+        threadId,
+        "its held messages are too long to send in one message",
+        now,
+      ).pipe(Effect.as("next" as const));
+    }
+    // The thread there starts from the branch on its remote, which a rewind or force-push may have taken this
+    // checkout's commit out of. The brief still has the thread there check it.
+    const remoteHead = yield* call(host.remoteHead(input.cwd, input.upstream, input.head)).pipe(
+      Effect.result,
+    );
+    if (remoteHead._tag === "Failure") {
+      return yield* skip(
+        threadId,
+        `its remote couldn't be read: ${failureMessage(remoteHead.failure)}`,
+        now,
+      ).pipe(Effect.as("next" as const));
+    }
+    const rewound = remoteHeadBlocker({ head: input.head, ...remoteHead.success });
+    if (rewound !== null)
+      return yield* skip(threadId, rewound, now).pipe(Effect.as("next" as const));
+    // Pause all may have been switched on during the reads.
+    if ((yield* limits.refreshPause) !== null) return "stop" as const;
+    const pending: MovedThread = {
+      ...claimed,
+      phase: "pending",
+      batch: held.map(({ run, message }) => ({ runId: run.id, text: message.text })),
+      launch: {
+        projectId: input.projectId,
+        title: shell.title,
+        modelSelection: input.modelSelection,
+        // Named as a remote branch there, so the launch fetches it rather than following a local branch's tracking.
+        workspaceStrategy: {
+          type: "worktree",
+          baseRef: `${input.remote}/${input.upstream.branch}`,
+          branch: localBranch,
+          startFromOrigin: true,
+        },
+        message: brief,
+        // A retry after a lost reply finds the same thread there; a later move of this thread is a new one.
+        clientRequestId: `limits-move:${threadId}:${now}`,
+      },
+    };
+    if (!(yield* save(threadId, pending))) {
+      yield* skip(threadId, "moved.json couldn't be written", now);
+      return "stop" as const;
+    }
+    yield* stepOrLog(threadId, now, false);
+    return "started" as const;
   });
 
   const move: OverflowMover["move"] = Effect.fn("Overflow.move")(function* (candidates, now) {
@@ -442,6 +740,7 @@ export const makeOverflowMover = Effect.fn("makeOverflowMover")(function* (host:
         .pipe(Effect.orElseSucceed(() => null));
       if (shell === null) continue;
       const project = yield* host.project(shell.projectId);
+      // A first look; the batch itself is read again under the claim.
       const held = (yield* queuedOf(threadId).pipe(Effect.orElseSucceed(() => []))).filter(
         ({ message }) => !isBufferedWake(message),
       );
@@ -449,7 +748,8 @@ export const makeOverflowMover = Effect.fn("makeOverflowMover")(function* (host:
         yield* skip(threadId, project === null ? "its project is gone" : "nothing is held", now);
         continue;
       }
-      const git = yield* host.gitStatus(shell.worktreePath ?? project.workspaceRoot);
+      const cwd = shell.worktreePath ?? project.workspaceRoot;
+      const git = yield* host.gitStatus(cwd);
       const candidate: MoveCandidate = {
         topLevel: shell.lineage.parentThreadId == null && shell.delegatedFrom === undefined,
         tags: current.threadTags[threadId] ?? [],
@@ -470,11 +770,11 @@ export const makeOverflowMover = Effect.fn("makeOverflowMover")(function* (host:
       };
       const modes = modesOf(shell);
       const there = yield* Effect.gen(function* () {
-        providers ??= yield* host.providersThere(target, modes);
+        providers ??= yield* call(host.providersThere(target, modes));
         const projects =
           project.repositoryKey === null
             ? []
-            : yield* host.projectsThere(target, modes, project.repositoryKey);
+            : yield* call(host.projectsThere(target, modes, project.repositoryKey));
         return { providers, projects };
       }).pipe(Effect.result);
       if (there._tag === "Failure") {
@@ -494,56 +794,30 @@ export const makeOverflowMover = Effect.fn("makeOverflowMover")(function* (host:
         yield* skip(threadId, plan.blocker, now);
         continue;
       }
-      const localBranch = movedBranchName(upstream.branch, threadId);
-      const brief = moveBrief({
-        title: shell.title,
+      const started = yield* start({
         threadId,
-        environmentId: hereId,
-        machine: (yield* limits.read).machine,
-        remote: plan.remote,
-        remoteBranch: upstream.branch,
-        localBranch,
+        shell,
+        cwd,
+        upstream,
         head,
-        summary: yield* summaryOf(threadId).pipe(Effect.orElseSucceed(() => "")),
-        held: held.map(({ message }) => message.text),
-      });
-      if (brief === null) {
-        yield* skip(threadId, "its held messages are too long to send in one message", now);
-        continue;
-      }
-      const pending: MovedThread = {
-        phase: "pending",
-        environmentId: target,
-        machine: yield* host.label(target),
-        at: now,
-        batch: held.map(({ run }) => run.id),
-        launch: {
-          projectId: there.success.projects[0]!.id,
-          title: shell.title,
-          modelSelection:
-            plan.use === "fallback" && overflow.fallbackModel !== undefined
-              ? overflow.fallbackModel
-              : shell.modelSelection,
-          // Named as a remote branch there, so the launch fetches it rather than following a local branch's tracking.
-          workspaceStrategy: {
-            type: "worktree",
-            baseRef: `${plan.remote}/${upstream.branch}`,
-            branch: localBranch,
-            startFromOrigin: true,
-          },
-          message: brief,
-          // A retry after a lost reply finds the same thread there; a later move of this thread is a new one.
-          clientRequestId: `limits-move:${threadId}:${now}`,
-        },
-        threadId: null,
-        link: null,
-      };
-      if (!(yield* save(threadId, pending))) {
-        yield* skip(threadId, "moved.json couldn't be written", now);
-        return null;
-      }
-      yield* stepOrLog(threadId, now, false);
-      return threadId;
+        remote: plan.remote,
+        target,
+        projectId: there.success.projects[0]!.id,
+        modelSelection:
+          plan.use === "fallback" && overflow.fallbackModel !== undefined
+            ? overflow.fallbackModel
+            : shell.modelSelection,
+        now,
+      }).pipe(
+        Effect.ensuring(release(threadId)),
+        Effect.catchCause((cause) =>
+          Effect.logWarning("resource-limits.move-failed", { threadId, cause }).pipe(
+            Effect.as("stop" as const),
+          ),
+        ),
+      );
+      if (started === "started") return threadId;
+      if (started === "stop") return null;
     }
     return null;
   });
@@ -626,6 +900,44 @@ const makeLiveHost = Effect.gen(function* () {
       },
       Effect.orElseSucceed(() => null),
     ),
+    remoteHead: Effect.fn("Overflow.remoteHead")(
+      function* (cwd, upstream, head) {
+        const run = (args: ReadonlyArray<string>) =>
+          git.execute({
+            operation: "Overflow.remoteHead",
+            cwd,
+            args,
+            allowNonZeroExit: true,
+            timeoutMs: TIMING.overflowCallMs,
+          });
+        const ref = `refs/heads/${upstream.branch}`;
+        const listed = yield* run(["ls-remote", "--", upstream.remote, ref]);
+        if (listed.exitCode !== 0) {
+          return yield* linkFailure(
+            `git ls-remote ${upstream.remote} failed: ${listed.stderr.trim()}`,
+          );
+        }
+        const remoteHead =
+          listed.stdout
+            .split("\n")
+            .map((line) => line.split("\t"))
+            .find(([, name]) => name?.trim() === ref)?.[0]
+            ?.trim() ?? null;
+        if (remoteHead === null || remoteHead === head) {
+          return { remoteHead, containsHead: remoteHead === head };
+        }
+        const known = yield* run(["cat-file", "-e", `${remoteHead}^{commit}`]);
+        if (known.exitCode !== 0) return { remoteHead, containsHead: null };
+        const contains = yield* run(["merge-base", "--is-ancestor", head, remoteHead]);
+        return {
+          remoteHead,
+          containsHead: contains.exitCode === 0 ? true : contains.exitCode === 1 ? false : null,
+        };
+      },
+      Effect.catchTags({
+        GitCommandError: (error) => Effect.fail(linkFailure(error.message)),
+      }),
+    ),
     label: (environmentId) =>
       links.get(environmentId).pipe(
         Effect.map((link) => (Option.isSome(link) ? link.value.label : environmentId)),
@@ -680,6 +992,17 @@ const makeLiveHost = Effect.gen(function* () {
       ),
     launch: (environmentId, modes, input) =>
       requireLinks.pipe(
+        // A link removed here reads as an unknown one, which isn't the linked machine refusing the launch.
+        Effect.andThen(
+          links.get(environmentId).pipe(
+            Effect.orElseSucceed(() => Option.none()),
+            Effect.flatMap((link) =>
+              Option.isSome(link)
+                ? Effect.void
+                : Effect.fail(linkFailure("The link to that environment is gone.")),
+            ),
+          ),
+        ),
         Effect.andThen(
           peers.call({
             environmentId,
@@ -704,13 +1027,6 @@ const makeLiveHost = Effect.gen(function* () {
             arguments: { threadId, view: "messages", limit: 1, maxCharsPerItem: 1, runLimit: 50 },
             limits: modes,
             success: OrchestratorMcpThreadReadResult,
-          }),
-        ),
-        Effect.map(({ thread, recentRuns }) =>
-          threadThere({
-            worktreePath: thread.worktreePath,
-            runCount: thread.runCount,
-            firstRun: recentRuns.find((run) => run.ordinal === 1) ?? null,
           }),
         ),
       ),

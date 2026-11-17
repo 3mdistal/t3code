@@ -913,15 +913,15 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
 
     // A move under way takes its next step, and what's sent to a moved thread goes there, even during Pause all,
     // which uses no agent here. While this machine holds work and isn't paused, the best-ranked held thread that has
-    // waited long enough and may move starts moving to the linked machine in the overflow settings, one at a time.
-    // It stays on the line, held, until its queue here empties.
+    // waited long enough and may move starts moving to the linked machine in the overflow settings, one at a time,
+    // and not in a pass where another launched or landed. It stays on the line, held, until its queue here empties.
     const mover = yield* limits.overflow;
     if (mover !== null) {
-      yield* mover
+      const stepped = yield* mover
         .advance(now, paused)
         .pipe(
           Effect.catchCause((cause) =>
-            Effect.logWarning("resource-limits.move-step-failed", { cause }),
+            Effect.logWarning("resource-limits.move-step-failed", { cause }).pipe(Effect.as(true)),
           ),
         );
       const { moved } = yield* limits.read;
@@ -933,7 +933,7 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
           !item.blocked &&
           !moved.has(item.entry.threadId),
       );
-      if (!paused && !off && released.size === 0 && ready.length > 0) {
+      if (!stepped && !paused && !off && released.size === 0 && ready.length > 0) {
         const ranked = yield* byRank(ready, now);
         yield* mover
           .move(
