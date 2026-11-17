@@ -147,6 +147,10 @@ export const makeLimitsAdmission = Effect.gen(function* () {
   }) {
     const { projection, run } = input;
     const message = projection.messages.find((candidate) => candidate.id === run.userMessageId);
+    // A thread that continues on a linked machine runs nothing here, Resume included: the governor forwards it.
+    const moved = yield* resourceLimits.movedHold(projection.thread.id);
+    if (moved !== undefined)
+      return yield* hold(run, { ...run, queueHeld: true }, moved, input.ordinal);
     if (input.admitted === true || message === undefined) return undefined;
     const { pause } = yield* resourceLimits.read;
     const alicesQueue = projection.runs.some((candidate) => {

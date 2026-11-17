@@ -2,8 +2,10 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import {
   CommandId,
+  EnvironmentId,
   EventId,
   MessageId,
+  OrchestratorMcpFailure,
   type OrchestrationV2ProviderThread,
   type OrchestrationV2Run,
   ProjectId,
@@ -21,6 +23,7 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
@@ -41,6 +44,7 @@ import * as ProviderReplayHarness from "../orchestration-v2/testkit/ProviderRepl
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as Governor from "./Governor.ts";
+import * as Overflow from "./Overflow.ts";
 import { GiB, type HostReading, type ProcessRow, TIMING } from "./policy.ts";
 import { ProcessTree } from "./ProcessTree.ts";
 import * as ResourceLimits from "./ResourceLimits.ts";
@@ -2241,5 +2245,210 @@ it.effect(
       const note = (yield* orchestrator.getThreadProjection(threadId)).messages.at(-1);
       assert.include(note?.text, "a reviewer");
       assert.deepEqual(yield* runs(threadId), ["interrupted", "queued:held"]);
+    }).pipe(Effect.provide(layerTest)),
+);
+
+/** A linked machine with one matching project, recording what's launched and sent there. */
+const makeCloud = Effect.fnUntraced(function* (options: { readonly launchFails?: boolean } = {}) {
+  const launches = yield* Ref.make<
+    ReadonlyArray<{ readonly message: string; readonly branch?: string }>
+  >([]);
+  const sent = yield* Ref.make<
+    ReadonlyArray<{ readonly threadId: string; readonly message: string }>
+  >([]);
+  const attempts = yield* Ref.make(0);
+  const host: Overflow.OverflowHost = {
+    project: () =>
+      Effect.succeed({ workspaceRoot: "/repo", repositoryKey: "github.com/alice/repo" }),
+    gitStatus: () =>
+      Effect.succeed({
+        branch: "main",
+        isDefaultBranch: true,
+        hasWorkingTreeChanges: false,
+        upstreamRef: "origin/main",
+        aheadCount: 0,
+      }),
+    label: () => Effect.succeed("t3-cloud"),
+    projectsThere: () => Effect.succeed([ProjectId.make("project:cloud")]),
+    providersThere: () =>
+      Effect.succeed([{ instanceId, models: [modelSelection.model], omittedModels: 0 }]),
+    launch: (_environmentId, _modes, input) =>
+      Ref.update(attempts, (count) => count + 1).pipe(
+        Effect.andThen(
+          options.launchFails === true
+            ? Effect.fail(
+                new OrchestratorMcpFailure({ code: "orchestration_error", message: "asleep" }),
+              )
+            : Ref.update(launches, (all) => [
+                ...all,
+                {
+                  message: input.message,
+                  ...(input.workspaceStrategy.type === "worktree" && input.workspaceStrategy.branch
+                    ? { branch: input.workspaceStrategy.branch }
+                    : {}),
+                },
+              ]).pipe(
+                Effect.as({ threadId: `cloud:${input.title}`, link: `t3://cloud/${input.title}` }),
+              ),
+        ),
+      ),
+    send: (_environmentId, _modes, input) =>
+      Ref.update(sent, (all) => [...all, { threadId: input.threadId, message: input.message }]),
+  };
+  const limits = yield* ResourceLimits.ResourceLimits;
+  yield* limits.setOverflow(yield* Overflow.makeOverflowMover(host));
+  return { launches: Ref.get(launches), sent: Ref.get(sent), attempts: Ref.get(attempts) };
+});
+
+const overflowTo = (
+  extra: Record<string, unknown> = {},
+  threadTags: Record<string, Array<string>> = {},
+) =>
+  Effect.flatMap(ServerSettings.ServerSettingsService, (settings) =>
+    settings.updateSettings({
+      resourceLimits: {
+        overflow: {
+          environmentId: EnvironmentId.make("environment:cloud"),
+          moveAfterMs: 60_000,
+          ...extra,
+        },
+      },
+      threadTags,
+    } as never),
+  );
+
+const movedFile = Effect.gen(function* () {
+  const config = yield* ServerConfig.ServerConfig;
+  const path = yield* Path.Path;
+  const fs = yield* FileSystem.FileSystem;
+  return yield* fs.readFileString(path.join(config.stateDir, "resource-limits", "moved.json")).pipe(
+    Effect.map((text) => JSON.parse(text) as { threads: Record<string, { threadId: string }> }),
+    Effect.option,
+  );
+});
+
+it.effect("O1: the best-ranked held thread that has waited long enough moves, one a pass", () =>
+  Effect.gen(function* () {
+    const governor = yield* makeGovernor;
+    const cloud = yield* makeCloud();
+    const [older, ranked, fresh] = ["older", "ranked", "fresh"].map((name) =>
+      ThreadId.make(`thread:o1:${name}`),
+    ) as [ThreadId, ThreadId, ThreadId];
+    yield* overflowTo(
+      {},
+      { [older]: ["needs:none"], [ranked]: ["needs:none"], [fresh]: ["needs:none"] },
+    );
+    yield* Effect.forEach([older, ranked, fresh], createThread);
+    yield* governor.pass(yield* tight);
+    yield* send(older, "older work", agent);
+    yield* send(ranked, "ranked work", agent);
+    yield* TestClock.adjust("1 minute");
+    yield* send(fresh, "fresh work", agent);
+    yield* writeRanks({ [ranked]: 1 });
+
+    yield* governor.pass(yield* tight);
+    assert.lengthOf(yield* cloud.launches, 1);
+    const [launch] = yield* cloud.launches;
+    assert.include(launch!.message, "ranked work");
+    assert.include(launch!.message, "git push origin HEAD:main");
+    assert.match(launch!.branch!, /^t3-moved\/main-/);
+    assert.deepEqual(yield* waitingThreads, [older, fresh]);
+    // The held work went there, and so did the move's own note, which leaves only its notice.
+    assert.deepEqual(yield* runs(ranked), ["cancelled:held", "cancelled:held"]);
+    assert.include(
+      (yield* notices(ranked)).at(-1),
+      "This thread continues on t3-cloud (t3://cloud/",
+    );
+    const moved = yield* movedFile;
+    assert.equal(Option.getOrThrow(moved).threads[ranked]?.threadId, `cloud:${ranked}`);
+
+    // The next pass moves the other one that has waited a minute, and the fresh one keeps waiting.
+    yield* TestClock.adjust("15 seconds");
+    yield* governor.pass(yield* tight);
+    yield* TestClock.adjust("15 seconds");
+    yield* governor.pass(yield* tight);
+    assert.lengthOf(yield* cloud.launches, 2);
+    assert.deepEqual(yield* waitingThreads, [fresh]);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect(
+  "O2: an ineligible or untagged thread keeps its place, and nothing moves while paused",
+  () =>
+    Effect.gen(function* () {
+      const governor = yield* makeGovernor;
+      const cloud = yield* makeCloud();
+      const [untagged, windows, free] = ["untagged", "windows", "free"].map((name) =>
+        ThreadId.make(`thread:o2:${name}`),
+      ) as [ThreadId, ThreadId, ThreadId];
+      yield* overflowTo(
+        { provides: ["notion"] },
+        { [windows]: ["needs:windows"], [free]: ["needs:none"] },
+      );
+      yield* Effect.forEach([untagged, windows, free], createThread);
+      yield* governor.pass(yield* tight);
+      yield* Effect.forEach([untagged, windows, free], (threadId) => send(threadId, "work", agent));
+      yield* TestClock.adjust("2 minutes");
+
+      yield* writePause("finish");
+      yield* governor.pass(yield* tight);
+      assert.lengthOf(yield* cloud.launches, 0);
+
+      yield* removePause;
+      yield* governor.pass(yield* tight);
+      assert.lengthOf(yield* cloud.launches, 1);
+      assert.deepEqual(yield* waitingThreads, [untagged, windows]);
+      assert.deepEqual(yield* runs(untagged), ["queued:held"]);
+      assert.deepEqual(yield* runs(windows), ["queued:held"]);
+    }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("O3: a later message to a moved thread goes there and leaves the queue here", () =>
+  Effect.gen(function* () {
+    const governor = yield* makeGovernor;
+    const cloud = yield* makeCloud();
+    const threadId = ThreadId.make("thread:o3:moved");
+    yield* overflowTo({ moveAfterMs: 0 }, { [threadId]: ["needs:none"] });
+    yield* createThread(threadId);
+    yield* governor.pass(yield* tight);
+    yield* send(threadId, "work", agent);
+    yield* governor.pass(yield* tight);
+    assert.lengthOf(yield* cloud.launches, 1);
+
+    // Even Alice's own message, with memory to spare, waits to be sent there.
+    yield* send(threadId, "and one more thing", alice);
+    assert.deepEqual((yield* runs(threadId)).at(-1), "queued:held");
+    yield* governor.pass(yield* comfortable);
+    assert.deepEqual(yield* cloud.sent, [
+      { threadId: `cloud:${threadId}`, message: "and one more thing" },
+    ]);
+    assert.deepEqual(yield* runs(threadId), ["cancelled:held", "cancelled:held", "cancelled:held"]);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect(
+  "O4: a failed move leaves the thread held, records nothing, and waits before trying again",
+  () =>
+    Effect.gen(function* () {
+      const governor = yield* makeGovernor;
+      const cloud = yield* makeCloud({ launchFails: true });
+      const threadId = ThreadId.make("thread:o4:asleep");
+      yield* overflowTo({ moveAfterMs: 0 }, { [threadId]: ["needs:none"] });
+      yield* createThread(threadId);
+      yield* governor.pass(yield* tight);
+      yield* send(threadId, "work", agent);
+      yield* governor.pass(yield* tight);
+
+      assert.deepEqual(yield* runs(threadId), ["queued:held"]);
+      assert.deepEqual(yield* waitingThreads, [threadId]);
+      assert.isTrue(Option.isNone(yield* movedFile));
+      assert.equal(yield* cloud.attempts, 1);
+
+      yield* TestClock.adjust("15 seconds");
+      yield* governor.pass(yield* tight);
+      assert.equal(yield* cloud.attempts, 1);
+      yield* TestClock.adjust(TIMING.moveRetryMs);
+      yield* governor.pass(yield* tight);
+      assert.equal(yield* cloud.attempts, 2);
     }).pipe(Effect.provide(layerTest)),
 );

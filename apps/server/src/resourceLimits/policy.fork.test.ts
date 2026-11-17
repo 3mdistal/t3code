@@ -19,6 +19,10 @@ import {
   lostWake,
   lostWakeNote,
   manualPause,
+  type MoveCandidate,
+  moveEligibility,
+  movedBranchName,
+  type MoveTarget,
   newestInterruptible,
   nextState,
   offUntil,
@@ -714,5 +718,113 @@ describe("releaseOrder", () => {
 
   it("leaves the order alone when nothing is ranked", () => {
     expect(releaseOrder(["a", "b", "c"], () => null)).toEqual(["a", "b", "c"]);
+  });
+});
+
+describe("moveEligibility", () => {
+  const movable: MoveCandidate = {
+    topLevel: true,
+    tags: ["needs:none"],
+    git: {
+      branch: "feature/x",
+      isDefaultBranch: false,
+      hasWorkingTreeChanges: false,
+      upstreamRef: "origin/feature/x",
+      aheadCount: 0,
+    },
+    worktree: true,
+    heldAttachments: 0,
+    model: { instanceId: "claude", model: "claude-opus-5-5" },
+  };
+  const cloud: MoveTarget = {
+    matchingProjects: 1,
+    providers: [{ instanceId: "claude", models: ["claude-opus-5-5"], omittedModels: 0 }],
+    hasFallbackModel: false,
+  };
+  const rules = { provides: ["notion"], assumeNeeds: ["vault", "content", "gateway"] };
+  const git = movable.git!;
+
+  it.each<[string, Partial<MoveCandidate>, Partial<MoveTarget>, string | null]>([
+    ["a clean, pushed worktree thread that needs nothing", {}, {}, null],
+    [
+      "a root checkout on the default branch",
+      { worktree: false, git: { ...git, isDefaultBranch: true } },
+      {},
+      null,
+    ],
+    ["needs only what the target provides", { tags: ["Needs:Notion", "urgent"] }, {}, null],
+    [
+      "an untagged thread, under the default assumeNeeds",
+      { tags: [] },
+      {},
+      "it needs vault, content, gateway",
+    ],
+    [
+      "a capability the target lacks",
+      { tags: ["needs:windows", "needs:notion"] },
+      {},
+      "it needs windows",
+    ],
+    ["another thread's task", { topLevel: false }, {}, "it's another thread's task"],
+    [
+      "a held message with attachments",
+      { heldAttachments: 1 },
+      {},
+      "a held message has attachments",
+    ],
+    [
+      "a detached checkout",
+      { git: { ...git, branch: null } },
+      {},
+      "its checkout isn't on a branch",
+    ],
+    ["no repository", { git: null }, {}, "its checkout isn't on a branch"],
+    [
+      "a root checkout off the default branch",
+      { worktree: false },
+      {},
+      "it works in the project checkout off the default branch",
+    ],
+    [
+      "uncommitted changes",
+      { git: { ...git, hasWorkingTreeChanges: true } },
+      {},
+      "it has uncommitted changes",
+    ],
+    [
+      "a branch never pushed",
+      { git: { ...git, upstreamRef: null } },
+      {},
+      "its branch isn't pushed",
+    ],
+    ["unpushed commits", { git: { ...git, aheadCount: 2 } }, {}, "it has unpushed commits"],
+    ["no project there", {}, { matchingProjects: 0 }, "no project there has its repository"],
+    [
+      "several projects there",
+      {},
+      { matchingProjects: 2 },
+      "several projects there have its repository",
+    ],
+    ["its provider isn't there", {}, { providers: [] }, "claude claude-opus-5-5 isn't there"],
+    [
+      "its provider isn't there, with a fallback model",
+      {},
+      { providers: [], hasFallbackModel: true },
+      null,
+    ],
+    [
+      "an unlisted model the provider may have",
+      {},
+      { providers: [{ instanceId: "claude", models: [], omittedModels: 3 }] },
+      null,
+    ],
+  ])("%s", (_name, candidate, target, expected) => {
+    expect(moveEligibility({ ...movable, ...candidate }, rules, { ...cloud, ...target })).toBe(
+      expected,
+    );
+  });
+
+  it("checks out a branch name of its own there, which a retry repeats", () => {
+    expect(movedBranchName("feature/x", "thread:3f2a-91BC77")).toBe("t3-moved/feature/x-91bc77");
   });
 });
