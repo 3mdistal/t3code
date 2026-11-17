@@ -281,21 +281,29 @@ export function poolMemberHealth(input: {
 export function unavailablePoolNotice(
   input: Parameters<typeof poolMemberHealth>[0] & {
     readonly pool: ServerProvider;
+    /** Accounts that already failed this turn. */
+    readonly excluded: ReadonlySet<ProviderInstanceId>;
     readonly formatTime: (ms: number) => string;
   },
 ): string {
   const health = poolMemberHealth(input);
   const signIn: Array<string> = [];
   const limited: Array<string> = [];
+  const tried: Array<string> = [];
   const unavailable: Array<string> = [];
   for (const member of input.members) {
     const name = member.displayName ?? member.instanceId;
     const signInEndMs = Date.parse(member.auth.expiresAt ?? "");
-    const untilMs = health.find((entry) => entry.instanceId === member.instanceId)?.limitedUntilMs;
+    const entry = health.find((candidate) => candidate.instanceId === member.instanceId);
+    const untilMs = entry?.limitedUntilMs;
     if (member.auth.status === "unauthenticated" || signInEndMs <= input.nowMs) {
       signIn.push(name);
+    } else if (!entry?.eligible) {
+      unavailable.push(name);
     } else if (untilMs != null && untilMs > input.nowMs) {
       limited.push(`${name} until ${input.formatTime(untilMs)}`);
+    } else if (input.excluded.has(member.instanceId)) {
+      tried.push(name);
     } else {
       unavailable.push(name);
     }
@@ -304,6 +312,7 @@ export function unavailablePoolNotice(
     `Every account in the ${input.pool.displayName ?? input.pool.driver} pool is unavailable.`,
     ...(signIn.length > 0 ? [`Needs sign-in: ${signIn.join(", ")}.`] : []),
     ...(limited.length > 0 ? [`Limited: ${limited.join("; ")}.`] : []),
+    ...(tried.length > 0 ? [`Already tried this turn: ${tried.join(", ")}.`] : []),
     ...(unavailable.length > 0 ? [`Unavailable: ${unavailable.join(", ")}.`] : []),
   ].join(" ");
 }

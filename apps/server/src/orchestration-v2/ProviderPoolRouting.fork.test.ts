@@ -743,16 +743,25 @@ describe("routeModelSelection", () => {
           auth: { status: "authenticated", expiresAt: at(60) },
           limitedUntil: at(90),
         }),
-        stamped("claudeAgent_off", { displayName: "Off", enabled: false }),
+        stamped("claudeAgent_off", { displayName: "Off", enabled: false, limitedUntil: at(30) }),
+        stamped("claudeAgent_tried", { displayName: "Tried" }),
       ],
-      settings,
+      settings: {
+        ...settings,
+        providerInstances: {
+          ...settings.providerInstances,
+          [id("claudeAgent_apple")]: { driver: claude, enabled: true, config: {} },
+          [id("claudeAgent_tried")]: { driver: claude, enabled: true, config: {} },
+        },
+      },
       projectId,
       nowMs,
+      excluded: new Set([id("claudeAgent_tried")]),
       formatTime: (ms) => `+${(ms - nowMs) / 60_000}m`,
     });
     assert.equal(
       notice,
-      "Every account in the Claude pool is unavailable. Needs sign-in: Mac, Work. Limited: Apple until +90m. Unavailable: Off.",
+      "Every account in the Claude pool is unavailable. Needs sign-in: Mac, Work. Limited: Apple until +90m. Already tried this turn: Tried. Unavailable: Off.",
     );
   });
 });
