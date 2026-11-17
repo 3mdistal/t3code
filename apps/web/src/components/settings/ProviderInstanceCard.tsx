@@ -917,6 +917,7 @@ export function ProviderInstanceCard({
         <span>Authenticated as</span>
         <ProviderAuthEmail email={authEmail} />
         {authLabel ? <span>· {authLabel}</span> : null}
+        {/* fork: see FORK.md. */}
         <ProviderSignInEnd auth={liveProvider?.auth} separator="· " />
         {inlineStatusDetail ? (
           <span className="min-w-0 [overflow-wrap:anywhere]">· {inlineStatusDetail}</span>

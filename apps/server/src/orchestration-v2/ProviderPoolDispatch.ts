@@ -82,6 +82,7 @@ export const makePoolRouting = Effect.gen(function* () {
       readonly limitedInstanceId: ProviderInstanceId;
       readonly failure: OrchestrationV2ProviderFailure;
       readonly projectId: OrchestrationV2AppThread["projectId"];
+      readonly excluded: ReadonlySet<ProviderInstanceId>;
     }) {
       const owner = findProviderPool(
         yield* poolCatalog.getPublishedProviders,
@@ -105,6 +106,7 @@ export const makePoolRouting = Effect.gen(function* () {
         settings,
         projectId: input.projectId,
         nowMs,
+        excluded: input.excluded,
         formatTime: (ms) => resetTimeFormat.format(ms),
       });
     },
