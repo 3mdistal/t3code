@@ -61,10 +61,11 @@ export interface WaitingThread {
 }
 
 /**
- * A move's phases, each saved before the next step: `pending` (batch and launch frozen), `launched` (the thread there
- * exists), `confirmed` (it started there), then `moved` once the batch is cancelled here and the notice written.
+ * A move's phases: `claiming` (held here while the move reads the batch; never saved), then, each saved before the
+ * next step, `pending` (batch and launch frozen), `launched` (the thread there exists), `confirmed` (it started
+ * there), and `moved` once the batch is cancelled here and the notice written.
  */
-export type MovePhase = "pending" | "launched" | "confirmed" | "moved";
+export type MovePhase = "claiming" | "pending" | "launched" | "confirmed" | "moved";
 
 /** The launch a move sends, frozen while `pending` so a retry after a lost reply repeats it exactly. */
 export interface MoveLaunch {
@@ -76,6 +77,18 @@ export interface MoveLaunch {
   readonly clientRequestId: string;
 }
 
+/** A held run a move carries there, with its text as the launch sent it; null for a move saved before texts were. */
+export interface BatchRun {
+  readonly runId: string;
+  readonly text: string | null;
+}
+
+/** A run cancelled here whose message still goes there; `edited` when it's a batch message changed after the launch. */
+export interface Outgoing {
+  readonly runId: string;
+  readonly edited: boolean;
+}
+
 /** Where a thread held here continues, or is moving to: a thread on a linked machine. Saved in `moved.json`. */
 export interface MovedThread {
   readonly phase: MovePhase;
@@ -84,12 +97,14 @@ export interface MovedThread {
   /** When the move started. */
   readonly at: number;
   /** The held runs the move carries there, which are cancelled here and never forwarded. */
-  readonly batch: ReadonlyArray<string>;
+  readonly batch: ReadonlyArray<BatchRun>;
   /** Null once launched. */
   readonly launch: MoveLaunch | null;
   /** The thread there, once launched. */
   readonly threadId: string | null;
   readonly link: string | null;
+  /** Runs cancelled here whose messages haven't reached the thread there yet, oldest first. */
+  readonly outbox: ReadonlyArray<Outgoing>;
 }
 
 /** Moves held threads to the linked machine in the overflow settings; installed where the links are. */
@@ -101,12 +116,16 @@ export interface OverflowMover {
   ) => Effect.Effect<ThreadId | null>;
   /**
    * Takes each move under way one step further, from its saved phase, and forwards what's queued on moved threads.
-   * While paused, a move that hasn't launched waits.
+   * While paused, a move that hasn't launched waits. True when a move launched or finished, which ends moving for
+   * the pass.
    */
-  readonly advance: (now: number, paused: boolean) => Effect.Effect<void>;
+  readonly advance: (now: number, paused: boolean) => Effect.Effect<boolean>;
 }
 
-const MOVE_PHASES: ReadonlyArray<MovePhase> = ["pending", "launched", "confirmed", "moved"];
+const SAVED_PHASES: ReadonlyArray<MovePhase> = ["pending", "launched", "confirmed", "moved"];
+
+const stringOr = <A>(value: unknown, otherwise: A) =>
+  typeof value === "string" ? value : otherwise;
 
 /** `moved.json`'s entries, skipping malformed ones. An entry from before phases is a finished move. */
 export function movedThreads(file: unknown): ReadonlyMap<ThreadId, MovedThread> {
@@ -115,28 +134,47 @@ export function movedThreads(file: unknown): ReadonlyMap<ThreadId, MovedThread> 
   if (typeof threads !== "object" || threads === null) return moved;
   for (const [threadId, entry] of Object.entries(threads)) {
     const record = (entry ?? {}) as Record<string, unknown>;
-    const phase = MOVE_PHASES.find((candidate) => candidate === (record.phase ?? "moved"));
-    const there = typeof record.threadId === "string" ? record.threadId : null;
+    const phase = SAVED_PHASES.find((candidate) => candidate === (record.phase ?? "moved"));
+    const there = stringOr(record.threadId, null);
     const launch =
       typeof record.launch === "object" && record.launch !== null
         ? (record.launch as MoveLaunch)
         : null;
     if (phase === undefined || typeof record.environmentId !== "string") continue;
     if (phase === "pending" ? launch === null : there === null) continue;
+    const list = (value: unknown) =>
+      Array.isArray(value) ? (value as ReadonlyArray<unknown>) : [];
     moved.set(threadId as ThreadId, {
       phase,
       environmentId: record.environmentId,
-      machine: typeof record.machine === "string" ? record.machine : record.environmentId,
+      machine: stringOr(record.machine, record.environmentId),
       at: typeof record.at === "number" ? record.at : 0,
-      batch: Array.isArray(record.batch)
-        ? record.batch.filter((runId): runId is string => typeof runId === "string")
-        : [],
+      batch: list(record.batch).flatMap((run): Array<BatchRun> => {
+        if (typeof run === "string") return [{ runId: run, text: null }];
+        const { runId, text } = (run ?? {}) as Record<string, unknown>;
+        return typeof runId === "string" ? [{ runId, text: stringOr(text, null) }] : [];
+      }),
       launch: phase === "pending" ? launch : null,
       threadId: there,
-      link: typeof record.link === "string" ? record.link : null,
+      link: stringOr(record.link, null),
+      outbox: list(record.outbox).flatMap((out): Array<Outgoing> => {
+        const { runId, edited } = (out ?? {}) as Record<string, unknown>;
+        return typeof runId === "string" ? [{ runId, edited: edited === true }] : [];
+      }),
     });
   }
   return moved;
+}
+
+/** When each thread that couldn't move, or failed to, may be looked at again; saved beside the moves. */
+export function moveRetries(file: unknown): ReadonlyMap<ThreadId, number> {
+  const saved = (file as { readonly retryAt?: unknown } | null)?.retryAt;
+  if (typeof saved !== "object" || saved === null) return new Map();
+  return new Map(
+    Object.entries(saved).flatMap(([threadId, at]) =>
+      typeof at === "number" ? [[threadId as ThreadId, at] as const] : [],
+    ),
+  );
 }
 
 export interface LimitsSnapshot {
