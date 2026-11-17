@@ -1023,42 +1023,76 @@ Memory and CPU limits section of `docs/user/remote-access.md`.
 - Settings, in the held machine's `resourceLimits.overflow` (no UI yet; the limits dialog keeps it when it saves):
   `environmentId`, `mode` (`auto` or `off`, default `auto`), `provides` (capabilities the target has),
   `assumeNeeds` (default `vault`, `content`, `gateway`), `moveAfterMs` (default 10 minutes) and an optional
-  `fallbackModel`.
+  `fallbackModel`, which counts only where the target lists it.
 - When: in the governor pass, while threads are waiting and nothing was released that pass, unless Pause all is on
-  or the limits are switched off. It walks the release path's ranked list (board rank, then oldest) and moves the
-  first thread that has waited `moveAfterMs` and may move, one a pass. The rest keep their place for the PC.
-- Which threads may move is `moveEligibility` in `policy.ts`: a top-level thread (no parent here, not delegated
-  from elsewhere); every `needs:<capability>` tag in `provides`, with `assumeNeeds` standing in for a thread with
-  no such tag, and `needs:none` needing nothing; no attachments on held messages; a clean checkout on a branch with
-  an upstream and nothing unpushed, and for a root-checkout thread, the default branch; exactly one project there
-  with the same repository; and the thread's provider there (a listed model, or unlisted models), or a fallback.
-  A thread that can't move, or whose move fails, isn't looked at again for 30 minutes (`moveRetryMs`), with the
-  reason logged as `resource-limits.move-skipped`.
-- How: `resourceLimits/Overflow.ts` calls the linked machine's own T3 tools through `PeerMcpClient` with the
-  thread's modes, as any linked agent does: `orchestrator_capabilities`, `t3_project_list`, then `t3_thread_launch`
-  with a worktree from `origin/<branch>`. The brief is the thread's history rendered as a provider switch renders
-  it (`handoffBudget.ts`, 16k cap), the held messages, and an order to `git push origin HEAD:<branch>` before it
-  finishes. The launch is keyed `limits-move:<threadId>`, so a retry after a lost reply finds the same thread.
+  or the limits are switched off. It walks the release path's ranked list (board rank, then oldest) and starts
+  moving the first thread that has waited `moveAfterMs` and may move. One move is under way at a time. The rest
+  keep their place for the PC.
+- Which threads may move is `moveBlocker` (what the PC knows) and `movePlan` (what the target has) in `policy.ts`:
+  a top-level thread (no parent here, not delegated from elsewhere); every `needs:<capability>` tag in `provides`,
+  with `assumeNeeds` standing in for a thread with no such tag, and `needs:none` needing nothing; no attachments on
+  held messages; a clean checkout on a branch with an upstream and nothing unpushed, and for a root-checkout thread,
+  the default branch; exactly one project there with the same repository, with a remote for the branch's
+  repository; and the thread's provider there (a listed model, or unlisted models), or a listed fallback. Held
+  messages that don't fit in one 110,000-character brief stop a move rather than being cut. A thread that can't
+  move, or whose move fails, isn't looked at again for 30 minutes (`moveRetryMs`), with the reason logged as
+  `resource-limits.move-skipped`.
+- Which commit: the branch's upstream comes from `branch.<name>.remote` and `.merge`, so a remote that isn't
+  `origin`, or has a slash in its name, reads right. Its URL's repository key picks the remote there from the
+  project's identity there (its primary remote, or `origin`), so a fork tracked as `fork` here and `origin` there
+  works. The launch names that remote branch (`<remote>/<branch>`, `startFromOrigin`), so the target fetches it
+  rather than following a local branch's tracking. `baseRef` can't be the commit itself: the target fetches only
+  branches by name, so a commit it hasn't fetched fails. Instead the brief gives the PC's HEAD commit, and the
+  thread there checks it has it, fetching and resetting if not, before it starts. It pushes back with
+  `git push <remote there> HEAD:<branch>`.
 - The branch there is `t3-moved/<branch>-<6 chars of the thread ID>`, never the branch's own name: `git branch`
-  refuses a name that exists there, and `git worktree add` one checked out in another worktree. The launch
-  prepares its worktree after it returns, so a collision would have failed the thread there after the PC had
-  already moved it.
-- After a move, `<stateDir>/resource-limits/moved.json` (`{ version: 1, threads: { [threadId]: { environmentId,
-  threadId, machine, link, at } } }`) says where the thread went, and the PC thread keeps its ID for the board,
-  task wake and parents. Its held runs are cancelled, and a system note is queued and cancelled, which leaves the
-  "continues on" notice, with the link, as the thread's last item. From then on every run there, Alice's and Resume
-  included, is held with that notice (`ResourceLimits.movedHold`, read in `admit` and `holdQueuedRun`), and the next
-  pass sends it to the thread there with `t3_thread_send` (`mode: "queue"`, keyed by the run) and cancels it here.
-  A buffered Claude wake still starts. Removing a thread's entry from `moved.json` and restarting brings it back.
+  refuses a name that exists there, and `git worktree add` one checked out in another worktree.
+- A move is a handoff in phases, each saved to `<stateDir>/resource-limits/moved.json` (`{ version: 2, threads:
+  { [threadId]: { phase, environmentId, machine, at, batch, launch, threadId, link } } }`) before the next step
+  (`Overflow.ts`, `step`):
+  - `pending`: the held runs it carries (`batch`) and the whole launch, brief included, are frozen. The launch is
+    keyed `limits-move:<threadId>:<at>`, so a retry after a lost reply repeats the same launch and finds the same
+    thread there. A message that arrives meanwhile isn't in it, and is forwarded later like any other. A launch
+    that keeps failing is sent again each pass for 30 minutes, then given up.
+  - `launched`: the thread there exists. Its worktree is prepared after the launch returns, so each pass reads it
+    with `t3_thread_read` (`threadThere` in `policy.ts`) until its first run starts, or waits with its worktree
+    ready behind that machine's queue.
+  - `confirmed`: it started there. The batch's runs still queued here are cancelled, and a system note is queued
+    and later cancelled, which leaves the "continues on" notice, with the link, as the thread's last item. Both are
+    keyed, so repeating them after a crash or a failed cancel does nothing twice.
+  - `moved`: done. If the thread there fails before it starts (a fetch, checkout or setup failure), the entry is
+    removed, the batch stays held here in its place on the line, and the thread waits 30 minutes before trying
+    again. A step whose `moved.json` write fails stops there without changing anything in memory, and the next
+    pass repeats it.
+- While a thread has an entry in any phase, every run on it is held (`ResourceLimits.movedHold`, read in `admit`
+  and `holdQueuedRun`), Alice's own messages and Resume included, and the governor neither releases nor moves it.
+  The notice says it's moving until it starts there. A restart carries a move on from its saved phase: the mover
+  reads `moved.json` when it starts.
+- Forwarding is read from the database each pass, not from a flag: for every `moved` thread, its queued runs go to
+  the thread there with `t3_thread_send` (`mode: "queue"`, keyed `limits-forward:<runId>`) in order, then are
+  cancelled here. A failed send or cancel stops that thread until the next pass, which sends the same key again.
+  Runs in the batch are only cancelled, never sent.
+- Pause all quiets this machine, and forwarding runs no agent here, so moved threads keep forwarding during Pause
+  all, and a move already launched carries on. No move starts, and a `pending` one doesn't launch, while paused.
+- A buffered Claude wake always stays here on a moved thread, queued or not: Claude already started that turn
+  here, so `holdQueuedRun` checks for it before the moved hold, and forwarding skips it.
+- The PC thread keeps its ID for the board, task wake and parents. Removing a thread's entry from `moved.json` and
+  restarting brings it back.
 - The governor runs inside the orchestration runtime, which has no peer links, so `server.ts` installs the mover
   into `ResourceLimits` (`setOverflow`) once the links are up. Without it nothing moves.
 - Upstream files it changes: `apps/server/src/server.ts` (the layer). `MachineLimits.tsx` keeps `overflow` on save.
 - Known gaps: the PC can't see the cloud's free memory, and the cloud has no rank file, so moved threads there queue
   only behind upstream's own cap. The thread there gets a summary, not the tool-level history. Forwarding carries an
   attachment's name, not the file. A moved thread's later messages leave its transcript here, as cancelled queued
-  messages do, and its turns run there during a Pause all here.
-- Tests: the `moveEligibility` rows in `policy.fork.test.ts`, and O1 to O4 in `Governor.fork.test.ts` (rank order,
-  ineligible and untagged threads, Pause all, forwarding, and a failed move).
+  messages do. Eligibility is read when the move starts; the thread can't run here after that, but someone working
+  in its checkout by hand isn't seen. If the link stays down for the whole 30 minutes after a launch whose reply
+  was lost, the move is given up although the thread there may have started.
+- Tests: the `moveBlocker`, `movePlan`, `upstreamOf`, `moveBrief` and `threadThere` rows in `policy.fork.test.ts`,
+  and O1 to O9 in `Governor.fork.test.ts`. Its fake cloud keeps launches and sends by key, and can lose replies,
+  refuse, fail late and fail cancels here. They cover rank order, ineligible threads, Pause all, forwarding (also
+  during Pause all, after a failed send or cancel, and with a message arriving meanwhile), a queued buffered wake,
+  a launch given up, a lost reply with a message and a Resume during the move, a restart at each phase, an
+  unwritable `moved.json`, and the thread there failing after its launch returned.
 
 ### Awaited Claude tasks keep their wake owner (`fork:`)
 

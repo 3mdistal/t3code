@@ -888,8 +888,13 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
       !paused &&
       (off || releaseDue({ now, lastReleaseAt, growingSince, reading, limits: effective }))
     ) {
+      // A thread moving to the linked machine stays here, held, until the move lands or fails.
       const ready = inspected.filter(
-        (item) => !dropped.has(item.entry.threadId) && item.held && !item.blocked,
+        (item) =>
+          !dropped.has(item.entry.threadId) &&
+          item.held &&
+          !item.blocked &&
+          !current.moved.has(item.entry.threadId),
       );
       // Switched off, everything waiting goes at once.
       for (const item of off ? ready : (yield* byRank(ready, now)).slice(0, 1)) {
@@ -906,40 +911,41 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
       }
     }
 
-    // While this machine holds work and isn't paused, the best-ranked held thread that has waited long enough and
-    // may move continues on the linked machine in the overflow settings, one a pass. What's sent to a moved thread
-    // afterwards goes there too.
+    // A move under way takes its next step, and what's sent to a moved thread goes there, even during Pause all,
+    // which uses no agent here. While this machine holds work and isn't paused, the best-ranked held thread that has
+    // waited long enough and may move starts moving to the linked machine in the overflow settings, one at a time.
+    // It stays on the line, held, until its queue here empties.
     const mover = yield* limits.overflow;
     if (mover !== null) {
+      yield* mover
+        .advance(now, paused)
+        .pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("resource-limits.move-step-failed", { cause }),
+          ),
+        );
+      const { moved } = yield* limits.read;
       const ready = inspected.filter(
         (item) =>
-          !dropped.has(item.entry.threadId) && item.shell !== null && item.held && !item.blocked,
+          !dropped.has(item.entry.threadId) &&
+          item.shell !== null &&
+          item.held &&
+          !item.blocked &&
+          !moved.has(item.entry.threadId),
       );
       if (!paused && !off && released.size === 0 && ready.length > 0) {
         const ranked = yield* byRank(ready, now);
-        const moved = yield* mover
+        yield* mover
           .move(
             ranked.map((item) => ({ threadId: item.entry.threadId, heldAt: item.entry.heldAt })),
             now,
           )
           .pipe(
             Effect.catchCause((cause) =>
-              Effect.logWarning("resource-limits.move-failed", { cause }).pipe(Effect.as(null)),
+              Effect.logWarning("resource-limits.move-failed", { cause }),
             ),
           );
-        const item = ready.find((candidate) => candidate.entry.threadId === moved);
-        if (item !== undefined) {
-          yield* unsnooze({ ...item, entry: changed.get(item.entry.threadId) ?? item.entry }, now);
-          released.add(item.entry.threadId);
-        }
       }
-      yield* mover
-        .forward(now)
-        .pipe(
-          Effect.catchCause((cause) =>
-            Effect.logWarning("resource-limits.forward-failed", { cause }),
-          ),
-        );
     }
 
     // Admission may have added threads during this pass, so only the ones handled here change. Admission also replaces
