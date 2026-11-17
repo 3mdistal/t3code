@@ -214,6 +214,18 @@ memory is low. macOS follows its own memory pressure; turn on a percentage there
 hold work sooner. Under **Advanced**, set any line yourself, or hold work over a CPU
 percentage, which is off by default.
 
+A thread held on a machine can continue on a linked machine instead of waiting. Add
+`overflow` to `resourceLimits` in the held machine's `settings.json`, with the linked
+machine's `environmentId`. Once a thread has waited 10 minutes (`moveAfterMs`), and
+the machine isn't paused, T3 starts a new thread there with a summary of the old one
+and the messages that were waiting, on a fresh worktree of the thread's pushed branch.
+The old thread says where it went, and T3 sends anything you write in it there. Only
+top-level threads with no uncommitted or unpushed work and no attachments move. A
+thread that needs something only one machine has says so with a `needs:<name>` tag,
+such as `needs:vault`; the linked machine's `provides` list says what it has. A
+thread without such a tag is taken to need `assumeNeeds` (vault, content and gateway
+by default), so tag it `needs:none` to let it move. Set `mode` to `off` to stop moves.
+
 ### Tailscale HTTPS
 
 Join both devices to the same tailnet. In the desktop app, enable **Tailscale

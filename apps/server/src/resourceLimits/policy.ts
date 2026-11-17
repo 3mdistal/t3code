@@ -49,6 +49,8 @@ export const TIMING = {
   // for this long.
   orphanCheckMs: 2_000,
   orphanWatchMs: 14_000,
+  // A thread that couldn't move, or failed to, isn't looked at again for this long.
+  moveRetryMs: 30 * 60_000,
 } as const;
 
 // CPU has no release line of its own; it releases this many points under the pause line.
@@ -658,3 +660,172 @@ export function offUntil(file: unknown, now: number): number | null {
   const end = Math.min(until, at + TIMING.maxOffMs);
   return end > now ? end : null;
 }
+
+// Moving a held thread to the linked machine in the overflow settings.
+
+/** What the governor reads about a held thread before it moves it. */
+export interface MoveCandidate {
+  /** No parent thread here and not a task delegated from another machine. */
+  readonly topLevel: boolean;
+  readonly tags: ReadonlyArray<string>;
+  /** Null when its checkout isn't a git repository or can't be read. */
+  readonly git: {
+    readonly branch: string | null;
+    readonly isDefaultBranch: boolean;
+    readonly hasWorkingTreeChanges: boolean;
+    readonly upstreamRef: string | null;
+    readonly aheadCount: number;
+  } | null;
+  /** Runs in a worktree of its own rather than the project checkout. */
+  readonly worktree: boolean;
+  readonly heldAttachments: number;
+  readonly model: { readonly instanceId: string; readonly model: string };
+}
+
+/** What the linked machine has, read when a thread passes the checks that need nothing from it. */
+export interface MoveTarget {
+  /** Projects there with this thread's repository. */
+  readonly matchingProjects: number;
+  readonly providers: ReadonlyArray<{
+    readonly instanceId: string;
+    readonly models: ReadonlyArray<string>;
+    /** Models it has but didn't list, so an unlisted one may still be there. */
+    readonly omittedModels: number;
+  }>;
+  readonly hasFallbackModel: boolean;
+}
+
+const NEEDS_PREFIX = "needs:";
+
+/**
+ * What a thread needs from its machine: its `needs:<capability>` tags, or `assumeNeeds` when it has none, since a
+ * thread that moves and can't reach what it needs fails worse than one that waits. `needs:none` needs nothing.
+ */
+function threadNeeds(
+  tags: ReadonlyArray<string>,
+  assumeNeeds: ReadonlyArray<string>,
+): ReadonlyArray<string> {
+  const named = tags.flatMap((tag) =>
+    tag.toLowerCase().startsWith(NEEDS_PREFIX)
+      ? [tag.slice(NEEDS_PREFIX.length).trim().toLowerCase()]
+      : [],
+  );
+  if (named.length === 0) return assumeNeeds.map((need) => need.toLowerCase());
+  return named.filter((need) => need !== "none" && need !== "");
+}
+
+/** The branch on origin an upstream such as `origin/feature/x` names. */
+export const upstreamBranch = (upstreamRef: string | null) => {
+  const slash = upstreamRef?.indexOf("/") ?? -1;
+  return upstreamRef === null || slash <= 0 ? null : upstreamRef.slice(slash + 1) || null;
+};
+
+/** Why a held thread can't move, from what this machine knows, or null when that doesn't stop it. */
+export function moveBlocker(
+  candidate: MoveCandidate,
+  settings: {
+    readonly provides: ReadonlyArray<string>;
+    readonly assumeNeeds: ReadonlyArray<string>;
+  },
+): string | null {
+  // Its parent would read a moved child's task as finished.
+  if (!candidate.topLevel) return "it's another thread's task";
+  const provides = new Set(settings.provides.map((capability) => capability.toLowerCase()));
+  const missing = threadNeeds(candidate.tags, settings.assumeNeeds).filter(
+    (need) => !provides.has(need),
+  );
+  if (missing.length > 0) return `it needs ${missing.join(", ")}`;
+  if (candidate.heldAttachments > 0) return "a held message has attachments";
+  const git = candidate.git;
+  if (git === null || git.branch === null) return "its checkout isn't on a branch";
+  if (!candidate.worktree && !git.isDefaultBranch) {
+    return "it works in the project checkout off the default branch";
+  }
+  if (git.hasWorkingTreeChanges) return "it has uncommitted changes";
+  if (upstreamBranch(git.upstreamRef) === null) return "its branch isn't pushed";
+  if (git.aheadCount > 0) return "it has unpushed commits";
+  return null;
+}
+
+/** The model the moved thread runs, or why there's none. */
+export function moveModel(
+  candidate: Pick<MoveCandidate, "model">,
+  target: MoveTarget,
+): { readonly use: "thread" | "fallback" } | { readonly blocker: string } {
+  if (target.matchingProjects === 0) return { blocker: "no project there has its repository" };
+  if (target.matchingProjects > 1) return { blocker: "several projects there have its repository" };
+  const provider = target.providers.find(
+    (candidateProvider) => candidateProvider.instanceId === candidate.model.instanceId,
+  );
+  if (
+    provider !== undefined &&
+    (provider.models.includes(candidate.model.model) || provider.omittedModels > 0)
+  ) {
+    return { use: "thread" };
+  }
+  if (target.hasFallbackModel) return { use: "fallback" };
+  return { blocker: `${candidate.model.instanceId} ${candidate.model.model} isn't there` };
+}
+
+/** Every check a held thread passes before it moves: null when it may, or why it may not. */
+export function moveEligibility(
+  candidate: MoveCandidate,
+  settings: {
+    readonly provides: ReadonlyArray<string>;
+    readonly assumeNeeds: ReadonlyArray<string>;
+  },
+  target: MoveTarget,
+): string | null {
+  const blocker = moveBlocker(candidate, settings);
+  if (blocker !== null) return blocker;
+  const model = moveModel(candidate, target);
+  return "blocker" in model ? model.blocker : null;
+}
+
+/**
+ * The branch a moved thread checks out there. It never reuses a name, since `git branch` refuses one that exists and
+ * `git worktree add` one checked out elsewhere; the thread pushes to `remoteBranch` by name.
+ */
+export const movedBranchName = (remoteBranch: string, threadId: string) =>
+  `t3-moved/${remoteBranch}-${threadId
+    .replace(/[^A-Za-z0-9]/g, "")
+    .slice(-6)
+    .toLowerCase()}`;
+
+const MAX_BRIEF_LENGTH = 110_000;
+
+/** The first message of a moved thread: where it came from, how to hand work back, its history, and what waited. */
+export function moveBrief(input: {
+  readonly title: string;
+  readonly threadId: string;
+  readonly environmentId: string;
+  readonly machine: string;
+  readonly remoteBranch: string;
+  readonly localBranch: string;
+  readonly summary: string;
+  readonly held: ReadonlyArray<string>;
+}): string {
+  const head = [
+    `This thread continues "${input.title}" (thread ${input.threadId} in environment ${input.environmentId}), which waited on ${input.machine} because that machine was over its memory or CPU limits. T3 moved it here.`,
+    `You're in a new worktree on branch ${input.localBranch}, started from origin/${input.remoteBranch}. The other machine sees only what's on GitHub, so before you finish, commit your work and push it: \`git push origin HEAD:${input.remoteBranch}\`.`,
+    "Messages sent to the original thread later are forwarded here.",
+  ].join("\n\n");
+  const held = input.held.map((text, index) => `Message ${index + 1}:\n${text}`).join("\n\n");
+  const tail = `Messages that were waiting for this thread, oldest first. Continue with them:\n\n${held}`;
+  const room = MAX_BRIEF_LENGTH - head.length - tail.length - 100;
+  const summary =
+    input.summary.length <= room
+      ? input.summary
+      : `${input.summary.slice(0, Math.max(0, room))}\n[History cut short.]`;
+  return [head, "History of the original thread:", summary, tail]
+    .join("\n\n")
+    .slice(0, MAX_BRIEF_LENGTH);
+}
+
+/** The notice on a moved thread here, left by the move and by each message sent there after it. */
+export const movedReason = (input: {
+  readonly machine: string;
+  readonly link: string | null;
+  readonly at: number;
+}) =>
+  `This thread continues on ${input.machine}${input.link === null ? "" : ` (${input.link})`}, where T3 moved it at ${clock(input.at)} because this machine was over its limits. T3 sends messages for this thread there.`;

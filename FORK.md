@@ -1013,6 +1013,53 @@ Users read about it in the Memory and CPU limits section of `docs/user/remote-ac
   `packages/provider-core/src/server/subagentProjection.fork.test.ts`, `apps/server/src/mcp/heldRuns.fork.test.ts`,
   and `MachineLimits.logic.fork.test.ts`. `Governor.fork.test.ts` runs the real orchestrator with fake readings and a test clock.
 
+### Held threads move to a linked machine (`limits:`)
+
+On Nov 16 the PC held a long line of threads for about seven hours while the cloud machine sat mostly idle. Only
+brand-new threads went to the cloud, at launch. Now a thread the PC holds continues on the linked machine named in
+`resourceLimits.overflow`, as a new thread there, and the PC thread forwards to it. Users read about it in the
+Memory and CPU limits section of `docs/user/remote-access.md`.
+
+- Settings, in the held machine's `resourceLimits.overflow` (no UI yet; the limits dialog keeps it when it saves):
+  `environmentId`, `mode` (`auto` or `off`, default `auto`), `provides` (capabilities the target has),
+  `assumeNeeds` (default `vault`, `content`, `gateway`), `moveAfterMs` (default 10 minutes) and an optional
+  `fallbackModel`.
+- When: in the governor pass, while threads are waiting and nothing was released that pass, unless Pause all is on
+  or the limits are switched off. It walks the release path's ranked list (board rank, then oldest) and moves the
+  first thread that has waited `moveAfterMs` and may move, one a pass. The rest keep their place for the PC.
+- Which threads may move is `moveEligibility` in `policy.ts`: a top-level thread (no parent here, not delegated
+  from elsewhere); every `needs:<capability>` tag in `provides`, with `assumeNeeds` standing in for a thread with
+  no such tag, and `needs:none` needing nothing; no attachments on held messages; a clean checkout on a branch with
+  an upstream and nothing unpushed, and for a root-checkout thread, the default branch; exactly one project there
+  with the same repository; and the thread's provider there (a listed model, or unlisted models), or a fallback.
+  A thread that can't move, or whose move fails, isn't looked at again for 30 minutes (`moveRetryMs`), with the
+  reason logged as `resource-limits.move-skipped`.
+- How: `resourceLimits/Overflow.ts` calls the linked machine's own T3 tools through `PeerMcpClient` with the
+  thread's modes, as any linked agent does: `orchestrator_capabilities`, `t3_project_list`, then `t3_thread_launch`
+  with a worktree from `origin/<branch>`. The brief is the thread's history rendered as a provider switch renders
+  it (`handoffBudget.ts`, 16k cap), the held messages, and an order to `git push origin HEAD:<branch>` before it
+  finishes. The launch is keyed `limits-move:<threadId>`, so a retry after a lost reply finds the same thread.
+- The branch there is `t3-moved/<branch>-<6 chars of the thread ID>`, never the branch's own name: `git branch`
+  refuses a name that exists there, and `git worktree add` one checked out in another worktree. The launch
+  prepares its worktree after it returns, so a collision would have failed the thread there after the PC had
+  already moved it.
+- After a move, `<stateDir>/resource-limits/moved.json` (`{ version: 1, threads: { [threadId]: { environmentId,
+  threadId, machine, link, at } } }`) says where the thread went, and the PC thread keeps its ID for the board,
+  task wake and parents. Its held runs are cancelled, and a system note is queued and cancelled, which leaves the
+  "continues on" notice, with the link, as the thread's last item. From then on every run there, Alice's and Resume
+  included, is held with that notice (`ResourceLimits.movedHold`, read in `admit` and `holdQueuedRun`), and the next
+  pass sends it to the thread there with `t3_thread_send` (`mode: "queue"`, keyed by the run) and cancels it here.
+  A buffered Claude wake still starts. Removing a thread's entry from `moved.json` and restarting brings it back.
+- The governor runs inside the orchestration runtime, which has no peer links, so `server.ts` installs the mover
+  into `ResourceLimits` (`setOverflow`) once the links are up. Without it nothing moves.
+- Upstream files it changes: `apps/server/src/server.ts` (the layer). `MachineLimits.tsx` keeps `overflow` on save.
+- Known gaps: the PC can't see the cloud's free memory, and the cloud has no rank file, so moved threads there queue
+  only behind upstream's own cap. The thread there gets a summary, not the tool-level history. Forwarding carries an
+  attachment's name, not the file. A moved thread's later messages leave its transcript here, as cancelled queued
+  messages do, and its turns run there during a Pause all here.
+- Tests: the `moveEligibility` rows in `policy.fork.test.ts`, and O1 to O4 in `Governor.fork.test.ts` (rank order,
+  ineligible and untagged threads, Pause all, forwarding, and a failed move).
+
 ### Awaited Claude tasks keep their wake owner (`fork:`)
 
 Claude can remove a finished background command from its roster before its native wake arrives. Releasing or
