@@ -2,7 +2,10 @@
 import * as NodeOS from "node:os";
 import type {
   EffectiveResourceLimits,
+  ModelSelection,
   OrchestrationV2AppThread,
+  OrchestrationV2ThreadLaunchWorkspaceStrategy,
+  ProjectId,
   ResourceLimitsPause,
   ResourceLimitsState,
   ResourceLimitsStatus,
@@ -29,6 +32,7 @@ import {
   launchAnyway,
   manualPause,
   movedReason,
+  movingReason,
   type PauseOrder,
   pausedReason,
   type Provenance,
@@ -56,46 +60,80 @@ export interface WaitingThread {
   readonly snoozeTried: boolean;
 }
 
-/** Where a thread held here continues: a thread on a linked machine. Saved in `moved.json`. */
+/**
+ * A move's phases, each saved before the next step: `pending` (batch and launch frozen), `launched` (the thread there
+ * exists), `confirmed` (it started there), then `moved` once the batch is cancelled here and the notice written.
+ */
+export type MovePhase = "pending" | "launched" | "confirmed" | "moved";
+
+/** The launch a move sends, frozen while `pending` so a retry after a lost reply repeats it exactly. */
+export interface MoveLaunch {
+  readonly projectId: ProjectId;
+  readonly title: string;
+  readonly modelSelection: ModelSelection;
+  readonly workspaceStrategy: OrchestrationV2ThreadLaunchWorkspaceStrategy;
+  readonly message: string;
+  readonly clientRequestId: string;
+}
+
+/** Where a thread held here continues, or is moving to: a thread on a linked machine. Saved in `moved.json`. */
 export interface MovedThread {
+  readonly phase: MovePhase;
   readonly environmentId: string;
-  readonly threadId: string;
   readonly machine: string;
-  readonly link: string | null;
+  /** When the move started. */
   readonly at: number;
+  /** The held runs the move carries there, which are cancelled here and never forwarded. */
+  readonly batch: ReadonlyArray<string>;
+  /** Null once launched. */
+  readonly launch: MoveLaunch | null;
+  /** The thread there, once launched. */
+  readonly threadId: string | null;
+  readonly link: string | null;
 }
 
 /** Moves held threads to the linked machine in the overflow settings; installed where the links are. */
 export interface OverflowMover {
-  /** Moves the first of these that may move, best first. Returns the thread it moved. */
+  /** Starts moving the first of these that may move, best first, unless a move is under way. Returns that thread. */
   readonly move: (
     candidates: ReadonlyArray<{ readonly threadId: ThreadId; readonly heldAt: number }>,
     now: number,
   ) => Effect.Effect<ThreadId | null>;
-  /** Sends what's queued on moved threads to where they continue, and cancels it here. */
-  readonly forward: (now: number) => Effect.Effect<void>;
+  /**
+   * Takes each move under way one step further, from its saved phase, and forwards what's queued on moved threads.
+   * While paused, a move that hasn't launched waits.
+   */
+  readonly advance: (now: number, paused: boolean) => Effect.Effect<void>;
 }
 
-/** `moved.json`'s entries, skipping malformed ones. */
-function movedThreads(file: unknown): ReadonlyMap<ThreadId, MovedThread> {
+const MOVE_PHASES: ReadonlyArray<MovePhase> = ["pending", "launched", "confirmed", "moved"];
+
+/** `moved.json`'s entries, skipping malformed ones. An entry from before phases is a finished move. */
+export function movedThreads(file: unknown): ReadonlyMap<ThreadId, MovedThread> {
   const moved = new Map<ThreadId, MovedThread>();
   const threads = (file as { readonly threads?: unknown } | null)?.threads;
   if (typeof threads !== "object" || threads === null) return moved;
   for (const [threadId, entry] of Object.entries(threads)) {
-    const {
-      environmentId,
-      threadId: there,
-      machine,
-      link,
-      at,
-    } = (entry ?? {}) as Record<string, unknown>;
-    if (typeof environmentId !== "string" || typeof there !== "string") continue;
+    const record = (entry ?? {}) as Record<string, unknown>;
+    const phase = MOVE_PHASES.find((candidate) => candidate === (record.phase ?? "moved"));
+    const there = typeof record.threadId === "string" ? record.threadId : null;
+    const launch =
+      typeof record.launch === "object" && record.launch !== null
+        ? (record.launch as MoveLaunch)
+        : null;
+    if (phase === undefined || typeof record.environmentId !== "string") continue;
+    if (phase === "pending" ? launch === null : there === null) continue;
     moved.set(threadId as ThreadId, {
-      environmentId,
+      phase,
+      environmentId: record.environmentId,
+      machine: typeof record.machine === "string" ? record.machine : record.environmentId,
+      at: typeof record.at === "number" ? record.at : 0,
+      batch: Array.isArray(record.batch)
+        ? record.batch.filter((runId): runId is string => typeof runId === "string")
+        : [],
+      launch: phase === "pending" ? launch : null,
       threadId: there,
-      machine: typeof machine === "string" ? machine : environmentId,
-      link: typeof link === "string" ? link : null,
-      at: typeof at === "number" ? at : 0,
+      link: typeof record.link === "string" ? record.link : null,
     });
   }
   return moved;
@@ -113,10 +151,8 @@ export interface LimitsSnapshot {
   readonly machine: string;
   /** Threads holding work for the limits, oldest first. */
   readonly waiting: ReadonlyArray<WaitingThread>;
-  /** Threads that continue on a linked machine. Everything sent to one here waits to be forwarded. */
+  /** Threads that continue on a linked machine, or are moving there. Nothing sent to one runs here. */
   readonly moved: ReadonlyMap<ThreadId, MovedThread>;
-  /** Moved threads admission held something for since the last forward. */
-  readonly forwardDue: ReadonlySet<ThreadId>;
 }
 
 export type Admission =
@@ -150,7 +186,6 @@ const UNLIMITED: LimitsSnapshot = {
   machine: "This machine",
   waiting: [],
   moved: new Map(),
-  forwardDue: new Set(),
 };
 
 // A reference, like the pool catalog: harnesses without the limits admit everything.
@@ -172,8 +207,8 @@ export class ResourceLimits extends Context.Reference<{
     readonly wasPaused: boolean;
   }>;
   /**
-   * The notice for a run on a thread that continues on a linked machine, which always waits here to be forwarded,
-   * or undefined for any other thread.
+   * The notice for a run on a thread that continues on a linked machine, or is moving there, which always waits
+   * here, or undefined for any other thread.
    */
   readonly movedHold: (threadId: ThreadId) => Effect.Effect<string | undefined>;
   readonly overflow: Effect.Effect<OverflowMover | null>;
@@ -218,18 +253,15 @@ const make = Effect.fn("makeResourceLimits")(function* () {
     limits: effectiveLimits({}, platform, yield* TotalMemoryBytes),
     pause: yield* readPause,
     moved,
-    forwardDue: new Set(moved.keys()),
   });
   const overflow = yield* Ref.make<OverflowMover | null>(null);
 
   const movedHold = Effect.fn("ResourceLimits.movedHold")(function* (threadId: ThreadId) {
     const entry = (yield* Ref.get(snapshot)).moved.get(threadId);
     if (entry === undefined) return undefined;
-    yield* Ref.update(snapshot, (latest) => ({
-      ...latest,
-      forwardDue: new Set([...latest.forwardDue, threadId]),
-    }));
-    return movedReason(entry);
+    return entry.phase === "confirmed" || entry.phase === "moved"
+      ? movedReason(entry)
+      : movingReason(entry);
   });
 
   // Memory gate's rule: Alice's "launch anyway" counts while it's the newest message that started
