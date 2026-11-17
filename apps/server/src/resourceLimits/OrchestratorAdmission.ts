@@ -12,6 +12,7 @@ import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import { ProjectionStoreV2 } from "../orchestration-v2/ProjectionStore.ts";
 import {
   isAlicesMessage,
+  isBufferedWake,
   pauseOrder,
   pauseOrderNotice,
   type Provenance,
@@ -147,7 +148,9 @@ export const makeLimitsAdmission = Effect.gen(function* () {
   }) {
     const { projection, run } = input;
     const message = projection.messages.find((candidate) => candidate.id === run.userMessageId);
-    // A thread that continues on a linked machine runs nothing here, Resume included: the governor forwards it.
+    // A buffered wake's turn already started here, queued or not, so it runs here even on a moved thread.
+    if (message !== undefined && isBufferedWake(message)) return undefined;
+    // A thread that continues on a linked machine, or is moving there, runs nothing here, Resume included.
     const moved = yield* resourceLimits.movedHold(projection.thread.id);
     if (moved !== undefined)
       return yield* hold(run, { ...run, queueHeld: true }, moved, input.ordinal);

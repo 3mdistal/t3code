@@ -219,8 +219,11 @@ A thread held on a machine can continue on a linked machine instead of waiting. 
 machine's `environmentId`. Once a thread has waited 10 minutes (`moveAfterMs`), and
 the machine isn't paused, T3 starts a new thread there with a summary of the old one
 and the messages that were waiting, on a fresh worktree of the thread's pushed branch.
-The old thread says where it went, and T3 sends anything you write in it there. Only
-top-level threads with no uncommitted or unpushed work and no attachments move. A
+The move counts once the new thread has started there; if it can't start, the thread
+stays and waits here. While it's moving, the old thread runs nothing. Afterwards it says
+where it went, and T3 sends anything you write in it there, even while this machine is
+paused. Only top-level threads with no uncommitted or unpushed work and no
+attachments move, and a batch of waiting messages too long for one message stays. A
 thread that needs something only one machine has says so with a `needs:<name>` tag,
 such as `needs:vault`; the linked machine's `provides` list says what it has. A
 thread without such a tag is taken to need `assumeNeeds` (vault, content and gateway

@@ -19,10 +19,16 @@ import {
   lostWake,
   lostWakeNote,
   manualPause,
+  MAX_BRIEF_LENGTH,
+  moveBlocker,
+  moveBrief,
   type MoveCandidate,
-  moveEligibility,
   movedBranchName,
+  movePlan,
   type MoveTarget,
+  type ThreadThere,
+  threadThere,
+  upstreamOf,
   newestInterruptible,
   nextState,
   offUntil,
@@ -721,7 +727,12 @@ describe("releaseOrder", () => {
   });
 });
 
-describe("moveEligibility", () => {
+describe("moving a held thread", () => {
+  const upstream = {
+    remote: "origin",
+    branch: "feature/x",
+    repositoryKey: "github.com/alice/repo",
+  };
   const movable: MoveCandidate = {
     topLevel: true,
     tags: ["needs:none"],
@@ -729,99 +740,208 @@ describe("moveEligibility", () => {
       branch: "feature/x",
       isDefaultBranch: false,
       hasWorkingTreeChanges: false,
-      upstreamRef: "origin/feature/x",
+      upstream,
       aheadCount: 0,
+      head: "abc123",
     },
     worktree: true,
     heldAttachments: 0,
     model: { instanceId: "claude", model: "claude-opus-5-5" },
   };
   const cloud: MoveTarget = {
-    matchingProjects: 1,
+    projects: [{ remotes: new Map([["github.com/alice/repo", "origin"]]) }],
     providers: [{ instanceId: "claude", models: ["claude-opus-5-5"], omittedModels: 0 }],
-    hasFallbackModel: false,
+    fallbackModel: null,
   };
   const rules = { provides: ["notion"], assumeNeeds: ["vault", "content", "gateway"] };
   const git = movable.git!;
 
-  it.each<[string, Partial<MoveCandidate>, Partial<MoveTarget>, string | null]>([
-    ["a clean, pushed worktree thread that needs nothing", {}, {}, null],
+  it.each<[string, Partial<MoveCandidate>, string | null]>([
+    ["a clean, pushed worktree thread that needs nothing", {}, null],
     [
       "a root checkout on the default branch",
       { worktree: false, git: { ...git, isDefaultBranch: true } },
-      {},
       null,
     ],
-    ["needs only what the target provides", { tags: ["Needs:Notion", "urgent"] }, {}, null],
+    ["needs only what the target provides", { tags: ["Needs:Notion", "urgent"] }, null],
     [
       "an untagged thread, under the default assumeNeeds",
       { tags: [] },
-      {},
       "it needs vault, content, gateway",
     ],
     [
       "a capability the target lacks",
       { tags: ["needs:windows", "needs:notion"] },
-      {},
       "it needs windows",
     ],
-    ["another thread's task", { topLevel: false }, {}, "it's another thread's task"],
-    [
-      "a held message with attachments",
-      { heldAttachments: 1 },
-      {},
-      "a held message has attachments",
-    ],
-    [
-      "a detached checkout",
-      { git: { ...git, branch: null } },
-      {},
-      "its checkout isn't on a branch",
-    ],
-    ["no repository", { git: null }, {}, "its checkout isn't on a branch"],
+    ["another thread's task", { topLevel: false }, "it's another thread's task"],
+    ["a held message with attachments", { heldAttachments: 1 }, "a held message has attachments"],
+    ["a detached checkout", { git: { ...git, branch: null } }, "its checkout isn't on a branch"],
+    ["no repository", { git: null }, "its checkout isn't on a branch"],
     [
       "a root checkout off the default branch",
       { worktree: false },
-      {},
       "it works in the project checkout off the default branch",
     ],
     [
       "uncommitted changes",
       { git: { ...git, hasWorkingTreeChanges: true } },
-      {},
       "it has uncommitted changes",
     ],
+    ["a branch never pushed", { git: { ...git, upstream: null } }, "its branch isn't pushed"],
     [
-      "a branch never pushed",
-      { git: { ...git, upstreamRef: null } },
-      {},
-      "its branch isn't pushed",
+      "a remote that names no repository",
+      { git: { ...git, upstream: { ...upstream, repositoryKey: null } } },
+      "its branch's remote isn't a known repository",
     ],
-    ["unpushed commits", { git: { ...git, aheadCount: 2 } }, {}, "it has unpushed commits"],
-    ["no project there", {}, { matchingProjects: 0 }, "no project there has its repository"],
+    ["unpushed commits", { git: { ...git, aheadCount: 2 } }, "it has unpushed commits"],
+  ])("moveBlocker: %s", (_name, candidate, expected) => {
+    expect(moveBlocker({ ...movable, ...candidate }, rules)).toBe(expected);
+  });
+
+  const fallbackModel = { instanceId: "codex", model: "gpt-6.1" };
+  it.each<[string, Partial<MoveTarget>, ReturnType<typeof movePlan>]>([
+    ["its model there", {}, { use: "thread", remote: "origin" }],
+    ["no project there", { projects: [] }, { blocker: "no project there has its repository" }],
     [
       "several projects there",
-      {},
-      { matchingProjects: 2 },
-      "several projects there have its repository",
+      { projects: [...cloud.projects, ...cloud.projects] },
+      { blocker: "several projects there have its repository" },
     ],
-    ["its provider isn't there", {}, { providers: [] }, "claude claude-opus-5-5 isn't there"],
     [
-      "its provider isn't there, with a fallback model",
-      {},
-      { providers: [], hasFallbackModel: true },
-      null,
+      "a fork remote there under another name",
+      {
+        projects: [
+          {
+            remotes: new Map([
+              ["github.com/upstream/repo", "upstream"],
+              ["github.com/alice/repo", "mine/fork"],
+            ]),
+          },
+        ],
+      },
+      { use: "thread", remote: "mine/fork" },
+    ],
+    [
+      "no remote there for the branch's repository",
+      { projects: [{ remotes: new Map([["github.com/upstream/repo", "origin"]]) }] },
+      { blocker: "the project there has no remote for github.com/alice/repo" },
+    ],
+    [
+      "its provider isn't there",
+      { providers: [] },
+      { blocker: "claude claude-opus-5-5 isn't there" },
+    ],
+    [
+      "a fallback model the target lists",
+      {
+        providers: [{ instanceId: "codex", models: ["gpt-6.1"], omittedModels: 0 }],
+        fallbackModel,
+      },
+      { use: "fallback", remote: "origin" },
+    ],
+    [
+      "a fallback model the target doesn't list",
+      { providers: [{ instanceId: "codex", models: [], omittedModels: 4 }], fallbackModel },
+      { blocker: "claude claude-opus-5-5 isn't there" },
     ],
     [
       "an unlisted model the provider may have",
-      {},
       { providers: [{ instanceId: "claude", models: [], omittedModels: 3 }] },
-      null,
+      { use: "thread", remote: "origin" },
     ],
-  ])("%s", (_name, candidate, target, expected) => {
-    expect(moveEligibility({ ...movable, ...candidate }, rules, { ...cloud, ...target })).toBe(
-      expected,
-    );
+  ])("movePlan: %s", (_name, target, expected) => {
+    expect(movePlan({ model: movable.model, upstream }, { ...cloud, ...target })).toEqual(expected);
+  });
+
+  it.each<[string, { remote: string | null; merge: string | null }, unknown]>([
+    [
+      "origin",
+      { remote: "origin", merge: "refs/heads/main" },
+      { remote: "origin", branch: "main" },
+    ],
+    [
+      "a remote other than origin, and a branch with a slash",
+      { remote: "fork", merge: "refs/heads/feature/x" },
+      { remote: "fork", branch: "feature/x" },
+    ],
+    [
+      "a remote name with a slash",
+      { remote: "alice/fork", merge: "refs/heads/feature/x" },
+      { remote: "alice/fork", branch: "feature/x" },
+    ],
+    ["another local branch", { remote: ".", merge: "refs/heads/main" }, null],
+    ["a tag", { remote: "origin", merge: "refs/tags/v1" }, null],
+    ["nothing tracked", { remote: null, merge: null }, null],
+  ])("upstreamOf: %s", (_name, config, expected) => {
+    expect(upstreamOf(config)).toEqual(expected);
+  });
+
+  const brief = {
+    title: "Fix it",
+    threadId: "thread:1",
+    environmentId: "environment:pc",
+    machine: "PC",
+    remote: "alice/fork",
+    remoteBranch: "feature/x",
+    localBranch: "t3-moved/feature/x-1",
+    head: "abc123",
+    summary: "",
+    held: ["do the thing"],
+  };
+
+  it("moveBrief pins the commit and pushes to the branch on the remote there", () => {
+    const text = moveBrief(brief)!;
+    expect(text).toContain("started from alice/fork/feature/x");
+    expect(text).toContain("git merge-base --is-ancestor abc123 HEAD");
+    expect(text).toContain("git push alice/fork HEAD:feature/x");
+  });
+
+  it("moveBrief cuts the history short, but refuses held messages that don't fit", () => {
+    const long = moveBrief({ ...brief, summary: "h".repeat(MAX_BRIEF_LENGTH) })!;
+    expect(long.length).toBeLessThanOrEqual(MAX_BRIEF_LENGTH);
+    expect(long).toContain("[History cut short.]");
+    expect(long).toContain("do the thing");
+    expect(moveBrief({ ...brief, held: ["a", "m".repeat(MAX_BRIEF_LENGTH)] })).toBeNull();
+  });
+
+  it.each<[string, Parameters<typeof threadThere>[0], ThreadThere["state"]]>([
+    [
+      "setting up",
+      { worktreePath: null, runCount: 1, firstRun: { status: "preparing", startedAt: null } },
+      "starting",
+    ],
+    [
+      "its worktree failed",
+      { worktreePath: null, runCount: 1, firstRun: { status: "failed", startedAt: null } },
+      "failed",
+    ],
+    [
+      "queued there with its worktree ready",
+      { worktreePath: "/w", runCount: 1, firstRun: { status: "queued", startedAt: null } },
+      "started",
+    ],
+    [
+      "running",
+      {
+        worktreePath: "/w",
+        runCount: 1,
+        firstRun: { status: "running", startedAt: "2026-11-17T00:00:00Z" },
+      },
+      "started",
+    ],
+    [
+      "failed after it started",
+      {
+        worktreePath: "/w",
+        runCount: 1,
+        firstRun: { status: "failed", startedAt: "2026-11-17T00:00:00Z" },
+      },
+      "started",
+    ],
+    ["many runs on", { worktreePath: "/w", runCount: 60, firstRun: null }, "started"],
+  ])("threadThere: %s", (_name, input, expected) => {
+    expect(threadThere(input).state).toBe(expected);
   });
 
   it("checks out a branch name of its own there, which a retry repeats", () => {
