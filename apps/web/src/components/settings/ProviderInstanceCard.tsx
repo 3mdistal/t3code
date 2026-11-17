@@ -1043,6 +1043,7 @@ export function ProviderInstanceCard({
           </T>
         </span>
         {authLabel ? <span>· {authLabel}</span> : null}
+        {/* fork: see FORK.md. */}
         <ProviderSignInEnd auth={liveProvider?.auth} separator="· " />
         {inlineStatusDetail ? (
           <span className="min-w-0 [overflow-wrap:anywhere]">· {inlineStatusDetail}</span>

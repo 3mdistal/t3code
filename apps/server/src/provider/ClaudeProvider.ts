@@ -858,8 +858,13 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
   }
 
   // fork: only a login Claude Code stored itself has an end date. See FORK.md.
+  // Claude reports a stored subscriber login with no tokenSource, and other stored logins as claude.ai.
+  // Bedrock also omits tokenSource, but signs in with AWS.
+  const storedLogin =
+    (capabilities.apiProvider === undefined || capabilities.apiProvider === "firstParty") &&
+    (capabilities.tokenSource === undefined || capabilities.tokenSource === "claude.ai");
   const signInExpiresAt =
-    resolveSignInExpiresAt && !customApiEndpoint && capabilities.tokenSource === "claude.ai"
+    resolveSignInExpiresAt && !customApiEndpoint && storedLogin
       ? yield* resolveSignInExpiresAt()
       : undefined;
   if (signInExpiresAt !== undefined && Date.parse(signInExpiresAt) <= Date.parse(checkedAt)) {
