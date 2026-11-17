@@ -32,6 +32,7 @@ const resetTimeFormat = new Intl.DateTimeFormat("en-US", {
   minute: "2-digit",
   timeZoneName: "short",
 });
+const formatResetTime = (ms: number) => resetTimeFormat.format(ms);
 
 export interface PoolRoutingInput {
   readonly selection: ModelSelection;
@@ -107,7 +108,26 @@ export const makePoolRouting = Effect.gen(function* () {
         projectId: input.projectId,
         nowMs,
         excluded: input.excluded,
-        formatTime: (ms) => resetTimeFormat.format(ms),
+        formatTime: formatResetTime,
+      });
+    },
+  );
+
+  /** Why a turn routed to this pool has no account to start on. */
+  const describeNoEligibleMember = Effect.fn("Orchestrator.describeNoEligibleMember")(
+    function* (input: {
+      readonly routed: Extract<RoutedSelection, { readonly type: "no_eligible_member" }>;
+      readonly projectId: OrchestrationV2AppThread["projectId"];
+      readonly excluded: ReadonlySet<ProviderInstanceId>;
+    }) {
+      return unavailablePoolNotice({
+        pool: input.routed.pool,
+        members: input.routed.members,
+        settings: yield* serverSettings.getSettings.pipe(Effect.orDie),
+        projectId: input.projectId,
+        nowMs: DateTime.toEpochMillis(yield* DateTime.now),
+        excluded: input.excluded,
+        formatTime: formatResetTime,
       });
     },
   );
@@ -115,14 +135,10 @@ export const makePoolRouting = Effect.gen(function* () {
   return {
     resolveRouting,
     describeUnavailablePool,
+    describeNoEligibleMember,
     getPublishedProviders: poolCatalog.getPublishedProviders,
   };
 });
-
-export const noEligibleMemberCause = (
-  routed: Extract<RoutedSelection, { readonly type: "no_eligible_member" }>,
-): string =>
-  `No account in the ${routed.pool.displayName ?? routed.pool.driver} pool is enabled for this project.`;
 
 /**
  * A queued run was pinned to a member at dispatch. Routing it again at

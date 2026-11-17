@@ -201,11 +201,7 @@ import {
   type ShellSnapshotOptions,
 } from "./ProjectionStore.ts";
 import { ProviderAdapterRegistryV2 } from "./ProviderAdapterRegistry.ts";
-import {
-  makePoolRouting,
-  noEligibleMemberCause,
-  planQueuedRunRepin,
-} from "./ProviderPoolDispatch.ts"; // fork: see FORK.md.
+import { makePoolRouting, planQueuedRunRepin } from "./ProviderPoolDispatch.ts"; // fork: see FORK.md.
 import { pauseOrder } from "../resourceLimits/policy.ts"; // fork: limits, see FORK.md.
 import { makeLimitsAdmission } from "../resourceLimits/OrchestratorAdmission.ts"; // fork: limits, see FORK.md.
 import * as ProviderContinuationRequests from "@t3tools/provider-core/server/ProviderContinuationRequests";
@@ -1723,7 +1719,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       return yield* new OrchestratorDispatchError({
         commandId: input.commandId,
         commandType: input.commandType,
-        cause: noEligibleMemberCause(routed),
+        cause: yield* poolRouting.describeNoEligibleMember({
+          routed,
+          projectId: input.projectId,
+          excluded: input.excluded ?? new Set(),
+        }),
       });
     }
     return routed;
