@@ -28,6 +28,7 @@ import {
   latestUserMessage,
   launchAnyway,
   manualPause,
+  movedReason,
   type PauseOrder,
   pausedReason,
   type Provenance,
@@ -55,6 +56,51 @@ export interface WaitingThread {
   readonly snoozeTried: boolean;
 }
 
+/** Where a thread held here continues: a thread on a linked machine. Saved in `moved.json`. */
+export interface MovedThread {
+  readonly environmentId: string;
+  readonly threadId: string;
+  readonly machine: string;
+  readonly link: string | null;
+  readonly at: number;
+}
+
+/** Moves held threads to the linked machine in the overflow settings; installed where the links are. */
+export interface OverflowMover {
+  /** Moves the first of these that may move, best first. Returns the thread it moved. */
+  readonly move: (
+    candidates: ReadonlyArray<{ readonly threadId: ThreadId; readonly heldAt: number }>,
+    now: number,
+  ) => Effect.Effect<ThreadId | null>;
+  /** Sends what's queued on moved threads to where they continue, and cancels it here. */
+  readonly forward: (now: number) => Effect.Effect<void>;
+}
+
+/** `moved.json`'s entries, skipping malformed ones. */
+function movedThreads(file: unknown): ReadonlyMap<ThreadId, MovedThread> {
+  const moved = new Map<ThreadId, MovedThread>();
+  const threads = (file as { readonly threads?: unknown } | null)?.threads;
+  if (typeof threads !== "object" || threads === null) return moved;
+  for (const [threadId, entry] of Object.entries(threads)) {
+    const {
+      environmentId,
+      threadId: there,
+      machine,
+      link,
+      at,
+    } = (entry ?? {}) as Record<string, unknown>;
+    if (typeof environmentId !== "string" || typeof there !== "string") continue;
+    moved.set(threadId as ThreadId, {
+      environmentId,
+      threadId: there,
+      machine: typeof machine === "string" ? machine : environmentId,
+      link: typeof link === "string" ? link : null,
+      at: typeof at === "number" ? at : 0,
+    });
+  }
+  return moved;
+}
+
 export interface LimitsSnapshot {
   /** Null where the fork has no limits (Linux keeps upstream's cap). */
   readonly limits: EffectiveResourceLimits | null;
@@ -67,6 +113,10 @@ export interface LimitsSnapshot {
   readonly machine: string;
   /** Threads holding work for the limits, oldest first. */
   readonly waiting: ReadonlyArray<WaitingThread>;
+  /** Threads that continue on a linked machine. Everything sent to one here waits to be forwarded. */
+  readonly moved: ReadonlyMap<ThreadId, MovedThread>;
+  /** Moved threads admission held something for since the last forward. */
+  readonly forwardDue: ReadonlySet<ThreadId>;
 }
 
 export type Admission =
@@ -99,6 +149,8 @@ const UNLIMITED: LimitsSnapshot = {
   pause: null,
   machine: "This machine",
   waiting: [],
+  moved: new Map(),
+  forwardDue: new Set(),
 };
 
 // A reference, like the pool catalog: harnesses without the limits admit everything.
@@ -119,6 +171,13 @@ export class ResourceLimits extends Context.Reference<{
     readonly saved: boolean;
     readonly wasPaused: boolean;
   }>;
+  /**
+   * The notice for a run on a thread that continues on a linked machine, which always waits here to be forwarded,
+   * or undefined for any other thread.
+   */
+  readonly movedHold: (threadId: ThreadId) => Effect.Effect<string | undefined>;
+  readonly overflow: Effect.Effect<OverflowMover | null>;
+  readonly setOverflow: (mover: OverflowMover) => Effect.Effect<void>;
   /** Reads the switch again, since other processes can set it too. */
   readonly refreshPause: Effect.Effect<ResourceLimitsPause | null>;
   readonly status: Effect.Effect<ResourceLimitsStatus | undefined>;
@@ -131,6 +190,9 @@ export class ResourceLimits extends Context.Reference<{
   defaultValue: () => ({
     admit: () => Effect.succeed(ADMITTED),
     setPause: () => Effect.succeed({ supported: false, saved: false, wasPaused: false }),
+    movedHold: () => Effect.undefined,
+    overflow: Effect.succeed(null),
+    setOverflow: () => Effect.void,
     refreshPause: Effect.succeed(null),
     status: Effect.undefined,
     read: Effect.succeed(UNLIMITED),
@@ -147,11 +209,27 @@ const make = Effect.fn("makeResourceLimits")(function* () {
   const { readJson, writeJson } = yield* makeJsonFiles;
   const pauseFile = path.join(config.stateDir, "resource-limits", "pause.json");
   const readPause = readJson(pauseFile).pipe(Effect.map(manualPause));
-  // Read before the first dispatch, so a restart while paused doesn't start anything.
+  const movedFile = path.join(config.stateDir, "resource-limits", "moved.json");
+  // Read before the first dispatch, so a restart while paused doesn't start anything, and a moved thread's
+  // messages still wait to be forwarded.
+  const moved = movedThreads(yield* readJson(movedFile));
   const snapshot = yield* Ref.make<LimitsSnapshot>({
     ...UNLIMITED,
     limits: effectiveLimits({}, platform, yield* TotalMemoryBytes),
     pause: yield* readPause,
+    moved,
+    forwardDue: new Set(moved.keys()),
+  });
+  const overflow = yield* Ref.make<OverflowMover | null>(null);
+
+  const movedHold = Effect.fn("ResourceLimits.movedHold")(function* (threadId: ThreadId) {
+    const entry = (yield* Ref.get(snapshot)).moved.get(threadId);
+    if (entry === undefined) return undefined;
+    yield* Ref.update(snapshot, (latest) => ({
+      ...latest,
+      forwardDue: new Set([...latest.forwardDue, threadId]),
+    }));
+    return movedReason(entry);
   });
 
   // Memory gate's rule: Alice's "launch anyway" counts while it's the newest message that started
@@ -169,6 +247,8 @@ const make = Effect.fn("makeResourceLimits")(function* () {
   }) {
     // A buffered wake's turn is already running, paused or not; its run only gives it T3's tools.
     if (isBufferedWake(input.message)) return ADMITTED;
+    const moved = yield* movedHold(input.thread.id);
+    if (moved !== undefined) return { admitted: false, notice: moved } satisfies Admission;
     const now = yield* Clock.currentTimeMillis;
     const current = yield* Ref.get(snapshot);
     const { pause } = current;
@@ -276,6 +356,9 @@ const make = Effect.fn("makeResourceLimits")(function* () {
   return {
     admit,
     setPause,
+    movedHold,
+    overflow: Ref.get(overflow),
+    setOverflow: (mover: OverflowMover) => Ref.set(overflow, mover),
     refreshPause,
     status,
     read: Ref.get(snapshot),

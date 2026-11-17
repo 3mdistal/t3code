@@ -906,6 +906,42 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
       }
     }
 
+    // While this machine holds work and isn't paused, the best-ranked held thread that has waited long enough and
+    // may move continues on the linked machine in the overflow settings, one a pass. What's sent to a moved thread
+    // afterwards goes there too.
+    const mover = yield* limits.overflow;
+    if (mover !== null) {
+      const ready = inspected.filter(
+        (item) =>
+          !dropped.has(item.entry.threadId) && item.shell !== null && item.held && !item.blocked,
+      );
+      if (!paused && !off && released.size === 0 && ready.length > 0) {
+        const ranked = yield* byRank(ready, now);
+        const moved = yield* mover
+          .move(
+            ranked.map((item) => ({ threadId: item.entry.threadId, heldAt: item.entry.heldAt })),
+            now,
+          )
+          .pipe(
+            Effect.catchCause((cause) =>
+              Effect.logWarning("resource-limits.move-failed", { cause }).pipe(Effect.as(null)),
+            ),
+          );
+        const item = ready.find((candidate) => candidate.entry.threadId === moved);
+        if (item !== undefined) {
+          yield* unsnooze({ ...item, entry: changed.get(item.entry.threadId) ?? item.entry }, now);
+          released.add(item.entry.threadId);
+        }
+      }
+      yield* mover
+        .forward(now)
+        .pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("resource-limits.forward-failed", { cause }),
+          ),
+        );
+    }
+
     // Admission may have added threads during this pass, so only the ones handled here change. Admission also replaces
     // the entry of a thread it holds again, even in the same millisecond, so one that isn't what this pass read stays,
     // with a new run to wait for.
