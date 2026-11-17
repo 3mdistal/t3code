@@ -73,8 +73,9 @@ A Claude login ends on a fixed date, and using the account doesn't extend it.
 Dec 16", turns it into a warning five days before, and shows the account as not
 authenticated once it has ended. Sign in again with the account's own config
 directory, such as `CLAUDE_CONFIG_DIR=~/.claude_personal claude auth login`. When
-no account in a pool can take a turn, the thread names the accounts that need
-signing in and when each limited account resets.
+no account in a pool can take a turn, whether the turn is starting or its account
+just hit a limit, T3 names the accounts that need signing in, the ones turned off
+for the project, and when each limited account resets.
 
 ## Compact long conversations
 

@@ -745,6 +745,10 @@ describe("routeModelSelection", () => {
         }),
         stamped("claudeAgent_off", { displayName: "Off", enabled: false, limitedUntil: at(30) }),
         stamped("claudeAgent_tried", { displayName: "Tried" }),
+        stamped("claudeAgent_project", {
+          displayName: "Project",
+          auth: { status: "unauthenticated" },
+        }),
       ],
       settings: {
         ...settings,
@@ -752,6 +756,9 @@ describe("routeModelSelection", () => {
           ...settings.providerInstances,
           [id("claudeAgent_apple")]: { driver: claude, enabled: true, config: {} },
           [id("claudeAgent_tried")]: { driver: claude, enabled: true, config: {} },
+        },
+        projectSettingsOverrides: {
+          [projectId]: { providerInstances: { [id("claudeAgent_project")]: { enabled: false } } },
         },
       },
       projectId,
@@ -761,7 +768,57 @@ describe("routeModelSelection", () => {
     });
     assert.equal(
       notice,
-      "Every account in the Claude pool is unavailable. Needs sign-in: Mac, Work. Limited: Apple until +90m. Already tried this turn: Tried. Unavailable: Off.",
+      "Every account in the Claude pool is unavailable. Off for this project: Project. Needs sign-in: Mac, Work. Limited: Apple until +90m. Already tried this turn: Tried. Unavailable: Off.",
+    );
+  });
+
+  it("explains a new turn on a pool whose accounts are all signed out or all off", () => {
+    const explain = (
+      members: ReadonlyArray<ServerProvider>,
+      overrides: Partial<ServerSettings> = {},
+    ) => {
+      const routed = route("pool_claudeAgent", [...members, pool], null, overrides);
+      assert(routed.type === "no_eligible_member");
+      return unavailablePoolNotice({
+        pool: { ...pool, displayName: "Claude" },
+        members: routed.members,
+        settings: { ...settings, ...overrides },
+        projectId,
+        nowMs,
+        excluded: new Set(),
+        formatTime: String,
+      });
+    };
+    const ended = DateTime.formatIso(DateTime.makeUnsafe(later(-1)));
+    assert.equal(
+      explain([
+        stamped("claudeAgent", { displayName: "Mac", auth: { status: "unauthenticated" } }),
+        stamped("claudeAgent_work", {
+          displayName: "Work",
+          status: "error",
+          auth: { status: "unauthenticated", expiresAt: ended },
+        }),
+      ]),
+      "Every account in the Claude pool is unavailable. Needs sign-in: Mac, Work.",
+    );
+    assert.equal(
+      explain(
+        [
+          stamped("claudeAgent", { displayName: "Mac" }),
+          stamped("claudeAgent_work", { displayName: "Work" }),
+        ],
+        {
+          projectSettingsOverrides: {
+            [projectId]: {
+              providerInstances: {
+                [id("claudeAgent")]: { enabled: false },
+                [id("claudeAgent_work")]: { enabled: false },
+              },
+            },
+          },
+        },
+      ),
+      "Every account in the Claude pool is unavailable. Off for this project: Mac, Work.",
     );
   });
 });

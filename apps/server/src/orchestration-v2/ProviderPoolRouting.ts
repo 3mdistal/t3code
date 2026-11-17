@@ -287,6 +287,9 @@ export function unavailablePoolNotice(
   },
 ): string {
   const health = poolMemberHealth(input);
+  const projectOverrides =
+    input.settings.projectSettingsOverrides[input.projectId]?.providerInstances;
+  const offForProject: Array<string> = [];
   const signIn: Array<string> = [];
   const limited: Array<string> = [];
   const tried: Array<string> = [];
@@ -296,7 +299,9 @@ export function unavailablePoolNotice(
     const signInEndMs = Date.parse(member.auth.expiresAt ?? "");
     const entry = health.find((candidate) => candidate.instanceId === member.instanceId);
     const untilMs = entry?.limitedUntilMs;
-    if (member.auth.status === "unauthenticated" || signInEndMs <= input.nowMs) {
+    if (projectOverrides?.[member.instanceId]?.enabled === false) {
+      offForProject.push(name);
+    } else if (member.auth.status === "unauthenticated" || signInEndMs <= input.nowMs) {
       signIn.push(name);
     } else if (!entry?.eligible) {
       unavailable.push(name);
@@ -310,6 +315,7 @@ export function unavailablePoolNotice(
   }
   return [
     `Every account in the ${input.pool.displayName ?? input.pool.driver} pool is unavailable.`,
+    ...(offForProject.length > 0 ? [`Off for this project: ${offForProject.join(", ")}.`] : []),
     ...(signIn.length > 0 ? [`Needs sign-in: ${signIn.join(", ")}.`] : []),
     ...(limited.length > 0 ? [`Limited: ${limited.join("; ")}.`] : []),
     ...(tried.length > 0 ? [`Already tried this turn: ${tried.join(", ")}.`] : []),
@@ -326,7 +332,11 @@ export type RoutedSelection =
       readonly pool: ServerProvider;
       readonly decision: Exclude<PoolRoutingDecision, { readonly type: "no_eligible_member" }>;
     }
-  | { readonly type: "no_eligible_member"; readonly pool: ServerProvider };
+  | {
+      readonly type: "no_eligible_member";
+      readonly pool: ServerProvider;
+      readonly members: ReadonlyArray<ServerProvider>;
+    };
 
 /**
  * The one routing entry for every place a selection enters a thread. Pooling an account declares
@@ -370,7 +380,7 @@ export function routeModelSelection(input: {
     nowMs: input.nowMs,
   });
   if (decision.type === "no_eligible_member") {
-    return { type: "no_eligible_member", pool: owner.pool };
+    return { type: "no_eligible_member", pool: owner.pool, members: owner.members };
   }
   return {
     type: "routed",
