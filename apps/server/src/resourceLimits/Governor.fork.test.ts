@@ -6,6 +6,7 @@ import {
   EventId,
   MessageId,
   OrchestratorMcpFailure,
+  OrchestratorMcpThreadReadResult,
   type OrchestrationV2ProviderThread,
   type OrchestrationV2Run,
   ProjectId,
@@ -20,12 +21,15 @@ import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAda
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Ref from "effect/Ref";
+import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 
@@ -39,13 +43,14 @@ import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
 import * as ProviderSessionManager from "../orchestration-v2/ProviderSessionManager.ts";
+import * as ThreadCommandExecutor from "../orchestration-v2/ThreadCommandExecutor.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as ProviderReplayHarness from "../orchestration-v2/testkit/ProviderReplayHarness.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as Governor from "./Governor.ts";
 import * as Overflow from "./Overflow.ts";
-import { GiB, type HostReading, type ProcessRow, type ThreadThere, TIMING } from "./policy.ts";
+import { GiB, type HostReading, type ProcessRow, TIMING } from "./policy.ts";
 import { ProcessTree } from "./ProcessTree.ts";
 import * as ResourceLimits from "./ResourceLimits.ts";
 
@@ -83,6 +88,8 @@ const layerTest = ThreadManagementService.layer.pipe(
   Layer.provideMerge(ServerSettings.layerTest()),
   Layer.provideMerge(CommandReceiptStore.layer.pipe(Layer.provide(layerDatabase))),
   Layer.provideMerge(layerLimits),
+  // The same per-thread lock the orchestrator takes, by layer memoization, as the server shares it with the mover.
+  Layer.provideMerge(ThreadCommandExecutor.layer),
   Layer.provideMerge(
     ServerConfig.layerTest(process.cwd(), { prefix: "t3-resource-limits-" }).pipe(
       Layer.provide(NodeServices.layer),
@@ -2248,72 +2255,188 @@ it.effect(
     }).pipe(Effect.provide(layerTest)),
 );
 
-interface CloudFaults {
-  readonly loseLaunchReplies: number;
-  readonly refuseLaunches: boolean;
-  readonly sendFailures: number;
-  readonly cancelFailures: number;
-  readonly there: ThreadThere;
-  readonly onLaunch: Effect.Effect<void>;
-  readonly onSend: Effect.Effect<void>;
+/** The first run of the thread there, as `t3_thread_read` reports it, or null before it has one. */
+interface RunThere {
+  readonly status: OrchestrationV2Run["status"];
+  readonly startedAt: string | null;
+  /** Set once its worktree is ready. */
+  readonly worktreePath: string | null;
 }
 
+const runThere = {
+  started: { status: "running", startedAt: "2026-11-16T10:00:00.000Z", worktreePath: "/cloud/w" },
+  // Waiting behind that machine's own queue, or its Pause all, with its worktree ready.
+  queued: { status: "queued", startedAt: null, worktreePath: "/cloud/w" },
+  preparing: { status: "preparing", startedAt: null, worktreePath: null },
+  setupFailed: { status: "failed", startedAt: null, worktreePath: null },
+} satisfies Record<string, RunThere>;
+
+interface CloudFaults {
+  /** Launches it takes but whose replies are lost. */
+  readonly loseLaunchReplies: number;
+  /** Launches it fails before taking them, with this code. */
+  readonly refuseLaunches: OrchestratorMcpFailure["code"] | null;
+  /** Launches that never answer, once they've signalled this. */
+  readonly stallLaunches: Deferred.Deferred<void> | null;
+  readonly sendFailures: number;
+  /** Cancels here that fail. */
+  readonly cancelFailures: number;
+  readonly there: RunThere | null;
+  /** What `git ls-remote` reports for the branch here. */
+  readonly remoteHead: {
+    readonly remoteHead: string | null;
+    readonly containsHead: boolean | null;
+  };
+  /** One-shot hooks, run inside the call they're named for. */
+  readonly onLaunch: Effect.Effect<void>;
+  readonly onSend: Effect.Effect<void>;
+  readonly onGitStatus: Effect.Effect<void>;
+  readonly onProjects: Effect.Effect<void>;
+  readonly onRemoteHead: Effect.Effect<void>;
+}
+
+const decodeThreadRead = Schema.decodeSync(OrchestratorMcpThreadReadResult);
+
+/** A `t3_thread_read` answer, decoded with the real schema so the fake can't drift from it. */
+const threadReadThere = (threadId: string, first: RunThere | null) =>
+  decodeThreadRead({
+    thread: {
+      threadId,
+      projectId: "project:cloud",
+      title: "moved",
+      createdBy: "agent",
+      creationSource: "mcp",
+      status: first === null ? "idle" : first.status === "running" ? "running" : "idle",
+      latestRunId: first === null ? null : "run:cloud:1",
+      activeRunId: first?.status === "running" ? "run:cloud:1" : null,
+      providerInstanceId: instanceId,
+      model: modelSelection.model,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      linkedPullRequest: null,
+      titleRegeneration: null,
+      branch: "t3-moved/main",
+      worktreePath: first?.worktreePath ?? null,
+      parentThreadId: null,
+      relationshipToParent: null,
+      runCount: first === null ? 0 : 1,
+      itemCount: 1,
+      pendingRequestCount: 0,
+      archived: false,
+      settled: false,
+      settledAt: null,
+      snoozed: false,
+      snoozedUntil: null,
+      createdAt: "2026-11-16T10:00:00.000Z",
+      updatedAt: "2026-11-16T10:00:00.000Z",
+    },
+    recentRuns:
+      first === null
+        ? []
+        : [
+            {
+              runId: "run:cloud:1",
+              ordinal: 1,
+              status: first.status,
+              providerInstanceId: instanceId,
+              model: modelSelection.model,
+              requestedAt: "2026-11-16T10:00:00.000Z",
+              startedAt: first.startedAt,
+              completedAt: null,
+            },
+          ],
+    items: [],
+    nextPosition: null,
+    hasMore: false,
+  });
+
 /**
- * A linked machine with one matching project. It keeps what's launched and sent there by request ID, as the real one
- * does, and can lose replies, fail late, or reject calls on demand.
+ * A linked machine with one matching project. It replays a launch or send by its request ID, as the real one does,
+ * refuses a new launch onto a branch an earlier one took, records every call, and can lose replies, stall, fail late,
+ * or reject calls on demand.
  */
 const makeCloud = Effect.fnUntraced(function* () {
   const faults = yield* Ref.make<CloudFaults>({
-    /** Launches it records but whose replies are lost. */
     loseLaunchReplies: 0,
-    /** Launches it refuses outright. */
-    refuseLaunches: false,
+    refuseLaunches: null,
+    stallLaunches: null,
     sendFailures: 0,
-    /** Cancels here that fail. */
     cancelFailures: 0,
-    there: { state: "started" },
+    there: runThere.started,
+    remoteHead: { remoteHead: "abc123", containsHead: true },
     onLaunch: Effect.void,
     onSend: Effect.void,
+    onGitStatus: Effect.void,
+    onProjects: Effect.void,
+    onRemoteHead: Effect.void,
   });
+  const once = (hook: "onLaunch" | "onSend" | "onGitStatus" | "onProjects" | "onRemoteHead") =>
+    Effect.gen(function* () {
+      const run = (yield* Ref.get(faults))[hook];
+      yield* Ref.update(faults, (current) => ({ ...current, [hook]: Effect.void }));
+      yield* run;
+    });
   const attempts = yield* Ref.make<ReadonlyArray<ResourceLimits.MoveLaunch>>([]);
   const launched = yield* Ref.make<ReadonlyMap<string, string>>(new Map());
-  const sent = yield* Ref.make<ReadonlyMap<string, { threadId: string; message: string }>>(
+  const branches = yield* Ref.make<ReadonlySet<string>>(new Set());
+  const sendCalls = yield* Ref.make<
+    ReadonlyArray<{ threadId: string; message: string; clientRequestId: string }>
+  >([]);
+  const delivered = yield* Ref.make<ReadonlyMap<string, { threadId: string; message: string }>>(
     new Map(),
   );
-  const failure = (message: string) =>
-    new OrchestratorMcpFailure({ code: "orchestration_error", message });
+  const failure = (message: string, code: OrchestratorMcpFailure["code"] = "orchestration_error") =>
+    new OrchestratorMcpFailure({ code, message });
   const host: Overflow.OverflowHost = {
     project: () =>
       Effect.succeed({ workspaceRoot: "/repo", repositoryKey: "github.com/alice/repo" }),
     gitStatus: () =>
-      Effect.succeed({
-        branch: "main",
-        isDefaultBranch: true,
-        hasWorkingTreeChanges: false,
-        upstream: { remote: "origin", branch: "main", repositoryKey: "github.com/alice/repo" },
-        aheadCount: 0,
-        head: "abc123",
+      Effect.gen(function* () {
+        yield* once("onGitStatus");
+        return {
+          branch: "main",
+          isDefaultBranch: true,
+          hasWorkingTreeChanges: false,
+          upstream: { remote: "origin", branch: "main", repositoryKey: "github.com/alice/repo" },
+          aheadCount: 0,
+          head: "abc123",
+        };
       }),
     label: () => Effect.succeed("t3-cloud"),
     projectsThere: () =>
-      Effect.succeed([
-        {
-          id: ProjectId.make("project:cloud"),
-          remotes: new Map([["github.com/alice/repo", "origin"]]),
-        },
-      ]),
+      Effect.gen(function* () {
+        yield* once("onProjects");
+        return [
+          {
+            id: ProjectId.make("project:cloud"),
+            remotes: new Map([["github.com/alice/repo", "origin"]]),
+          },
+        ];
+      }),
     providersThere: () =>
       Effect.succeed([{ instanceId, models: [modelSelection.model], omittedModels: 0 }]),
     launch: (_environmentId, _modes, input) =>
       Effect.gen(function* () {
         const fault = yield* Ref.get(faults);
         yield* Ref.update(attempts, (all) => [...all, input]);
-        yield* fault.onLaunch;
-        yield* Ref.update(faults, (current) => ({ ...current, onLaunch: Effect.void }));
-        if (fault.refuseLaunches) return yield* failure("asleep");
-        const threadId =
-          (yield* Ref.get(launched)).get(input.clientRequestId) ?? `cloud:${input.title}`;
+        if (fault.stallLaunches !== null) {
+          yield* Deferred.succeed(fault.stallLaunches, undefined);
+          return yield* Effect.never;
+        }
+        yield* once("onLaunch");
+        if (fault.refuseLaunches !== null) return yield* failure("refused", fault.refuseLaunches);
+        const replayed = (yield* Ref.get(launched)).get(input.clientRequestId);
+        const branch =
+          input.workspaceStrategy.type === "worktree" ? input.workspaceStrategy.branch! : "";
+        // A new launch can't take a branch an earlier one left there.
+        if (replayed === undefined && (yield* Ref.get(branches)).has(branch)) {
+          return yield* failure(`A branch named '${branch}' already exists.`, "invalid_request");
+        }
+        const base = `cloud:${input.title}`;
+        const taken = [...(yield* Ref.get(launched)).values()].filter((id) => id.startsWith(base));
+        const threadId = replayed ?? (taken.length === 0 ? base : `${base}:${taken.length + 1}`);
         yield* Ref.update(launched, (all) => new Map(all).set(input.clientRequestId, threadId));
+        yield* Ref.update(branches, (all) => new Set(all).add(branch));
         if (fault.loseLaunchReplies > 0) {
           yield* Ref.update(faults, (current) => ({
             ...current,
@@ -2323,10 +2446,12 @@ const makeCloud = Effect.fnUntraced(function* () {
         }
         return { threadId, link: `t3://cloud/${threadId}` };
       }),
-    readThere: () => Effect.map(Ref.get(faults), (fault) => fault.there),
+    readThere: (_environmentId, _modes, threadId) =>
+      Effect.map(Ref.get(faults), (fault) => threadReadThere(threadId, fault.there)),
     send: (_environmentId, _modes, input) =>
       Effect.gen(function* () {
         const fault = yield* Ref.get(faults);
+        yield* Ref.update(sendCalls, (all) => [...all, input]);
         if (fault.sendFailures > 0) {
           yield* Ref.update(faults, (current) => ({
             ...current,
@@ -2334,15 +2459,21 @@ const makeCloud = Effect.fnUntraced(function* () {
           }));
           return yield* failure("asleep");
         }
-        yield* Ref.update(sent, (all) =>
-          new Map(all).set(input.clientRequestId, {
-            threadId: input.threadId,
-            message: input.message,
-          }),
+        yield* Ref.update(delivered, (all) =>
+          all.has(input.clientRequestId)
+            ? all
+            : new Map(all).set(input.clientRequestId, {
+                threadId: input.threadId,
+                message: input.message,
+              }),
         );
-        yield* fault.onSend;
-        yield* Ref.update(faults, (current) => ({ ...current, onSend: Effect.void }));
+        yield* once("onSend");
       }),
+    remoteHead: () =>
+      Effect.andThen(
+        once("onRemoteHead"),
+        Effect.map(Ref.get(faults), (fault) => fault.remoteHead),
+      ),
   };
   const threads = yield* ThreadManagementService.ThreadManagementService;
   // Cancels fail while asked to, as a lost write would.
@@ -2376,7 +2507,10 @@ const makeCloud = Effect.fnUntraced(function* () {
     attempts: Ref.get(attempts),
     /** Threads the launches made there, by request ID. */
     launched: Ref.get(launched),
-    sent: Effect.map(Ref.get(sent), (all) => [...all.values()]),
+    /** The messages there: a send repeated with its key is replayed, not added. */
+    sent: Effect.map(Ref.get(delivered), (all) => [...all.values()]),
+    /** Every send, including repeats and failed ones. */
+    sendCalls: Ref.get(sendCalls),
     fault: (change: (current: CloudFaults) => CloudFaults) => Ref.update(faults, change),
     restart: start,
   };
@@ -2592,39 +2726,47 @@ it.effect(
 );
 
 it.effect(
-  "O4: a launch that keeps failing is sent again with the same key, then given up, and the thread waits here",
+  "O4: a launch the link never answers stays pending with its key, and only a refusal ends it",
   () =>
     Effect.gen(function* () {
       const governor = yield* makeGovernor;
       const cloud = yield* makeCloud();
-      yield* cloud.fault((current) => ({ ...current, refuseLaunches: true }));
+      yield* cloud.fault((current) => ({ ...current, refuseLaunches: "orchestration_error" }));
       yield* overflowTo({ moveAfterMs: 0 }, { "thread:o4:asleep": ["needs:none"] });
       yield* governor.pass(yield* tight);
       const threadId = yield* heldThread("o4:asleep");
       yield* governor.pass(yield* tight);
       assert.equal(yield* phaseOf(threadId), "pending");
+
+      // Long past any retry window, it's still the same launch, and the batch is still held here.
+      yield* TestClock.adjust(TIMING.moveRetryMs * 3);
+      yield* governor.pass(yield* comfortable);
       yield* TestClock.adjust("15 seconds");
       yield* governor.pass(yield* tight);
-      const keys = (yield* cloud.attempts).map((attempt) => attempt.clientRequestId);
-      assert.lengthOf(keys, 2);
-      assert.equal(keys[0], keys[1]);
+      assert.equal(yield* phaseOf(threadId), "pending");
+      assert.deepEqual(yield* runs(threadId), ["queued:held"]);
+      const keys = new Set((yield* cloud.attempts).map((attempt) => attempt.clientRequestId));
+      assert.equal(keys.size, 1);
+      assert.lengthOf(yield* cloud.attempts, 3);
 
-      yield* TestClock.adjust(TIMING.moveRetryMs);
+      // The machine answers that it won't take it: the batch stays here and the thread waits before trying again.
+      yield* cloud.fault((current) => ({ ...current, refuseLaunches: "model_unavailable" }));
+      yield* TestClock.adjust("15 seconds");
       yield* governor.pass(yield* tight);
       assert.isUndefined(yield* phaseOf(threadId));
       assert.deepEqual(yield* runs(threadId), ["queued:held"]);
       assert.deepEqual(yield* waitingThreads, [threadId]);
       const tried = (yield* cloud.attempts).length;
+      yield* cloud.fault((current) => ({ ...current, refuseLaunches: null }));
       yield* TestClock.adjust("15 seconds");
       yield* governor.pass(yield* tight);
       assert.lengthOf(yield* cloud.attempts, tried);
 
       // After the wait it tries again as a new move.
-      yield* cloud.fault((current) => ({ ...current, refuseLaunches: false }));
       yield* TestClock.adjust(TIMING.moveRetryMs);
       yield* governor.pass(yield* tight);
       assert.equal(yield* phaseOf(threadId), "moved");
-      assert.notEqual((yield* cloud.attempts).at(-1)!.clientRequestId, keys[0]);
+      assert.isFalse(keys.has((yield* cloud.attempts).at(-1)!.clientRequestId));
     }).pipe(Effect.provide(layerTest)),
 );
 
@@ -2669,7 +2811,7 @@ it.effect("O6: a restart at each phase carries the move on without repeating it"
     const cloud = yield* makeCloud();
     const phases = [
       ["pending", { loseLaunchReplies: 1 }],
-      ["launched", { there: { state: "starting" } as ThreadThere }],
+      ["launched", { there: runThere.queued }],
       // A cancel that failed leaves it here too, restart or not.
       ["confirmed", { cancelFailures: 1 }],
       ["moved", {}],
@@ -2687,7 +2829,7 @@ it.effect("O6: a restart at each phase carries the move on without repeating it"
       yield* governor.pass(yield* tight);
       assert.equal(yield* phaseOf(threadId), phase);
 
-      yield* cloud.fault((current) => ({ ...current, there: { state: "started" } }));
+      yield* cloud.fault((current) => ({ ...current, there: runThere.started }));
       yield* cloud.restart;
       yield* TestClock.adjust("15 seconds");
       yield* governor.pass(yield* tight);
@@ -2701,7 +2843,7 @@ it.effect("O6: a restart at each phase carries the move on without repeating it"
     }
     assert.equal((yield* cloud.launched).size, phases.length);
     // What a launch carried there is never sent again.
-    assert.deepEqual(yield* cloud.sent, []);
+    assert.deepEqual(yield* cloud.sendCalls, []);
   }).pipe(Effect.provide(layerTest)),
 );
 
@@ -2740,31 +2882,39 @@ it.effect(
     }).pipe(Effect.provide(layerTest)),
 );
 
-it.effect("O8: a thread there that fails after its launch returns leaves the batch here", () =>
-  Effect.gen(function* () {
-    const governor = yield* makeGovernor;
-    const cloud = yield* makeCloud();
-    yield* cloud.fault((current) => ({ ...current, there: { state: "starting" } }));
-    yield* overflowTo({ moveAfterMs: 0 }, { "thread:o8:late": ["needs:none"] });
-    yield* governor.pass(yield* tight);
-    const threadId = yield* heldThread("o8:late");
-    yield* governor.pass(yield* tight);
-    assert.equal(yield* phaseOf(threadId), "launched");
+it.effect(
+  "O8: only a first run that started there confirms; queued there it waits, and a failed setup leaves the batch here",
+  () =>
+    Effect.gen(function* () {
+      const governor = yield* makeGovernor;
+      const cloud = yield* makeCloud();
+      yield* cloud.fault((current) => ({ ...current, there: null }));
+      yield* overflowTo({ moveAfterMs: 0 }, { "thread:o8:late": ["needs:none"] });
+      yield* governor.pass(yield* tight);
+      const threadId = yield* heldThread("o8:late");
+      yield* governor.pass(yield* tight);
+      assert.equal(yield* phaseOf(threadId), "launched");
 
-    yield* cloud.fault((current) => ({
-      ...current,
-      there: { state: "failed", reason: "its worktree wasn't set up (failed)" },
-    }));
-    yield* TestClock.adjust("15 seconds");
-    yield* governor.pass(yield* tight);
-    assert.isUndefined(yield* phaseOf(threadId));
-    assert.deepEqual(yield* runs(threadId), ["queued:held"]);
-    assert.deepEqual(yield* waitingThreads, [threadId]);
+      // Queued there with its worktree ready, as that machine's own Pause all leaves it: not started.
+      for (const there of [runThere.preparing, runThere.queued]) {
+        yield* cloud.fault((current) => ({ ...current, there }));
+        yield* TestClock.adjust("15 seconds");
+        yield* governor.pass(yield* tight);
+        assert.equal(yield* phaseOf(threadId), "launched");
+        assert.deepEqual(yield* runs(threadId), ["queued:held"]);
+      }
 
-    // Memory back: it's released here like any other held thread.
-    yield* governor.pass(yield* comfortable);
-    assert.deepEqual(yield* runs(threadId), ["starting"]);
-  }).pipe(Effect.provide(layerTest)),
+      yield* cloud.fault((current) => ({ ...current, there: runThere.setupFailed }));
+      yield* TestClock.adjust("15 seconds");
+      yield* governor.pass(yield* tight);
+      assert.isUndefined(yield* phaseOf(threadId));
+      assert.deepEqual(yield* runs(threadId), ["queued:held"]);
+      assert.deepEqual(yield* waitingThreads, [threadId]);
+
+      // Memory back: it's released here like any other held thread.
+      yield* governor.pass(yield* comfortable);
+      assert.deepEqual(yield* runs(threadId), ["starting"]);
+    }).pipe(Effect.provide(layerTest)),
 );
 
 it.effect(
@@ -2786,11 +2936,17 @@ it.effect(
       assert.deepEqual(yield* cloud.sent, []);
 
       const onSend = yield* later(send(threadId, "three", agent));
-      yield* cloud.fault((current) => ({ ...current, cancelFailures: 1, onSend }));
+      yield* cloud.fault((current) => ({ ...current, onSend }));
       yield* governor.pass(yield* tight);
       assert.deepEqual(
         (yield* cloud.sent).map((sent) => sent.message),
-        ["one"],
+        ["one", "two"],
+      );
+      yield* cloud.fault((current) => ({ ...current, cancelFailures: 1 }));
+      yield* governor.pass(yield* tight);
+      assert.deepEqual(
+        (yield* cloud.sent).map((sent) => sent.message),
+        ["one", "two"],
       );
       yield* governor.pass(yield* tight);
       assert.deepEqual(
@@ -2801,5 +2957,257 @@ it.effect(
         (yield* runs(threadId)).filter((run) => run !== "cancelled:held"),
         [],
       );
+      // A restart in between sends nothing twice.
+      yield* cloud.restart;
+      yield* governor.pass(yield* tight);
+      assert.lengthOf(yield* cloud.sent, 3);
     }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect(
+  "O10: a Resume while the batch is claimed is held, and one that started a run first stops the move",
+  () =>
+    Effect.gen(function* () {
+      const governor = yield* makeGovernor;
+      const cloud = yield* makeCloud();
+      yield* overflowTo(
+        { moveAfterMs: 0 },
+        { "thread:o10:claimed": ["needs:none"], "thread:o10:started": ["needs:none"] },
+      );
+      yield* governor.pass(yield* tight);
+
+      // Claimed: the Resume is held, and what it would have started goes there.
+      const claimed = yield* heldThread("o10:claimed");
+      const onRemoteHead = yield* later(resume(claimed, "claiming"));
+      yield* cloud.fault((current) => ({ ...current, onRemoteHead }));
+      yield* governor.pass(yield* tight);
+      assert.equal(yield* phaseOf(claimed), "moved");
+      assert.deepEqual(yield* runs(claimed), ["cancelled:held", "cancelled:held"]);
+      assert.include((yield* cloud.attempts)[0]!.message, "work");
+
+      // Resumed before the claim: it runs here, so it doesn't move.
+      const started = yield* heldThread("o10:started");
+      const onGitStatus = yield* later(resume(started, "before-claim"));
+      yield* cloud.fault((current) => ({ ...current, onGitStatus }));
+      yield* TestClock.adjust("15 seconds");
+      yield* governor.pass(yield* tight);
+      assert.lengthOf(yield* cloud.attempts, 1);
+      assert.isUndefined(yield* phaseOf(started));
+      assert.deepEqual(yield* runs(started), ["starting"]);
+      const limits = yield* ResourceLimits.ResourceLimits;
+      assert.isFalse((yield* limits.read).moved.has(started));
+    }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("O11: Pause all switched on during a move's reads stops it before it launches", () =>
+  Effect.gen(function* () {
+    const governor = yield* makeGovernor;
+    const cloud = yield* makeCloud();
+    yield* overflowTo({ moveAfterMs: 0 }, { "thread:o11:paused": ["needs:none"] });
+    yield* governor.pass(yield* tight);
+    const threadId = yield* heldThread("o11:paused");
+    const onProjects = yield* later(writePause("finish"));
+    yield* cloud.fault((current) => ({ ...current, onProjects }));
+    yield* governor.pass(yield* tight);
+    assert.lengthOf(yield* cloud.attempts, 0);
+    assert.isUndefined(yield* phaseOf(threadId));
+    const limits = yield* ResourceLimits.ResourceLimits;
+    assert.isFalse((yield* limits.read).moved.has(threadId));
+    assert.deepEqual(yield* runs(threadId), ["queued:held"]);
+
+    yield* removePause;
+    yield* TestClock.adjust("15 seconds");
+    yield* governor.pass(yield* tight);
+    assert.equal(yield* phaseOf(threadId), "moved");
+  }).pipe(Effect.provide(layerTest)),
+);
+
+/** Edits the thread's last run, as Alice edits a queued message. */
+const editLast = (threadId: ThreadId, text: string) =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const run = (yield* orchestrator.getThreadProjection(threadId)).runs.findLast(
+      (candidate) => !candidate.userMessageId.startsWith("limits:"),
+    )!;
+    yield* orchestrator.dispatch({
+      type: "queued-run.edit",
+      commandId: CommandId.make(`edit:${run.id}:${text}`),
+      threadId,
+      runId: run.id,
+      text,
+    });
+  });
+
+it.effect(
+  "O12: a batch message edited during the move, and a forwarded one, arrive as they read",
+  () =>
+    Effect.gen(function* () {
+      const governor = yield* makeGovernor;
+      const cloud = yield* makeCloud();
+      yield* cloud.fault((current) => ({ ...current, there: runThere.queued }));
+      yield* overflowTo({ moveAfterMs: 0 }, { "thread:o12:edited": ["needs:none"] });
+      yield* governor.pass(yield* tight);
+      const threadId = yield* heldThread("o12:edited", "fix the bug");
+      yield* governor.pass(yield* tight);
+      assert.equal(yield* phaseOf(threadId), "launched");
+
+      yield* editLast(threadId, "fix the bug in parser.ts");
+      yield* cloud.fault((current) => ({ ...current, there: runThere.started }));
+      yield* governor.pass(yield* tight);
+      assert.equal(yield* phaseOf(threadId), "moved");
+      const [edited] = yield* cloud.sent;
+      assert.include(edited!.message, "was edited on");
+      assert.include(edited!.message, "fix the bug in parser.ts");
+
+      // Cancelled before it's read, so a forwarded message goes as it reads then, and can't change after.
+      yield* send(threadId, "then the tests", agent);
+      yield* editLast(threadId, "then the parser tests");
+      yield* cloud.fault((current) => ({ ...current, sendFailures: 1 }));
+      yield* governor.pass(yield* tight);
+      yield* Effect.flip(editLast(threadId, "too late"));
+      yield* governor.pass(yield* tight);
+      assert.deepEqual((yield* cloud.sent).map((sent) => sent.message).slice(1), [
+        "then the parser tests",
+      ]);
+      assert.deepEqual(
+        [...new Set((yield* cloud.sendCalls).slice(1).map((sent) => sent.message))],
+        ["then the parser tests"],
+      );
+    }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("O13: a branch rewound or gone on its remote doesn't move", () =>
+  Effect.gen(function* () {
+    const governor = yield* makeGovernor;
+    const cloud = yield* makeCloud();
+    yield* overflowTo({ moveAfterMs: 0 }, { "thread:o13:rewound": ["needs:none"] });
+    yield* governor.pass(yield* tight);
+    const threadId = yield* heldThread("o13:rewound");
+    for (const remoteHead of [
+      { remoteHead: "def456", containsHead: false },
+      { remoteHead: null, containsHead: null },
+      { remoteHead: "fed789", containsHead: null },
+    ]) {
+      yield* cloud.fault((current) => ({ ...current, remoteHead }));
+      yield* TestClock.adjust(TIMING.moveRetryMs);
+      yield* governor.pass(yield* tight);
+      assert.lengthOf(yield* cloud.attempts, 0);
+      assert.isUndefined(yield* phaseOf(threadId));
+      assert.deepEqual(yield* runs(threadId), ["queued:held"]);
+    }
+
+    // Pushed to since, with this commit in it: it moves.
+    yield* cloud.fault((current) => ({
+      ...current,
+      remoteHead: { remoteHead: "0a1b2c", containsHead: true },
+    }));
+    yield* TestClock.adjust(TIMING.moveRetryMs);
+    yield* governor.pass(yield* tight);
+    assert.equal(yield* phaseOf(threadId), "moved");
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("O14: a later move of a thread whose setup failed there gets a branch of its own", () =>
+  Effect.gen(function* () {
+    const governor = yield* makeGovernor;
+    const cloud = yield* makeCloud();
+    yield* cloud.fault((current) => ({ ...current, there: runThere.setupFailed }));
+    yield* overflowTo({ moveAfterMs: 0 }, { "thread:o14:retried": ["needs:none"] });
+    yield* governor.pass(yield* tight);
+    const threadId = yield* heldThread("o14:retried");
+    yield* governor.pass(yield* tight);
+    assert.isUndefined(yield* phaseOf(threadId));
+
+    yield* cloud.fault((current) => ({ ...current, there: runThere.started }));
+    yield* TestClock.adjust(TIMING.moveRetryMs);
+    yield* governor.pass(yield* tight);
+    assert.equal(yield* phaseOf(threadId), "moved");
+    const branches = (yield* cloud.attempts).map((attempt) =>
+      attempt.workspaceStrategy.type === "worktree" ? attempt.workspaceStrategy.branch : null,
+    );
+    assert.lengthOf(branches, 2);
+    assert.notEqual(branches[0], branches[1]);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("O15: a launch that never answers ends with the call, and the move stays pending", () =>
+  Effect.gen(function* () {
+    const governor = yield* makeGovernor;
+    const cloud = yield* makeCloud();
+    const stalled = yield* Deferred.make<void>();
+    yield* cloud.fault((current) => ({ ...current, stallLaunches: stalled }));
+    yield* overflowTo({ moveAfterMs: 0 }, { "thread:o15:stalled": ["needs:none"] });
+    yield* governor.pass(yield* tight);
+    const threadId = yield* heldThread("o15:stalled");
+    const pass = yield* governor.pass(yield* tight).pipe(Effect.forkChild);
+    yield* Deferred.await(stalled);
+    yield* TestClock.adjust(TIMING.overflowCallMs);
+    yield* Fiber.join(pass);
+    assert.equal(yield* phaseOf(threadId), "pending");
+    assert.deepEqual(yield* runs(threadId), ["queued:held"]);
+
+    yield* cloud.fault((current) => ({ ...current, stallLaunches: null }));
+    yield* TestClock.adjust("15 seconds");
+    yield* governor.pass(yield* tight);
+    assert.equal(yield* phaseOf(threadId), "moved");
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("O16: a pass where one move lands starts no other", () =>
+  Effect.gen(function* () {
+    const governor = yield* makeGovernor;
+    const cloud = yield* makeCloud();
+    yield* cloud.fault((current) => ({ ...current, there: runThere.queued }));
+    yield* overflowTo(
+      { moveAfterMs: 0 },
+      { "thread:o16:first": ["needs:none"], "thread:o16:second": ["needs:none"] },
+    );
+    yield* governor.pass(yield* tight);
+    const first = yield* heldThread("o16:first");
+    yield* governor.pass(yield* tight);
+    const second = yield* heldThread("o16:second");
+    yield* TestClock.adjust("15 seconds");
+    yield* governor.pass(yield* tight);
+    assert.equal(yield* phaseOf(first), "launched");
+    assert.lengthOf(yield* cloud.attempts, 1);
+
+    yield* cloud.fault((current) => ({ ...current, there: runThere.started }));
+    yield* TestClock.adjust("15 seconds");
+    yield* governor.pass(yield* tight);
+    assert.equal(yield* phaseOf(first), "moved");
+    assert.lengthOf(yield* cloud.attempts, 1);
+
+    yield* TestClock.adjust("15 seconds");
+    yield* governor.pass(yield* tight);
+    assert.equal(yield* phaseOf(second), "moved");
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("O17: a thread that couldn't move still waits after a restart", () =>
+  Effect.gen(function* () {
+    const governor = yield* makeGovernor;
+    const cloud = yield* makeCloud();
+    yield* cloud.fault((current) => ({
+      ...current,
+      remoteHead: { remoteHead: "def456", containsHead: false },
+    }));
+    yield* overflowTo({ moveAfterMs: 0 }, { "thread:o17:waiting": ["needs:none"] });
+    yield* governor.pass(yield* tight);
+    const threadId = yield* heldThread("o17:waiting");
+    yield* governor.pass(yield* tight);
+    assert.isUndefined(yield* phaseOf(threadId));
+
+    yield* cloud.fault((current) => ({
+      ...current,
+      remoteHead: { remoteHead: "abc123", containsHead: true },
+    }));
+    yield* cloud.restart;
+    yield* TestClock.adjust("15 seconds");
+    yield* governor.pass(yield* tight);
+    assert.lengthOf(yield* cloud.attempts, 0);
+
+    yield* TestClock.adjust(TIMING.moveRetryMs);
+    yield* governor.pass(yield* tight);
+    assert.equal(yield* phaseOf(threadId), "moved");
+  }).pipe(Effect.provide(layerTest)),
 );

@@ -51,6 +51,8 @@ export const TIMING = {
   orphanWatchMs: 14_000,
   // A thread that couldn't move, or failed to, isn't looked at again for this long.
   moveRetryMs: 30 * 60_000,
+  // A call to the linked machine runs inside the pass, so it ends well before a stalled pass makes readings stale.
+  overflowCallMs: 20_000,
 } as const;
 
 // CPU has no release line of its own; it releases this many points under the pause line.
@@ -801,13 +803,40 @@ export function movePlan(
 
 /**
  * The branch a moved thread checks out there. It never reuses a name, since `git branch` refuses one that exists and
- * `git worktree add` one checked out elsewhere; the thread pushes to `remoteBranch` by name.
+ * `git worktree add` one checked out elsewhere, and a failed setup can leave one behind; `at` is when the move started,
+ * so a retry of the same launch keeps it and a later move gets another. The thread pushes to `remoteBranch` by name.
  */
-export const movedBranchName = (remoteBranch: string, threadId: string) =>
+export const movedBranchName = (remoteBranch: string, threadId: string, at: number) =>
   `t3-moved/${remoteBranch}-${threadId
     .replace(/[^A-Za-z0-9]/g, "")
     .slice(-6)
-    .toLowerCase()}`;
+    .toLowerCase()}-${at.toString(36)}`;
+
+/**
+ * Why the branch on its remote doesn't hold the checkout's commit, or null when it does: the remote's head is that
+ * commit or a descendant of it. A rewind or force-push there would start the thread there without this work.
+ */
+export function remoteHeadBlocker(input: {
+  readonly head: string;
+  /** What `git ls-remote` reported, or null when the branch isn't there. */
+  readonly remoteHead: string | null;
+  /** Whether the remote's head contains `head`; null when this machine doesn't have that commit to check. */
+  readonly containsHead: boolean | null;
+}): string | null {
+  if (input.remoteHead === null) return "its branch is gone from the remote";
+  if (input.remoteHead === input.head) return null;
+  if (input.containsHead === null)
+    return "its branch moved on the remote to a commit this machine doesn't have";
+  return input.containsHead ? null : "its branch on the remote no longer has its commit";
+}
+
+/**
+ * Whether the linked machine refused a launch outright, so it never took it. A launch it already took is replayed by
+ * its key before the checks that refuse, so a refusal means none of the attempts was taken. Transport failures,
+ * timeouts and link problems (`orchestration_error`, `capability_denied`) say nothing about an earlier attempt.
+ */
+export const isDefiniteRefusal = (failure: { readonly code: string }) =>
+  failure.code !== "orchestration_error" && failure.code !== "capability_denied";
 
 export const MAX_BRIEF_LENGTH = 110_000;
 
@@ -864,18 +893,26 @@ export type ThreadThere =
   | { readonly state: "failed"; readonly reason: string };
 
 /**
- * Reads the launched thread from `t3_thread_read`: started once its first run has, or waits with its worktree ready
- * behind that machine's own queue; failed when that run ended before it started, as a failed worktree setup does.
+ * Reads the launched thread from `t3_thread_read`: started only once its first run has (`startedAt`, or a status a
+ * run reaches only by starting). A run still queued there, as the machine's own Pause all leaves it, is starting;
+ * one that ended before it started, as a failed worktree setup does, failed.
  */
 export function threadThere(input: {
   readonly worktreePath: string | null;
-  readonly runCount: number;
   readonly firstRun: { readonly status: string; readonly startedAt: string | null } | null;
 }): ThreadThere {
   const first = input.firstRun;
-  if (first === null) return input.runCount > 0 ? { state: "started" } : { state: "starting" };
+  if (first === null) return { state: "starting" };
   if (first.startedAt !== null) return { state: "started" };
-  if (first.status === "failed" || first.status === "interrupted" || first.status === "cancelled") {
+  if (first.status === "running" || first.status === "waiting" || first.status === "completed") {
+    return { state: "started" };
+  }
+  if (
+    first.status === "failed" ||
+    first.status === "interrupted" ||
+    first.status === "cancelled" ||
+    first.status === "rolled_back"
+  ) {
     return {
       state: "failed",
       reason:
@@ -884,7 +921,5 @@ export function threadThere(input: {
           : `its first run ${first.status} before it started`,
     };
   }
-  return input.worktreePath !== null && first.status === "queued"
-    ? { state: "started" }
-    : { state: "starting" };
+  return { state: "starting" };
 }

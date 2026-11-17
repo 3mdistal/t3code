@@ -1,4 +1,10 @@
-import { MessageId, RunId, ScheduledTaskId, ThreadId } from "@t3tools/contracts";
+import {
+  MessageId,
+  type OrchestratorMcpFailure,
+  RunId,
+  ScheduledTaskId,
+  ThreadId,
+} from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import { describe, expect, it } from "vite-plus/test";
 
@@ -13,6 +19,7 @@ import {
   idleSessionsToClose,
   type HostReading,
   isAlicesMessage,
+  isDefiniteRefusal,
   interruptible,
   latestUserMessage,
   launchAnyway,
@@ -26,6 +33,7 @@ import {
   movedBranchName,
   movePlan,
   type MoveTarget,
+  remoteHeadBlocker,
   type ThreadThere,
   threadThere,
   upstreamOf,
@@ -906,45 +914,73 @@ describe("moving a held thread", () => {
   });
 
   it.each<[string, Parameters<typeof threadThere>[0], ThreadThere["state"]]>([
+    ["no run yet", { worktreePath: null, firstRun: null }, "starting"],
     [
       "setting up",
-      { worktreePath: null, runCount: 1, firstRun: { status: "preparing", startedAt: null } },
+      { worktreePath: null, firstRun: { status: "preparing", startedAt: null } },
       "starting",
     ],
     [
       "its worktree failed",
-      { worktreePath: null, runCount: 1, firstRun: { status: "failed", startedAt: null } },
+      { worktreePath: null, firstRun: { status: "failed", startedAt: null } },
       "failed",
     ],
+    // Held by that machine's own Pause all, or its queue: not started, so the batch stays guarded here.
     [
       "queued there with its worktree ready",
-      { worktreePath: "/w", runCount: 1, firstRun: { status: "queued", startedAt: null } },
-      "started",
+      { worktreePath: "/w", firstRun: { status: "queued", startedAt: null } },
+      "starting",
+    ],
+    [
+      "starting",
+      { worktreePath: "/w", firstRun: { status: "starting", startedAt: null } },
+      "starting",
     ],
     [
       "running",
-      {
-        worktreePath: "/w",
-        runCount: 1,
-        firstRun: { status: "running", startedAt: "2026-11-17T00:00:00Z" },
-      },
+      { worktreePath: "/w", firstRun: { status: "running", startedAt: null } },
       "started",
     ],
     [
       "failed after it started",
-      {
-        worktreePath: "/w",
-        runCount: 1,
-        firstRun: { status: "failed", startedAt: "2026-11-17T00:00:00Z" },
-      },
+      { worktreePath: "/w", firstRun: { status: "failed", startedAt: "2026-11-17T00:00:00Z" } },
       "started",
     ],
-    ["many runs on", { worktreePath: "/w", runCount: 60, firstRun: null }, "started"],
+    [
+      "finished",
+      { worktreePath: "/w", firstRun: { status: "completed", startedAt: null } },
+      "started",
+    ],
   ])("threadThere: %s", (_name, input, expected) => {
     expect(threadThere(input).state).toBe(expected);
   });
 
-  it("checks out a branch name of its own there, which a retry repeats", () => {
-    expect(movedBranchName("feature/x", "thread:3f2a-91BC77")).toBe("t3-moved/feature/x-91bc77");
+  it("checks out a branch name of its own there, which a retry of the same move repeats", () => {
+    expect(movedBranchName("feature/x", "thread:3f2a-91BC77", 36)).toBe(
+      "t3-moved/feature/x-91bc77-10",
+    );
+    expect(movedBranchName("feature/x", "thread:3f2a-91BC77", 37)).not.toBe(
+      movedBranchName("feature/x", "thread:3f2a-91BC77", 36),
+    );
+  });
+
+  it.each<[string, Parameters<typeof remoteHeadBlocker>[0], boolean]>([
+    ["the same commit", { head: "a", remoteHead: "a", containsHead: true }, true],
+    ["pushed to since", { head: "a", remoteHead: "b", containsHead: true }, true],
+    ["rewound or force-pushed", { head: "a", remoteHead: "b", containsHead: false }, false],
+    ["moved to a commit not here", { head: "a", remoteHead: "b", containsHead: null }, false],
+    ["the branch is gone", { head: "a", remoteHead: null, containsHead: null }, false],
+  ])("remoteHeadBlocker: %s", (_name, input, moves) => {
+    expect(remoteHeadBlocker(input) === null).toBe(moves);
+  });
+
+  it.each<[OrchestratorMcpFailure["code"], boolean]>([
+    ["orchestration_error", false],
+    ["capability_denied", false],
+    ["invalid_request", true],
+    ["model_unavailable", true],
+    ["provider_unavailable", true],
+  ])("isDefiniteRefusal: %s", (code, definite) => {
+    expect(isDefiniteRefusal({ code })).toBe(definite);
   });
 });
