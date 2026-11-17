@@ -688,7 +688,7 @@ Users read about it in the Account pools section of `docs/user/providers-claude.
 - Claude login end dates: `apps/server/src/provider/claudeSignIn.ts` reads `claudeAiOauth.refreshTokenExpiresAt`
   from `.credentials.json`, or on macOS from the Keychain with the `/usr/bin/security find-generic-password` call
   and names Claude Code uses, so the item Claude Code created answers without a prompt. It keeps only the date.
-  `ClaudeProvider.ts` publishes it as `auth.expiresAt` for a `claude.ai` login and reports an ended login as
+  `ClaudeProvider.ts` publishes it as `auth.expiresAt` for a first-party login Claude Code stored, and reports an ended one as
   unauthenticated, which drops it from pool routing. When failover finds no account, `run.pool-failover` emits a
   `system_notice` naming what each account waits on, instead of producing no events.
 - Upstream files it changes most:

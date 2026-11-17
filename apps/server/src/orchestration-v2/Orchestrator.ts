@@ -7306,6 +7306,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         limitedInstanceId: run.providerInstanceId,
         failure: command.failure,
         projectId: projection.thread.projectId,
+        excluded,
       });
       if (message === null) return;
       return yield* emitNotice({
