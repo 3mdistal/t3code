@@ -249,7 +249,10 @@ machine's `environmentId`. Once a thread has waited 10 minutes (`moveAfterMs`), 
 the machine isn't paused, T3 starts a new thread there with a summary of the old one
 and the messages that were waiting, on a fresh worktree of the thread's pushed branch.
 The move counts once the new thread has started there; if it can't start, the thread
-stays and waits here. While it's moving, the old thread runs nothing. Afterwards it says
+stays and waits here. While it's moving, the old thread runs nothing, and if the linked
+machine stops answering partway it keeps waiting rather than risk running twice. A
+waiting message you edit before the move finishes reaches the new thread as edited.
+Afterwards it says
 where it went, and T3 sends anything you write in it there, even while this machine is
 paused. Only top-level threads with no uncommitted or unpushed work and no
 attachments move, and a batch of waiting messages too long for one message stays. A

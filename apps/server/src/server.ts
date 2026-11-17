@@ -245,6 +245,7 @@ import * as ThreadIssueService from "./orchestration-v2/ThreadIssueService.ts";
 import * as RunFinalizationService from "./orchestration-v2/RunFinalizationService.ts";
 import * as ProjectionMaintenance from "./orchestration-v2/ProjectionMaintenance.ts";
 import * as ProjectionStoreV2 from "./orchestration-v2/ProjectionStore.ts";
+import * as ThreadCommandExecutor from "./orchestration-v2/ThreadCommandExecutor.ts"; // fork: limits, the mover claims a thread under its lock; see FORK.md.
 import { makePersistedServerRuntimeState } from "./serverRuntimeState.ts";
 import { closeNonPrivateNetworkConnections, loopbackUrlHostForAddress } from "./startupAccess.ts";
 import * as OrchestrationHttp from "./orchestration-v2/http.ts";
@@ -938,7 +939,9 @@ const layerMakeRoutes = Layer.mergeAll(
   Layer.effectDiscard(
     RemoteDelegation.RemoteDelegation.pipe(Effect.flatMap((remote) => remote.start())),
   ),
-  ResourceLimitsOverflow.layer.pipe(Layer.provide(ProjectionStoreV2.layer)), // fork: limits, held threads move to a linked machine; see FORK.md.
+  ResourceLimitsOverflow.layer.pipe(
+    Layer.provide(Layer.merge(ProjectionStoreV2.layer, ThreadCommandExecutor.layer)),
+  ), // fork: limits, held threads move to a linked machine; see FORK.md.
 ).pipe(
   Layer.provide(
     PullRequestReviewGuideService.layer.pipe(Layer.provide(PullRequestReviewGuides.layer)),
