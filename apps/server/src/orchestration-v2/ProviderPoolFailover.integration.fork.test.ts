@@ -900,7 +900,7 @@ it.live("refuses a pool whose every member the project turned off", () =>
       assert.equal(error._tag, "OrchestratorDispatchError");
       assert.equal(
         error._tag === "OrchestratorDispatchError" ? error.cause : null,
-        "No account in the Claude pool is enabled for this project.",
+        "Every account in the Claude pool is unavailable. Off for this project: Claude, Claude - Work.",
       );
     }),
   ),
