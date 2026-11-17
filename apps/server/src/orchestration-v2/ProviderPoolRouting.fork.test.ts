@@ -34,6 +34,8 @@ const member = (
   eligible: true,
   limitedUntilMs: null,
   usedPercent: null,
+  sessionUsedPercent: null,
+  weekResetsAtMs: null,
   continuationKey: `key:${instanceId}`,
   ...overrides,
 });
@@ -119,6 +121,66 @@ describe("choosePoolMember", () => {
         { type: "member", instanceId: lessUsed.instanceId, reason: "spread" },
       );
     }
+  });
+
+  it("spends the week that resets soonest first, however much of it is used", () => {
+    const soonest = { usedPercent: 79, sessionUsedPercent: 58, weekResetsAtMs: later(60) };
+    const latest = { usedPercent: 37, sessionUsedPercent: 6, weekResetsAtMs: later(6 * 24 * 60) };
+    for (const [first, second] of [
+      [a, b],
+      [b, a],
+    ] as const) {
+      assert.deepEqual(
+        choose([
+          { ...second, ...latest },
+          { ...first, ...soonest },
+        ]),
+        { type: "member", instanceId: first.instanceId, reason: "spread" },
+      );
+    }
+  });
+
+  it("holds back a week that hasn't started, or an account whose session is nearly spent", () => {
+    const started = { ...b, usedPercent: 70, weekResetsAtMs: later(48 * 60) };
+    assert.deepEqual(choose([{ ...a, usedPercent: 0 }, started]), {
+      type: "member",
+      instanceId: id("b"),
+      reason: "spread",
+    });
+    const nearlySpentSession = {
+      ...a,
+      usedPercent: 92,
+      sessionUsedPercent: 92,
+      weekResetsAtMs: later(60),
+    };
+    assert.deepEqual(choose([nearlySpentSession, started]), {
+      type: "member",
+      instanceId: id("b"),
+      reason: "spread",
+    });
+    assert.deepEqual(choose([{ ...nearlySpentSession, sessionUsedPercent: 89 }, started]), {
+      type: "member",
+      instanceId: id("a"),
+      reason: "spread",
+    });
+    assert.deepEqual(choose([{ ...a, usedPercent: 10, weekResetsAtMs: later(-1) }, started]), {
+      type: "member",
+      instanceId: id("b"),
+      reason: "spread",
+    });
+  });
+
+  it("keeps a thread on its account even when another week resets sooner", () => {
+    assert.deepEqual(
+      choose(
+        [
+          { ...a, usedPercent: 20, weekResetsAtMs: later(6 * 24 * 60) },
+          { ...b, usedPercent: 20, weekResetsAtMs: later(60) },
+        ],
+        { instanceId: "a" },
+      ),
+      { type: "member", instanceId: id("a"), reason: "affinity" },
+    );
   });
 
   it("breaks equal quota ties with rendezvous scores", () => {
@@ -516,6 +578,63 @@ describe("routeModelSelection", () => {
       ],
       { instanceId: "claudeAgent" },
     );
+    assert.equal(routed.type, "routed");
+    if (routed.type === "routed") {
+      assert.deepEqual(routed.decision, {
+        type: "member",
+        instanceId: id("claudeAgent_work"),
+        reason: "spread",
+      });
+    }
+  });
+
+  it("reads the session and the week's reset from the account's own windows", () => {
+    const health = poolMemberHealth({
+      members: [
+        provider("claudeAgent", {
+          usageLimits: {
+            ...usage(["five_hour", 58, later(30)], ["seven_day", 79, later(60)]),
+            credentialFingerprint: "fp",
+          },
+        }),
+        provider("claudeAgent_same", {
+          usageLimits: { ...usage(["seven_day", 79, later(60)]), credentialFingerprint: "fp" },
+        }),
+        provider("claudeAgent_work", {
+          usageLimits: usage(
+            ["seven_day", 37, later(6 * 24 * 60)],
+            ["seven_day_fable", 10, later(30)],
+          ),
+        }),
+        provider("claudeAgent_fresh", { usageLimits: usage(["seven_day", 0, null]) }),
+        provider("claudeAgent_stale", { usageLimits: usage(["seven_day", 50, later(-5)]) }),
+      ],
+      settings,
+      projectId,
+      nowMs,
+    });
+    assert.deepEqual(
+      health.map((entry) => [entry.sessionUsedPercent, entry.weekResetsAtMs]),
+      [
+        [58, later(60)],
+        [58, later(60)],
+        [null, later(6 * 24 * 60)],
+        [null, null],
+        [null, null],
+      ],
+    );
+  });
+
+  it("starts a new thread on the account whose week resets soonest", () => {
+    const routed = route("pool_claudeAgent", [
+      stamped("claudeAgent", {
+        usageLimits: usage(["five_hour", 6, later(240)], ["seven_day", 37, later(6 * 24 * 60)]),
+      }),
+      stamped("claudeAgent_work", {
+        usageLimits: usage(["five_hour", 58, later(20)], ["seven_day", 79, later(50)]),
+      }),
+      pool,
+    ]);
     assert.equal(routed.type, "routed");
     if (routed.type === "routed") {
       assert.deepEqual(routed.decision, {
