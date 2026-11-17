@@ -980,6 +980,11 @@ describe("moving a held thread", () => {
     ["invalid_request", true],
     ["model_unavailable", true],
     ["provider_unavailable", true],
+    ["target_required", true],
+    ["runtime_mode_escalation_denied", true],
+    ["thread_credential_required", false],
+    ["thread_not_found", false],
+    ["task_not_found", false],
   ])("isDefiniteRefusal: %s", (code, definite) => {
     expect(isDefiniteRefusal({ code })).toBe(definite);
   });

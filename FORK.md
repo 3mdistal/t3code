@@ -952,8 +952,9 @@ Memory and CPU limits section of `docs/user/remote-access.md`.
     like any other. A `pending` move is never given up while the answer is unknown: a transport failure or timeout
     may hide a launch the target took, so it's sent again each pass, logged as
     `resource-limits.move-launch-waiting`, for as long as that takes. Only a refusal from the target itself
-    (`isDefiniteRefusal`: any code but `orchestration_error` and `capability_denied`) ends it, leaving the batch held
-    here; the target replays a key it already took before the checks that refuse, so a refusal means it took none.
+    (`isDefiniteRefusal`: only the codes a launch's own checks refuse with, such as `invalid_request` or
+    `model_unavailable`; any other code, including one added later, counts as no answer) ends it, leaving the batch
+    held here; the target replays a key it already took before the checks that refuse, so a refusal means it took none.
     A link removed here counts as no answer, not a refusal.
   - `launched`: the thread there exists. Its worktree is prepared after the launch returns, so each pass reads it
     with `t3_thread_read` (`threadThere` in `policy.ts`) until its first run (ordinal 1) has started: a `startedAt`,
