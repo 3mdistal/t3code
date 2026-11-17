@@ -13,6 +13,7 @@ import {
   type ProviderDriverKind,
   type ProviderInstanceId,
   type ServerProvider,
+  type ServerProviderUsageWindow,
   type ServerSettings,
   type ServerSettingsPatch,
   type ThreadId,
@@ -27,6 +28,10 @@ export interface PoolMemberHealth {
   /** Shared with every member on the same credential fingerprint or login email: one login is one quota. */
   readonly limitedUntilMs: number | null;
   readonly usedPercent: number | null;
+  /** The account's session window, which `usedPercent` folds in with the week. */
+  readonly sessionUsedPercent: number | null;
+  /** When the account's week resets; null before its week has started, or when unread. */
+  readonly weekResetsAtMs: number | null;
   readonly continuationKey: string | null;
 }
 
@@ -81,9 +86,33 @@ const isCooling = (member: PoolMemberHealth, nowMs: number): boolean =>
 const usageTier = (usedPercent: number | null): number =>
   usedPercent === null ? 1 : usedPercent >= 100 ? 2 : 0;
 
-const spreadsBefore = (member: PoolMemberHealth, best: PoolMemberHealth, threadId: ThreadId) => {
+/** Past this, a session window would move a new thread on again within the hour. */
+const SESSION_NEARLY_SPENT_PERCENT = 90;
+
+/**
+ * Whatever is left of a week is lost when it resets, so the week that resets
+ * soonest is spent first. A week that hasn't started loses nothing by waiting,
+ * and an account whose session is nearly spent waits its turn by usage.
+ */
+const weekSpentBy = (member: PoolMemberHealth, nowMs: number): number =>
+  usageTier(member.usedPercent) === 0 &&
+  (member.sessionUsedPercent ?? 0) < SESSION_NEARLY_SPENT_PERCENT &&
+  member.weekResetsAtMs !== null &&
+  member.weekResetsAtMs > nowMs
+    ? member.weekResetsAtMs
+    : Number.POSITIVE_INFINITY;
+
+const spreadsBefore = (
+  member: PoolMemberHealth,
+  best: PoolMemberHealth,
+  threadId: ThreadId,
+  nowMs: number,
+) => {
   const tier = usageTier(member.usedPercent) - usageTier(best.usedPercent);
   if (tier !== 0) return tier < 0;
+  const memberWeek = weekSpentBy(member, nowMs);
+  const bestWeek = weekSpentBy(best, nowMs);
+  if (memberWeek !== bestWeek) return memberWeek < bestWeek;
   const used = (member.usedPercent ?? 0) - (best.usedPercent ?? 0);
   if (used !== 0) return used < 0;
   return rendezvousScore(threadId, member.instanceId) > rendezvousScore(threadId, best.instanceId);
@@ -114,7 +143,9 @@ export function choosePoolMember(input: PoolRoutingInput): PoolRoutingDecision {
   }
   const spread = healthy.reduce<PoolMemberHealth | undefined>(
     (best, member) =>
-      best === undefined || spreadsBefore(member, best, input.threadId) ? member : best,
+      best === undefined || spreadsBefore(member, best, input.threadId, input.nowMs)
+        ? member
+        : best,
     undefined,
   );
   if (spread !== undefined) {
@@ -203,16 +234,27 @@ export function poolMemberHealth(input: {
       return limited === null ? spent : [...spent, limited];
     });
     const limitedUntilMs = untilMs.length === 0 ? null : Math.max(...untilMs);
-    const usedPercent = sharing
-      .flatMap(accountWindows)
-      .reduce<number | null>((highest, window) => Math.max(highest ?? 0, window.usedPercent), null);
+    const windows = sharing.flatMap(accountWindows);
+    const highestUsed = (kind?: ServerProviderUsageWindow["kind"]) =>
+      windows
+        .filter((window) => kind === undefined || window.kind === kind)
+        .reduce<number | null>(
+          (highest, window) => Math.max(highest ?? 0, window.usedPercent),
+          null,
+        );
+    const weekResets = windows.flatMap((window) => {
+      const resetsAtMs = window.resetsAt === undefined ? Number.NaN : Date.parse(window.resetsAt);
+      return window.kind === "weekly" && resetsAtMs > input.nowMs ? [resetsAtMs] : [];
+    });
     return {
       instanceId: member.instanceId,
       eligible:
         isMemberHealthy(member) &&
         resolveProjectProviderInstanceEnabled(input.settings, input.projectId, member.instanceId),
       limitedUntilMs,
-      usedPercent,
+      usedPercent: highestUsed(),
+      sessionUsedPercent: highestUsed("session"),
+      weekResetsAtMs: weekResets.length === 0 ? null : Math.min(...weekResets),
       continuationKey: member.continuation?.groupKey ?? null,
     };
   });
