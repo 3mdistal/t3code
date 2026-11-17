@@ -1,12 +1,36 @@
 // fork: limits. Per-machine memory and CPU limits; see FORK.md.
 import * as Schema from "effect/Schema";
 
-import { NonNegativeInt } from "./baseSchemas.ts";
+import { EnvironmentId, NonNegativeInt } from "./baseSchemas.ts";
+import { ModelSelection } from "./modelSelection.ts";
 
 const GiB = Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: 16_384 }));
 const Percent = Schema.Number.check(Schema.isBetween({ minimum: 1, maximum: 100 }));
 
 export const USE_PERCENT = { minimum: 50, maximum: 90, default: 80 } as const;
+
+/** The tags-style names of what a thread may need from a machine, such as `vault` or `windows`. */
+const Capability = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(40));
+
+/**
+ * Where a thread held here continues once it has waited `moveAfterMs`: a linked machine. `provides` lists what that
+ * machine can do for a thread's `needs:<capability>` tags, and `assumeNeeds` is what a thread without any such tag
+ * is taken to need. `fallbackModel` runs a thread whose own model isn't there. `mode` defaults to "auto".
+ */
+export const ResourceLimitsOverflow = Schema.Struct({
+  environmentId: EnvironmentId,
+  mode: Schema.optionalKey(Schema.Literals(["auto", "off"])),
+  provides: Schema.optionalKey(Schema.Array(Capability)),
+  assumeNeeds: Schema.optionalKey(Schema.Array(Capability)),
+  moveAfterMs: Schema.optionalKey(NonNegativeInt),
+  fallbackModel: Schema.optionalKey(ModelSelection),
+});
+export type ResourceLimitsOverflow = typeof ResourceLimitsOverflow.Type;
+
+export const OVERFLOW_DEFAULTS = {
+  moveAfterMs: 10 * 60 * 1000,
+  assumeNeeds: ["vault", "content", "gateway"],
+} as const;
 
 /**
  * A machine's limits, saved in its own server settings. A missing field uses
@@ -26,6 +50,7 @@ export const ResourceLimitsSettings = Schema.Struct({
   releaseAvailableGiB: Schema.optionalKey(GiB),
   criticalHeadroomGiB: Schema.optionalKey(GiB),
   pauseCpuPercent: Schema.optionalKey(Percent),
+  overflow: Schema.optionalKey(ResourceLimitsOverflow),
 });
 export type ResourceLimitsSettings = typeof ResourceLimitsSettings.Type;
 
