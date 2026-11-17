@@ -130,12 +130,37 @@ describe("choosePoolMember", () => {
       [a, b],
       [b, a],
     ] as const) {
-      assert.deepEqual(
-        choose([
+      for (const members of [
+        [
           { ...second, ...latest },
           { ...first, ...soonest },
+        ],
+        [
+          { ...first, ...soonest },
+          { ...second, ...latest },
+        ],
+      ]) {
+        assert.deepEqual(choose(members), {
+          type: "member",
+          instanceId: first.instanceId,
+          reason: "spread",
+        });
+      }
+    }
+  });
+
+  it("spreads weeks that reset together by usage", () => {
+    const together = { weekResetsAtMs: later(60) };
+    for (const [lessUsed, moreUsed] of [
+      [a, b],
+      [b, a],
+    ] as const) {
+      assert.deepEqual(
+        choose([
+          { ...moreUsed, ...together, usedPercent: 80 },
+          { ...lessUsed, ...together, usedPercent: 20 },
         ]),
-        { type: "member", instanceId: first.instanceId, reason: "spread" },
+        { type: "member", instanceId: lessUsed.instanceId, reason: "spread" },
       );
     }
   });
@@ -154,6 +179,11 @@ describe("choosePoolMember", () => {
       weekResetsAtMs: later(60),
     };
     assert.deepEqual(choose([nearlySpentSession, started]), {
+      type: "member",
+      instanceId: id("b"),
+      reason: "spread",
+    });
+    assert.deepEqual(choose([{ ...nearlySpentSession, sessionUsedPercent: 90 }, started]), {
       type: "member",
       instanceId: id("b"),
       reason: "spread",
@@ -598,7 +628,10 @@ describe("routeModelSelection", () => {
           },
         }),
         provider("claudeAgent_same", {
-          usageLimits: { ...usage(["seven_day", 79, later(60)]), credentialFingerprint: "fp" },
+          usageLimits: {
+            ...usage(["five_hour", 40, later(30)], ["seven_day", 79, later(90)]),
+            credentialFingerprint: "fp",
+          },
         }),
         provider("claudeAgent_work", {
           usageLimits: usage(

@@ -54,7 +54,7 @@ Account pools**, tick the Claude accounts to share and turn on **Pool these
 accounts**. The model picker then shows a single Claude entry in place of the
 ticked accounts. A new thread starts on the account whose week resets soonest,
 because whatever is left of a week is lost when it resets. An account whose week
-hasn't started, or whose five-hour session is over 90% used, comes after those;
+hasn't started, or whose five-hour session is 90% or more used, comes after those;
 among them, the account with the most usage left goes first. The thread stays on
 its account until that account reaches a usage limit. An account whose usage T3
 Code can't read comes after every account known to have usage left. The turn then
