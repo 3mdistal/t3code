@@ -690,7 +690,8 @@ Users read about it in the Account pools section of `docs/user/providers-claude.
   and names Claude Code uses, so the item Claude Code created answers without a prompt. It keeps only the date.
   `ClaudeProvider.ts` publishes it as `auth.expiresAt` for a first-party login Claude Code stored, and reports an ended one as
   unauthenticated, which drops it from pool routing. When failover finds no account, `run.pool-failover` emits a
-  `system_notice` naming what each account waits on, instead of producing no events.
+  `system_notice` naming what each account waits on, instead of producing no events. A new turn routed to a pool
+  with no usable account is refused with the same breakdown (`unavailablePoolNotice`).
 - Upstream files it changes most:
   - `apps/server/src/orchestration-v2/Orchestrator.ts`: every command that starts or moves a turn routes its
     model choice through `ProviderPoolDispatch.ts`, and failover is the internal `run.pool-failover` command.
