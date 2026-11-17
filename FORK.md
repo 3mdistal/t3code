@@ -780,9 +780,10 @@ also works in a side chat, whose button cites into that chat as a click does.
 
 ### Account pools (`pools:`)
 
-Two or more accounts of one provider act as one pool, so a thread that reaches a usage limit continues on the
-account with the most usage left instead of stopping. Ported from ScriptedAlchemy's fork. Users read about it in
-the Account pools section of `docs/user/providers-claude.md`.
+Two or more accounts of one provider act as one pool, so a thread that reaches a usage limit continues on another
+account instead of stopping. New threads go first to the account whose week resets soonest, since a week's unused
+allowance is lost at its reset; ScriptedAlchemy's fork, where pools were ported from, picks the least-used account.
+Users read about it in the Account pools section of `docs/user/providers-claude.md`.
 
 - Pool-only files: `packages/contracts/src/providerPool.ts`, `packages/client-runtime/src/providerPools.ts`,
   `packages/shared/src/providerInstanceDisplay.ts`, `apps/server/src/provider/providerPoolSnapshot.ts`, and
