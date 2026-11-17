@@ -832,11 +832,22 @@ export function remoteHeadBlocker(input: {
 
 /**
  * Whether the linked machine refused a launch outright, so it never took it. A launch it already took is replayed by
- * its key before the checks that refuse, so a refusal means none of the attempts was taken. Transport failures,
- * timeouts and link problems (`orchestration_error`, `capability_denied`) say nothing about an earlier attempt.
+ * its key before the checks that refuse, so a refusal means none of the attempts was taken. Only the codes a launch's
+ * own checks refuse with count. Everything else, including transport failures, timeouts, link problems
+ * (`orchestration_error`, `capability_denied`) and any code added later, says nothing about an earlier attempt, so
+ * the move keeps waiting rather than risk running the batch on both machines.
  */
+const LAUNCH_REFUSALS: ReadonlySet<string> = new Set([
+  "invalid_request",
+  "model_unavailable",
+  "provider_unavailable",
+  "target_required",
+  "runtime_mode_escalation_denied",
+  "interaction_mode_escalation_denied",
+]);
+
 export const isDefiniteRefusal = (failure: { readonly code: string }) =>
-  failure.code !== "orchestration_error" && failure.code !== "capability_denied";
+  LAUNCH_REFUSALS.has(failure.code);
 
 export const MAX_BRIEF_LENGTH = 110_000;
 
