@@ -104,6 +104,9 @@ const AGENT_CURSOR_MOVE_MS = 160;
 const AGENT_CURSOR_CLICK_LEAD_MS = 40;
 /** A dialog blocks page script, so a desktop size read gives up after this. */
 const DESKTOP_VIEWPORT_READ_TIMEOUT = "1 second";
+// fork: a tab T3 can't draw answers no capture; a viewer's opening still gives up after this, and
+// a viewer still without a frame is told why. See "A viewer of a hidden tab" in FORK.md.
+const VIEWER_FIRST_FRAME_TIMEOUT = "5 seconds";
 
 const sleepUntil = (deadline: number) =>
   new Promise<void>((resolve) => setTimeout(resolve, Math.max(0, deadline - Date.now())));
@@ -203,7 +206,9 @@ export type ServerBrowserViewerOutput =
       readonly sizeBytes: number;
     }
   | { readonly _tag: "gone" }
-  | { readonly _tag: "reconnect" };
+  | { readonly _tag: "reconnect" }
+  // fork: no frame reached the viewer in time, as on a tab T3 can't draw. See FORK.md.
+  | { readonly _tag: "unpainted" };
 
 export interface ServerBrowserViewer {
   readonly output: Queue.Dequeue<ServerBrowserViewerOutput>;
@@ -2444,6 +2449,17 @@ const make = Effect.gen(function* () {
       capacity: VIEWER_OUTPUT_LIMIT,
       strategy: "dropping",
     });
+    // fork: the opening still goes over a session of its own, detached once the still is taken or
+    // abandoned, so a capture a hidden tab never answers ends with it. See FORK.md.
+    const stillSession = yield* Effect.acquireRelease(
+      Effect.promise(() =>
+        tab.page
+          .context()
+          .newCDPSession(tab.page)
+          .catch(() => null),
+      ),
+      (still) => Effect.promise(async () => still?.detach().catch(constVoid)),
+    );
     const session = yield* Effect.acquireRelease(
       Effect.tryPromise({
         try: () => tab.page.context().newCDPSession(tab.page),
@@ -2466,6 +2482,7 @@ const make = Effect.gen(function* () {
     const recentFrames: Array<number> = [];
     let screencastParams = Promise.resolve();
     let screencastScale = 1;
+    let painted = false;
     const startScreencast = (scale: number) => {
       screencastScale = scale;
       screencastParams = screencastParams.then(async () => {
@@ -2488,6 +2505,8 @@ const make = Effect.gen(function* () {
       pressedKeys: new Map(),
       pressedButtons: new Map(),
       push: (next) => {
+        // fork: see VIEWER_FIRST_FRAME_TIMEOUT.
+        if (next._tag === "frame") painted = true;
         // Dropped frames must still release Chromium.
         if (Queue.offerUnsafe(output, next)) return;
         if (next._tag === "frame") runFork(next.ack);
@@ -2544,6 +2563,18 @@ const make = Effect.gen(function* () {
       ).catch(() => null);
       if (data) viewer.push({ _tag: "frame", data: Buffer.from(data, "base64"), ack: Effect.void });
     };
+    // fork: bounded, so a tab that can't paint holds the capture lock no longer than the limit.
+    // The detach inside the lock ends a capture left unanswered. See FORK.md.
+    const pushOpeningStill = async (still: CDPSession) => {
+      const data = await withCaptureLock(tab, () =>
+        runPromise(
+          Effect.promise(() =>
+            ServerBrowserPage.captureViewport(still, { format: "jpeg", quality }).catch(() => null),
+          ).pipe(Effect.timeoutOption(VIEWER_FIRST_FRAME_TIMEOUT), Effect.map(Option.getOrNull)),
+        ).finally(() => still.detach().catch(constVoid)),
+      ).catch(() => null);
+      if (data) viewer.push({ _tag: "frame", data: Buffer.from(data, "base64"), ack: Effect.void });
+    };
     let settleTimer: ReturnType<typeof setTimeout> | null = null;
     yield* Effect.addFinalizer(() =>
       Effect.sync(() => {
@@ -2596,10 +2627,23 @@ const make = Effect.gen(function* () {
       });
     });
     void broadcastViewport(tab).catch(constVoid);
-    yield* Effect.promise(() => startScreencast(1));
-    // An idle page does not repaint for a new screencast, so the viewer
-    // starts from a still unless a live frame beat it.
-    if (!screencastStarted) yield* Effect.promise(pushStill);
+    // fork: neither the screencast's start nor the still is awaited, so the stream opens and sends
+    // control at once on a tab that can't paint. See FORK.md.
+    void startScreencast(1).then(() => {
+      if (stillSession === null) return;
+      // An idle page does not repaint for a new screencast, so the viewer
+      // starts from a still unless a live frame beat it.
+      if (!screencastStarted) return pushOpeningStill(stillSession);
+      return stillSession.detach().catch(constVoid);
+    });
+    yield* Effect.sleep(VIEWER_FIRST_FRAME_TIMEOUT).pipe(
+      Effect.andThen(
+        Effect.sync(() => {
+          if (!painted) viewer.push({ _tag: "unpainted" });
+        }),
+      ),
+      Effect.forkScoped,
+    );
     return {
       output,
       input: (raw: unknown) =>

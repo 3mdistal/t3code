@@ -678,6 +678,84 @@ it.live("a recording whose first frame fails detaches its own session and can st
   ).pipe(Effect.provide(layer)),
 );
 
+/** fork: sessions opened from here on never answer a screenshot, as on a tab T3 can't draw. */
+const hangScreenshots = (context: ReturnType<typeof makeContext>) => {
+  const opened: Array<ReturnType<typeof makeSession>> = [];
+  const asked = Promise.withResolvers<void>();
+  const newCDPSession = context.newCDPSession;
+  context.newCDPSession = async (target) => {
+    const session = await newCDPSession(target);
+    opened.push(session);
+    const send = session.send.getMockImplementation()!;
+    session.send.mockImplementation((method, input) => {
+      if (method !== "Page.captureScreenshot") return send(method, input);
+      asked.resolve();
+      return new Promise<never>(() => {});
+    });
+    return session;
+  };
+  return { opened, asked: asked.promise };
+};
+
+// fork: a viewer of a tab that paints nothing opens at once and hears why, and the opening still
+// gives the tab's capture lock back at the limit. See "A viewer of a hidden tab" in FORK.md.
+it.effect("a viewer of a tab that paints nothing gets control at once, then the reason", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { browser, broker, tabId } = yield* ready;
+      const hung = hangScreenshots(contexts[0]!);
+
+      const viewer = yield* browser.attachViewer(viewerInput(tabId, false));
+      expect(yield* Queue.take(viewer.output)).toMatchObject({ _tag: "control" });
+      yield* Effect.promise(() => hung.asked);
+      const [still, own] = hung.opened;
+      expect(still!.send).toHaveBeenCalledWith("Page.captureScreenshot", expect.anything());
+      expect(own!.send).not.toHaveBeenCalledWith("Page.captureScreenshot", expect.anything());
+      const snapshot = yield* broker
+        .invoke<PreviewAutomationSnapshot>({ scope, tabId, operation: "snapshot", input: {} })
+        .pipe(Effect.forkScoped);
+
+      yield* TestClock.adjust("5 seconds");
+
+      yield* Fiber.join(snapshot);
+      expect(still!.detach).toHaveBeenCalled();
+      const outputs = yield* Queue.clear(viewer.output);
+      expect(outputs.filter((output) => output._tag === "unpainted")).toHaveLength(1);
+      expect(outputs.some((output) => output._tag === "frame")).toBe(false);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+// fork: a tab that paints keeps today's start, with no notice. See FORK.md.
+it.effect.each(["its still", "a screencast frame"] as const)(
+  "a viewer that gets %s first is never told the tab can't paint",
+  (first) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { browser, tabId } = yield* ready;
+        const hung = first === "a screencast frame" ? hangScreenshots(contexts[0]!) : null;
+        const sessions = contexts[0]!.sessions;
+        const viewer = yield* browser.attachViewer(viewerInput(tabId, false));
+        if (hung) {
+          yield* Effect.promise(() => hung.asked);
+          sessions.at(-1)!.emit("Page.screencastFrame", {
+            data: "ZnJhbWU=",
+            sessionId: 1,
+            metadata: { deviceWidth: 1280 },
+          });
+        }
+        const outputs = [yield* Queue.take(viewer.output)];
+        while (outputs.at(-1)!._tag !== "frame") outputs.push(yield* Queue.take(viewer.output));
+
+        yield* TestClock.adjust("5 seconds");
+
+        outputs.push(...(yield* Queue.clear(viewer.output)));
+        expect(outputs.at(-1)).toMatchObject({ _tag: "frame", data: Buffer.from("frame") });
+        expect(outputs.some((output) => output._tag === "unpainted")).toBe(false);
+      }),
+    ).pipe(Effect.provide(layer)),
+);
+
 it.live("enforces provider ownership and explicit targets when a session has multiple tabs", () =>
   Effect.scoped(
     Effect.gen(function* () {
@@ -772,7 +850,9 @@ it.live("streams to a read-only viewer without allowing takeover, input, or view
         yield* viewer.input(message);
       expect(page.setViewportSize).not.toHaveBeenCalled();
       expect(session.send.mock.calls.some(([method]) => method.startsWith("Input."))).toBe(false);
-      const outputs = yield* Queue.takeAll(viewer.output);
+      // fork: the opening still arrives after attach returns, so wait for it. See FORK.md.
+      const outputs = [yield* Queue.take(viewer.output)];
+      while (outputs.at(-1)!._tag !== "frame") outputs.push(yield* Queue.take(viewer.output));
       expect(outputs).toContainEqual(
         expect.objectContaining({ _tag: "frame", data: Buffer.from("frame") }),
       );
