@@ -372,9 +372,36 @@ describe("DesktopBrowserHost, a streamed tab in a hidden window", () => {
       }
       expect(guest.captures()).toBe(0);
 
-      // The window hides.
+      // The window hides, and 1.5 s after the last frame captures start.
+      yield* ticks(2);
+      expect(guest.captures()).toBe(0);
       yield* ticks(1);
       expect(guest.captures()).toBe(1);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("leaves alone a clock whose first tick comes after captures start", () =>
+    Effect.gen(function* () {
+      const host = yield* DesktopBrowserHost.make;
+      // The window shows, so a capture brings no frame of its own.
+      const guest = makeStreamedGuest({ still: true });
+      host.attach(key, guest.tab);
+
+      yield* command(host, 1, "Page.startScreencast");
+      yield* settle;
+      yield* ticks(1);
+      expect(guest.captures()).toBe(1);
+      // Each tick of the clock lands just after a capture, so it can pass for that capture's.
+      for (let second = 0; second < 10; second++) {
+        guest.frame();
+        yield* ticks(4);
+      }
+      expect(guest.captures()).toBe(11);
+      for (let second = 0; second < 10; second++) {
+        guest.frame();
+        yield* ticks(4);
+      }
+      expect(guest.captures()).toBe(11);
     }).pipe(Effect.scoped),
   );
 

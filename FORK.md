@@ -487,17 +487,21 @@ nothing. Electron 44 has no lasting way to keep a hidden page drawing: `incremen
 `capturePage()` holds the page visible only while it runs.
 
 So while a tab streams, the host checks it every 250 ms. A frame no capture brought (any frame after a tick without
-one, or a second frame after a tick with one) means the window draws, so the tab gets no capture for the next second,
-and a page that changes once a second, like a clock, gets none at all. Otherwise the tab gets a `capturePage()` each
-tick for 3 s after a frame or an input, a stream's start included, so a page that changes keeps drawing at about 4
-frames a second while someone uses it, and every 2 s after that. A still page gets no screencast frame from a
-capture, so it costs a copy every 2 s and no bandwidth. A tick is skipped while a screenshot or another capture runs,
+a capture, the stream's or a nudge's, or a second frame after a tick with one) means the window draws, so the tab
+gets no capture for the next 1.5 s, and a page that changes once a second, like a clock, gets none once one of its
+frames lands that way. Otherwise the tab gets a `capturePage()` each tick for 3 s after an input, a stream's start
+included, and after that each tick only while each capture brings a frame, else every 2 s. So a page that changes
+keeps drawing at about 4 frames a second while someone uses it or while it changes. A single frame after a capture
+can't hold that rate, since it may be the page's own: a clock in a window that shows, whose ticks keep landing just
+after captures, gets captures for the first 3 s and stops at the first capture that brings none. A still page gets
+no screencast frame from a capture, so it costs a copy every 2 s and no bandwidth. When a page that drew on its own
+stops, as when the window hides, the 3 s start over. A tick is skipped while a screenshot or another capture runs,
 and a screenshot waits for the stream's capture as it does for a nudge. A capture took 10 to 25 ms on the PC, so one
 is in flight about 4% of the time at the fastest rate.
 
 - `apps/desktop/src/preview/DesktopBrowserHost.ts`: `pumpFrames`, started by each screencast the relay starts;
-  `captureFrame`, shared with `nudgeCapture`, and its `nudgeCaptures` and `capturesRunning` by guest; the `frames`
-  and `inputs` counts.
+  `captureFrame`, shared with `nudgeCapture`, and its `nudgeCaptures` and `capturesRunning` by guest; the `frames`,
+  `inputs` and `captures` counts.
 - Test: `apps/desktop/src/preview/DesktopBrowserHost.fork.test.ts`, "a streamed tab in a hidden window".
 
 ### Links that open one thread (`fork:`)
