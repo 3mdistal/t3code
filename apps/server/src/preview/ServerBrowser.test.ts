@@ -1353,6 +1353,105 @@ it.effect("recordings ack screencast frames without waiting for the encoder to d
   ).pipe(Effect.provide(layer)),
 );
 
+/** fork: holds every viewer still, as on a tab T3 can't draw, until `release`. */
+const holdStills = Effect.gen(function* () {
+  const asked = Promise.withResolvers<void>();
+  const released = Promise.withResolvers<void>();
+  heldStill = () => {
+    asked.resolve();
+    return released.promise;
+  };
+  const release = () => {
+    heldStill = null;
+    released.resolve();
+  };
+  yield* Effect.addFinalizer(() => Effect.sync(release));
+  return { asked: asked.promise, release };
+});
+
+// fork: a viewer of a desktop tab that draws nothing hears why, once. See "A viewer of a hidden
+// tab" in FORK.md.
+it.effect("a viewer of a desktop tab that draws nothing is told why once", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const held = yield* holdStills;
+      const { viewer } = yield* openDesktopViewer;
+      yield* Effect.promise(() => held.asked);
+
+      yield* TestClock.adjust("5 seconds");
+
+      const outputs = yield* Queue.clear(viewer.output);
+      expect(outputs.filter((output) => output._tag === "unpainted")).toHaveLength(1);
+      expect(outputs.some((output) => output._tag === "frame")).toBe(false);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+// fork: the server's own Chromium doesn't draw with T3's window, so its viewers get upstream's
+// notice from the client instead. See FORK.md.
+it.effect("a viewer of a server tab that draws nothing gets no hidden-window notice", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { browser, tabId } = yield* ready;
+      const held = yield* holdStills;
+      const viewer = yield* browser.attachViewer(viewerInput(tabId, false));
+      yield* Effect.promise(() => held.asked);
+
+      yield* TestClock.adjust("5 seconds");
+
+      const outputs = yield* Queue.clear(viewer.output);
+      expect(outputs.some((output) => output._tag === "unpainted")).toBe(false);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+// fork: a desktop tab that draws keeps today's start, with no notice. See FORK.md.
+it.effect("a viewer of a desktop tab that draws is never told it can't", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { viewer } = yield* openDesktopViewer;
+      const outputs = [yield* Queue.take(viewer.output)];
+      while (outputs.at(-1)!._tag !== "frame") outputs.push(yield* Queue.take(viewer.output));
+
+      yield* TestClock.adjust("5 seconds");
+
+      outputs.push(...(yield* Queue.clear(viewer.output)));
+      expect(outputs.some((output) => output._tag === "unpainted")).toBe(false);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+// fork: an opening still that lands after a screencast frame is older than it, so the viewer
+// keeps the frame. See "A viewer of a hidden tab" in FORK.md.
+it.effect("a viewer's opening still never replaces a newer screencast frame", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { browser, broker, tabId } = yield* ready;
+      const held = yield* holdStills;
+      const viewer = yield* browser.attachViewer(viewerInput(tabId, false));
+      const live = contexts[0]!.sessions.at(-1)!;
+      yield* Effect.promise(() => held.asked);
+      // Queued behind the still's capture lock, so it ends after the still is pushed or dropped.
+      const snapshot = yield* broker
+        .invoke<PreviewAutomationSnapshot>({ scope, tabId, operation: "snapshot", input: {} })
+        .pipe(Effect.forkScoped);
+
+      live.emit("Page.screencastFrame", {
+        data: Buffer.from("live").toString("base64"),
+        sessionId: 1,
+        metadata: { deviceWidth: 1280 },
+      });
+      held.release();
+      yield* Fiber.join(snapshot);
+
+      const outputs = yield* Queue.clear(viewer.output);
+      expect(outputs.filter((output) => output._tag === "frame")).toEqual([
+        expect.objectContaining({ data: Buffer.from("live") }),
+      ]);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
 it.effect.each([{ truncated: false }, { truncated: true }])(
   "saves a large recording as a binary download and removes its staged file (truncated: $truncated)",
   ({ truncated }) =>
