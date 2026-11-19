@@ -23,6 +23,7 @@ import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -52,7 +53,7 @@ import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as Governor from "./Governor.ts";
 import * as Overflow from "./Overflow.ts";
-import { MAX_PASSES, PHASE_WRITE_MS } from "./PassRecord.ts";
+import { makePassRecord, MAX_PASSES, PHASE_WRITE_MS } from "./PassRecord.ts";
 import { GiB, type HostReading, type ProcessRow, TIMING } from "./policy.ts";
 import { ProcessTree } from "./ProcessTree.ts";
 import * as ResourceLimits from "./ResourceLimits.ts";
@@ -1081,60 +1082,120 @@ it.effect(
     }).pipe(Effect.provide(layerTest)),
 );
 
-it.effect("D4: a release whose start fails keeps its thread in line, tried once a pass", () =>
+it.effect(
+  "D4: a release whose start fails keeps its thread in line, tried once a pass, not moved",
+  () =>
+    Effect.gen(function* () {
+      const attempts = yield* Ref.make(0);
+      const failing = yield* Ref.make(true);
+      const governor = yield* makeGovernorResuming((dispatch, command) =>
+        Effect.gen(function* () {
+          yield* Ref.update(attempts, (count) => count + 1);
+          if (yield* Ref.get(failing)) return yield* Effect.die("database is locked");
+          return yield* dispatch(command);
+        }),
+      );
+      const [first, second] = ["first", "second"].map((name) =>
+        ThreadId.make(`thread:d4:${name}`),
+      ) as [ThreadId, ThreadId];
+      // Both may move, and have waited long enough to, so only the tried start keeps them here.
+      const cloud = yield* makeCloud();
+      yield* overflowTo({}, { [first]: ["needs:none"], [second]: ["needs:none"] });
+      yield* Effect.forEach([first, second], createThread);
+      yield* governor.pass(yield* tight);
+      yield* send(first, "agent work", agent);
+      yield* TestClock.adjust("1 second");
+      yield* send(second, "agent work", agent);
+      yield* TestClock.adjust("1 minute");
+
+      const logs = yield* logged(governor.pass(yield* recovered));
+      assert.include(logs, "resource-limits.dispatch-failed");
+      assert.notInclude(logs, "resource-limits.released");
+      assert.deepEqual(yield* runs(first), ["queued:held"]);
+      assert.deepEqual(yield* waitingThreads, [first, second]);
+      assert.equal(yield* Ref.get(attempts), 1);
+
+      yield* TestClock.adjust("15 seconds");
+      yield* governor.pass(yield* recovered);
+      assert.equal(yield* Ref.get(attempts), 2);
+      assert.lengthOf(yield* cloud.attempts, 0);
+      yield* Ref.set(failing, false);
+      yield* TestClock.adjust("15 seconds");
+      yield* governor.pass(yield* recovered);
+      assert.equal(yield* Ref.get(attempts), 3);
+      assert.deepEqual(yield* runs(first), ["starting"]);
+      assert.deepEqual(yield* runs(second), ["queued:held"]);
+      assert.deepEqual(yield* waitingThreads, [second]);
+
+      // No failure counted as a release, so the start that worked is still the first.
+      yield* governor.flushRecord();
+      const [failed, retried, worked] = (yield* readPasses).passes.slice(-3) as [
+        Record<string, unknown>,
+        Record<string, unknown>,
+        Record<string, unknown>,
+      ];
+      for (const entry of [failed, retried]) {
+        assert.deepInclude(entry, { waiting: 2, result: "start failed" });
+        assert.deepInclude((entry.starts as Array<object>)[0], {
+          threadId: first,
+          resume: "failed",
+        });
+      }
+      assert.deepInclude(worked, {
+        release: { due: true, why: "first release" },
+        result: "released",
+      });
+    }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("D5: a pass that starts more than the record lists keeps every failed start", () =>
   Effect.gen(function* () {
-    const attempts = yield* Ref.make(0);
-    const failing = yield* Ref.make(true);
-    const governor = yield* makeGovernorResuming((dispatch, command) =>
-      Effect.gen(function* () {
-        yield* Ref.update(attempts, (count) => count + 1);
-        if (yield* Ref.get(failing)) return yield* Effect.die("database is locked");
-        return yield* dispatch(command);
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const file = path.join(yield* fs.makeTempDirectoryScoped(), "passes.json");
+    const record = yield* makePassRecord(file);
+    const starts = Array.from({ length: 12 }, (_, index) => ({
+      threadId: ThreadId.make(`thread:d5:${index}`),
+      rank: null,
+      rankFrom: null,
+      heldMs: 1_000,
+      unsnooze: "none" as const,
+      resume: index === 11 ? ("failed" as const) : ("ok" as const),
+    }));
+    yield* record.finish(
+      yield* record.begin,
+      Exit.succeed({
+        readingAt: null,
+        headroomGiB: null,
+        availableGiB: null,
+        state: "ok",
+        acting: "ok",
+        pause: null,
+        offUntil: 1,
+        waiting: 12,
+        held: 12,
+        blocked: 0,
+        dropped: 0,
+        ready: 12,
+        moving: 0,
+        oldest: null,
+        blockedBy: [],
+        ranks: null,
+        release: { due: true, why: "switched off" },
+        starts,
+        result: "released",
       }),
     );
-    const [first, second] = ["first", "second"].map((name) =>
-      ThreadId.make(`thread:d4:${name}`),
-    ) as [ThreadId, ThreadId];
-    yield* Effect.forEach([first, second], createThread);
-    yield* governor.pass(yield* tight);
-    yield* send(first, "agent work", agent);
-    yield* TestClock.adjust("1 second");
-    yield* send(second, "agent work", agent);
-
-    const logs = yield* logged(governor.pass(yield* recovered));
-    assert.include(logs, "resource-limits.dispatch-failed");
-    assert.notInclude(logs, "resource-limits.released");
-    assert.deepEqual(yield* runs(first), ["queued:held"]);
-    assert.deepEqual(yield* waitingThreads, [first, second]);
-    assert.equal(yield* Ref.get(attempts), 1);
-
-    yield* TestClock.adjust("15 seconds");
-    yield* governor.pass(yield* recovered);
-    assert.equal(yield* Ref.get(attempts), 2);
-    yield* Ref.set(failing, false);
-    yield* TestClock.adjust("15 seconds");
-    yield* governor.pass(yield* recovered);
-    assert.equal(yield* Ref.get(attempts), 3);
-    assert.deepEqual(yield* runs(first), ["starting"]);
-    assert.deepEqual(yield* runs(second), ["queued:held"]);
-    assert.deepEqual(yield* waitingThreads, [second]);
-
-    // No failure counted as a release, so the start that worked is still the first.
-    yield* governor.flushRecord();
-    const [failed, retried, worked] = (yield* readPasses).passes.slice(-3) as [
-      Record<string, unknown>,
-      Record<string, unknown>,
-      Record<string, unknown>,
-    ];
-    for (const entry of [failed, retried]) {
-      assert.deepInclude(entry, { waiting: 2, result: "start failed" });
-      assert.deepInclude((entry.starts as Array<object>)[0], { threadId: first, resume: "failed" });
-    }
-    assert.deepInclude(worked, {
-      release: { due: true, why: "first release" },
-      result: "released",
-    });
-  }).pipe(Effect.provide(layerTest)),
+    yield* record.flush(true);
+    const [entry] = (
+      JSON.parse(yield* fs.readFileString(file)) as {
+        passes: [{ starts: Array<object>; startCount: number; failedStarts: number }];
+      }
+    ).passes;
+    assert.lengthOf(entry.starts, 10);
+    assert.deepInclude(entry.starts[0], { threadId: "thread:d5:11", resume: "failed" });
+    assert.deepInclude(entry, { startCount: 12, failedStarts: 1 });
+  }).pipe(Effect.scoped, Effect.provide(layerTest)),
 );
 
 it.effect("R4: idle sessions close on every pass over the limits, before any work waits", () =>
