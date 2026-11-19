@@ -883,9 +883,9 @@ Users read about it in the Memory and CPU limits section of `docs/user/remote-ac
   last two minutes, and the next one, grows by 2 GiB (`releaseDue`). Without a reading or a release line,
   the 90 s spacing holds. On Oct 29, 18 threads waited on the PC with 30 to 50 GB free, because new work
   joined the line faster than one every 90 s. A release whose start fails (its `queue.resume` dispatch fails)
-  isn't a release: the thread keeps its place, the spacing doesn't move, and the next pass tries the same thread
-  again, once a pass. It used to be logged as released and dropped from the list, which left its run held with
-  nothing to release it.
+  isn't a release: the thread keeps its place, the spacing doesn't move, no move to the linked machine starts that
+  pass, and the next pass tries the same thread again, once a pass. It used to be logged as released and dropped
+  from the list, which left its run held with nothing to release it.
 - An idle session stays open while one of its threads has a run preparing, starting, running or waiting, or while
   an open is attaching a thread to it. A run marks its session busy only once its turn starts, so opening, resuming
   or compacting looked idle: on Nov 9 the pass closed one session during Alice's `/compact` and another while her
@@ -1028,11 +1028,15 @@ Users read about it in the Memory and CPU limits section of `docs/user/remote-ac
       were held, blocked, dropped, ready or moving; the oldest held thread; up to 10 blocking runs, with status
       and since when; whether a release was due and why; each start with its rank, the thread that rank came
       from, how long it was held, and how its unsnooze and resume went; and a result, such as `not due`,
-      `none ready`, `released` or `start failed`. A pass that failed keeps its phase and error.
+      `none ready`, `released` or `start failed`. A pass that failed keeps its phase and error. Ranks are read
+      only to order two or more ready threads, so a lone one shows no rank and `ranks` is null. A switched-off
+      pass can start more than the 10 listed: failed starts are listed first, with `startCount` and
+      `failedStarts`.
     - Passes that decide the same thing share an entry (`count`, `lastPass`, `maxMs`), so quiet hours cost one
       line, rewritten at most once a minute while nothing else changes.
     - `current` is the pass under way. The pass notes its phase in memory just before each await that can block,
-      with the thread or session involved (inspecting, ranks, idle-session closes, dispatches, the state file). A
+      with the thread or session involved where there is one (inspecting, ranks, idle-session closes, dispatches,
+      the state file; the overflow mover's steps name none, and `moved.json` says which move is under way). A
       loop of its own writes it once that phase has lasted a second, so a stuck pass shows where and a slow disk
       can't hold up a pass. A pass the last server never finished stays as `unfinished`, with `seenAt`, when the
       file was last written.
@@ -1076,7 +1080,8 @@ Users read about it in the Memory and CPU limits section of `docs/user/remote-ac
   and `MachineLimits.logic.fork.test.ts`. `Governor.fork.test.ts` runs the real orchestrator with fake readings and a test clock.
   Its D tests cover `passes.json`: a pass's decision fields and a run of repeats as one entry (D1), the phase and
   thread a stuck await shows (D2), the 1,024-entry bound and a last server's `unfinished` pass (D3), and a failed
-  `queue.resume` keeping its thread in line, tried once a pass (D4).
+  `queue.resume` keeping its thread in line and off the linked machine, tried once a pass (D4), and failed starts
+  kept when a switched-off pass starts more than it lists (D5).
 
 ### Held threads move to a linked machine (`limits:`)
 
