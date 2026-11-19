@@ -178,6 +178,9 @@ machine has room again: 90 seconds apart, or every 15 seconds while there's room
 each new one to grow. Threads ranked in `resource-limits/priority.json` under T3's
 state folder go first, best rank first, along with work they launched; a task tracker
 can write that file. Choose **Resume** in a thread's composer to start its work now.
+To find out why held work hasn't started, read `resource-limits/passes.json` in the
+same folder: it records T3's recent checks, what was waiting, what started, and why
+nothing did.
 
 To let one thread's agents launch work anyway, send `launch anyway` in that thread.
 It counts while it's your latest message there.
