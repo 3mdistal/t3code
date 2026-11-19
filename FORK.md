@@ -1395,6 +1395,35 @@ the unanswered capture ends with it instead of staying pending on the tab's sess
 - Tests: `apps/server/src/preview/ServerBrowserPage.fork.test.ts`. In `ServerBrowser.test.ts`, upstream's encoder
   sandbox gets idle timer stubs, and a `fork:` test checks that a failed first frame detaches its session.
 
+### A viewer of a hidden tab (`fork:`)
+
+A server tab hosted in the desktop app paints only while T3's window on that computer is drawn. Viewing one from
+another device while that window was minimized or covered showed "Connecting..." on a blank canvas forever.
+`attachViewer` waited for its opening still before the stream's WebSocket upgraded, and a tab that can't paint never
+answers a screenshot, so the socket never opened and the control message queued for it was never sent. The
+unanswered capture also held the tab's capture lock, so the agent's snapshots and recordings of the tab waited too.
+
+`attachViewer` now returns once it has asked the screencast to start, so the stream opens and sends control at
+once. Chromium answers `Page.startScreencast` without waiting for a frame, but it isn't awaited either. The opening
+still follows in the background over a CDP session of its own: it waits 5 s at most under the capture lock, then
+that session is detached, which ends the server's wait and gives the lock back. Detaching doesn't cancel the
+desktop's own screenshot. A still that lands after a screencast frame is older than it and is dropped. A viewer
+that hasn't been sent a frame 5 s after it attached gets one `unpainted` message, and the web viewer says the tab
+can't draw while T3's window is minimized or covered, until a frame paints, the stream disconnects or the viewer
+stops. A PDF tab draws in its own embed, so it never shows the notice. Older clients ignore the message, and the
+mobile viewer doesn't show it yet. Keeping the tab painting while the window is hidden is a desktop matter this
+patch leaves alone.
+
+- `apps/server/src/preview/ServerBrowser.ts`: `attachViewer`, its `pushOpeningStill`, `VIEWER_FIRST_FRAME_TIMEOUT`
+  and the `unpainted` viewer output.
+- `apps/server/src/preview/ServerBrowserStream.ts` sends it as `{"type":"unpainted"}`;
+  `packages/client-runtime/src/preview/serverBrowserStream.ts` reports it as `onUnpainted`;
+  `apps/web/src/browser/ServerBrowserSurface.tsx` shows the notice.
+- Tests: in `ServerBrowser.test.ts`, `fork:` tests for a tab that paints nothing (control at once, the notice at
+  5 s, the still's session detached and a snapshot let through) and for tabs that paint (no notice); upstream's
+  read-only viewer test now waits for its still. `packages/client-runtime/src/preview/serverBrowserStream.fork.test.ts`
+  and `apps/web/src/browser/ServerBrowserSurface.fork.browser.test.tsx`.
+
 ## Versions
 
 A release is `vX.Y.Z-alice.N`. `X.Y.Z` is the upstream stable tag the stack sits on, and `N` counts the fork's
