@@ -471,7 +471,8 @@ waiting screenshot finishes with it. On the PC, a screenshot stuck this way fini
 One answered in time gets no call. The call is a second frame copy, and Chromium below 157 can crash when a guest's
 renderer exits with copies in flight (why screenshots go one at a time), so the tab's next screenshot isn't sent
 until the call settles, even when a navigation ends the first screenshot's turn early. It waits 5 s at most: Electron
-can't cancel `capturePage()`, so a call still running then overlaps the next screenshot.
+can't cancel `capturePage()`, so a call still running then overlaps the next screenshot, though no other call starts
+until it settles. The wait goes by guest, so a guest attached again after a debugger reattach still waits on the call.
 
 - `apps/desktop/src/preview/DesktopBrowserHost.ts`: `nudgeCapture` around each screenshot the relay sends to the
   guest.
@@ -485,16 +486,18 @@ screencast too, so a capture every 250 ms gave about 4 frames a second. A captur
 nothing. Electron 44 has no lasting way to keep a hidden page drawing: `incrementCapturerCount()` is gone, and
 `capturePage()` holds the page visible only while it runs.
 
-So while a tab streams, the host checks it every 250 ms. A tick that brought more than one frame means the page
-draws on its own, and gets nothing. Otherwise the tab gets a `capturePage()` each tick for 3 s after a frame or an
-input, so a page that changes keeps drawing at about 4 frames a second while someone uses it, and every 2 s after
-that. A still page gets no screencast frame from a capture, so it costs a copy every 2 s and no bandwidth. A tick is
-skipped while a screenshot or another capture runs, and a screenshot waits for the stream's capture as it does for a
-nudge, so frame copies still go one at a time. A capture took 10 to 25 ms on the PC, so one is in flight about 4% of
-the time at the fastest rate.
+So while a tab streams, the host checks it every 250 ms. A frame no capture brought (any frame after a tick without
+one, or a second frame after a tick with one) means the window draws, so the tab gets no capture for the next second,
+and a page that changes once a second, like a clock, gets none at all. Otherwise the tab gets a `capturePage()` each
+tick for 3 s after a frame or an input, a stream's start included, so a page that changes keeps drawing at about 4
+frames a second while someone uses it, and every 2 s after that. A still page gets no screencast frame from a
+capture, so it costs a copy every 2 s and no bandwidth. A tick is skipped while a screenshot or another capture runs,
+and a screenshot waits for the stream's capture as it does for a nudge. A capture took 10 to 25 ms on the PC, so one
+is in flight about 4% of the time at the fastest rate.
 
 - `apps/desktop/src/preview/DesktopBrowserHost.ts`: `pumpFrames`, started by each screencast the relay starts;
-  `captureFrame`, shared with `nudgeCapture`; the `frames` and `inputs` counts.
+  `captureFrame`, shared with `nudgeCapture`, and its `nudgeCaptures` and `capturesRunning` by guest; the `frames`
+  and `inputs` counts.
 - Test: `apps/desktop/src/preview/DesktopBrowserHost.fork.test.ts`, "a streamed tab in a hidden window".
 
 ### Links that open one thread (`fork:`)

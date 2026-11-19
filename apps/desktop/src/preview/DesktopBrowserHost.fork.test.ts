@@ -349,7 +349,7 @@ describe("DesktopBrowserHost, a streamed tab in a hidden window", () => {
     }).pipe(Effect.scoped),
   );
 
-  it.effect("leaves a tab that draws on its own alone", () =>
+  it.effect("leaves a tab that draws on its own alone, even once a second", () =>
     Effect.gen(function* () {
       const host = yield* DesktopBrowserHost.make;
       const guest = makeStreamedGuest({});
@@ -357,10 +357,15 @@ describe("DesktopBrowserHost, a streamed tab in a hidden window", () => {
 
       yield* command(host, 1, "Page.startScreencast");
       yield* settle;
-      for (let tick = 0; tick < 8; tick++) {
+      for (let tick = 0; tick < 4; tick++) {
         guest.frame();
         guest.frame();
         yield* ticks(1);
+      }
+      // A clock that ticks each second.
+      for (let second = 0; second < 4; second++) {
+        guest.frame();
+        yield* ticks(4);
       }
       expect(guest.captures()).toBe(0);
 
@@ -413,6 +418,77 @@ describe("DesktopBrowserHost, a streamed tab in a hidden window", () => {
       yield* settle;
       yield* ticks(1);
       expect(guest.captures()).toBe(2);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("starts a stream restarted within a tick at the full rate", () =>
+    Effect.gen(function* () {
+      const host = yield* DesktopBrowserHost.make;
+      const guest = makeStreamedGuest({ still: true });
+      host.attach(key, guest.tab);
+
+      yield* command(host, 1, "Page.startScreencast");
+      yield* settle;
+      yield* ticks(12);
+      expect(guest.captures()).toBe(11);
+
+      yield* command(host, 2, "Page.stopScreencast");
+      yield* command(host, 3, "Page.startScreencast");
+      yield* settle;
+      yield* ticks(2);
+      expect(guest.captures()).toBe(13);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("starts no capture while an earlier one still runs, past its 5 s", () =>
+    Effect.gen(function* () {
+      const host = yield* DesktopBrowserHost.make;
+      const guest = makeStreamedGuest({ still: true, holdCapture: true });
+      host.attach(key, guest.tab);
+
+      yield* command(host, 1, "Page.startScreencast");
+      yield* settle;
+      yield* ticks(1);
+      expect(guest.captures()).toBe(1);
+      yield* TestClock.adjust("5 seconds");
+      yield* settle;
+
+      // The screenshot no longer waits, but its nudge starts no second capture.
+      yield* command(host, 2, "Page.captureScreenshot");
+      yield* settle;
+      expect(guest.sent).toEqual([2]);
+      yield* ticks(2);
+      guest.paint();
+      yield* settle;
+      yield* ticks(1);
+      expect(guest.captures()).toBe(1);
+
+      guest.finishCapture();
+      yield* settle;
+      yield* ticks(1);
+      expect(guest.captures()).toBe(2);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("keeps a guest attached again waiting on its earlier capture", () =>
+    Effect.gen(function* () {
+      const host = yield* DesktopBrowserHost.make;
+      const guest = makeStreamedGuest({ still: true, holdCapture: true });
+      host.attach(key, guest.tab);
+
+      yield* command(host, 1, "Page.startScreencast");
+      yield* settle;
+      yield* ticks(1);
+      expect(guest.captures()).toBe(1);
+
+      host.detach(key);
+      host.attach(key, guest.tab);
+      yield* command(host, 2, "Page.captureScreenshot");
+      yield* settle;
+      expect(guest.sent).toEqual([]);
+      guest.finishCapture();
+      yield* settle;
+      expect(guest.sent).toEqual([2]);
     }).pipe(Effect.scoped),
   );
 

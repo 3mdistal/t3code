@@ -30,10 +30,11 @@ const FOCUS_IDLE = "5 seconds";
 const CAPTURE_NUDGE = "500 millis";
 const CAPTURE_NUDGE_LIMIT = "5 seconds";
 // fork: how often `pumpFrames` checks a stream; it captures each tick for 3 s after a frame or
-// an input, then every 2 s.
+// an input, then every 2 s, and none for 1 s after a frame the page drew on its own.
 const FRAME_PUMP_TICK = "250 millis";
 const FRAME_PUMP_ACTIVE_TICKS = 12;
 const FRAME_PUMP_IDLE_TICKS = 8;
+const FRAME_PUMP_DRAWING_TICKS = 4;
 
 export interface DesktopBrowserTabKey {
   readonly threadId: string;
@@ -182,32 +183,50 @@ export const make = Effect.gen(function* () {
       }
     });
 
-  /** fork: each tab's capturePage() from `nudgeCapture` or `pumpFrames` while it runs. */
-  const nudgeCaptures = new WeakMap<AttachedTab, Promise<void>>();
+  /**
+   * fork: each guest's capturePage() from `nudgeCapture` or `pumpFrames`, which its next
+   * screenshot waits on for `CAPTURE_NUDGE_LIMIT` at most. By guest, not attachment, so a
+   * guest attached again still waits on its earlier one.
+   */
+  const nudgeCaptures = new WeakMap<Electron.WebContents, Promise<void>>();
+  /** fork: guests whose capturePage() hasn't settled yet, past the limit too. */
+  const capturesRunning = new WeakSet<Electron.WebContents>();
 
-  /** fork: one capturePage(), which draws a frame; the tab's next screenshot waits on it. */
+  /**
+   * fork: one capturePage(), which draws a frame; the guest's next screenshot waits on it.
+   * Electron can't cancel one, so none starts while another still runs. Says whether it did.
+   */
   const captureFrame = (tab: AttachedTab) =>
     Effect.suspend(() => {
+      const { webContents } = tab.debuggee;
+      if (capturesRunning.has(webContents)) return Effect.succeed(false);
       let captured = () => {};
       const gate = new Promise<void>((resolve) => {
         captured = resolve;
       });
-      nudgeCaptures.set(tab, gate);
-      return Effect.tryPromise((): Promise<unknown> => tab.debuggee.webContents.capturePage()).pipe(
+      nudgeCaptures.set(webContents, gate);
+      return Effect.tryPromise((): Promise<unknown> => {
+        const capture = webContents.capturePage();
+        capturesRunning.add(webContents);
+        const settled = () => capturesRunning.delete(webContents);
+        capture.then(settled, settled);
+        return capture;
+      }).pipe(
         Effect.timeout(CAPTURE_NUDGE_LIMIT),
         Effect.ignore,
         Effect.ensuring(
           Effect.sync(() => {
-            if (nudgeCaptures.get(tab) === gate) nudgeCaptures.delete(tab);
+            if (nudgeCaptures.get(webContents) === gate) nudgeCaptures.delete(webContents);
             captured();
           }),
         ),
+        Effect.as(true),
       );
     });
 
   /**
    * fork: a window Windows counts hidden paints no frames, so a screenshot still unanswered
-   * `CAPTURE_NUDGE` after it was sent gets one capturePage(), whose frame answers it. The tab's
+   * `CAPTURE_NUDGE` after it was sent gets one capturePage(), whose frame answers it. The guest's
    * next screenshot is sent only once that call settles, up to `CAPTURE_NUDGE_LIMIT`, even past
    * a navigation, so frame copies still go one at a time. See FORK.md.
    */
@@ -216,7 +235,7 @@ export const make = Effect.gen(function* () {
     current: () => boolean,
     send: () => Promise<A>,
   ): Promise<A> => {
-    const capturing = nudgeCaptures.get(tab);
+    const capturing = nudgeCaptures.get(tab.debuggee.webContents);
     if (capturing !== undefined) {
       return capturing.then(() =>
         current()
@@ -244,11 +263,14 @@ export const make = Effect.gen(function* () {
   /**
    * fork: a stream of a tab stops while Windows counts T3's window hidden: minimized, hidden
    * or covered. Screenshots and input still work, and each capturePage() draws one frame. So
-   * while a tab streams and draws at most one frame a tick, it gets a capture each tick for a
-   * while after a frame or an input, then every 2 s. A tick is skipped while a screenshot or
-   * another capture runs, so frame copies still go one at a time. See FORK.md.
+   * while a tab streams, a frame no capture brought means the page draws on its own and needs
+   * none for a second. Otherwise it gets a capture each tick for a while after a frame or an
+   * input, then every 2 s. A tick is skipped while a screenshot or another capture runs, so
+   * frame copies still go one at a time. See FORK.md.
    */
   const pumpFrames = (tab: AttachedTab) => {
+    // A stream's start counts as an input, for a pump already running too.
+    tab.inputs += 1;
     if (tab.framePump !== null) return;
     const pump = {};
     tab.framePump = pump;
@@ -262,9 +284,13 @@ export const make = Effect.gen(function* () {
       Effect.gen(function* () {
         let frames = tab.frames;
         let inputs = tab.inputs;
-        /** Ticks since a frame or an input; a stream's start counts as one. */
+        /** Ticks since a frame or an input; the stream's start is the first input. */
         let quiet = 0;
         let idle = 0;
+        /** Whether the last tick captured, whose frame this tick may bring. */
+        let captured = false;
+        /** Ticks left that the page counts as drawing on its own. */
+        let drawing = 0;
         while (true) {
           yield* Effect.sleep(FRAME_PUMP_TICK);
           // Cleared in the same step as the check, so a stream starting next gets a new pump.
@@ -277,13 +303,17 @@ export const make = Effect.gen(function* () {
           frames = tab.frames;
           inputs = tab.inputs;
           quiet = arrived > 0 || typed ? 0 : quiet + 1;
-          // More than a capture brings: the page draws on its own.
-          if (arrived > 1) continue;
+          if (arrived > (captured ? 1 : 0)) drawing = FRAME_PUMP_DRAWING_TICKS;
+          captured = false;
+          if (drawing > 0) {
+            drawing -= 1;
+            continue;
+          }
           if (quiet < FRAME_PUMP_ACTIVE_TICKS) idle = 0;
           else if (++idle < FRAME_PUMP_IDLE_TICKS) continue;
           else idle = 0;
-          if (tab.screenshotTurn !== null || nudgeCaptures.has(tab)) continue;
-          yield* captureFrame(tab);
+          if (tab.screenshotTurn !== null || nudgeCaptures.has(tab.debuggee.webContents)) continue;
+          captured = yield* captureFrame(tab);
         }
       }).pipe(
         Effect.ensuring(
