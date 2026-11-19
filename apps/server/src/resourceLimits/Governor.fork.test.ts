@@ -26,9 +26,11 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Ref from "effect/Ref";
+import * as References from "effect/References";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
@@ -50,6 +52,7 @@ import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as Governor from "./Governor.ts";
 import * as Overflow from "./Overflow.ts";
+import { MAX_PASSES, PHASE_WRITE_MS } from "./PassRecord.ts";
 import { GiB, type HostReading, type ProcessRow, TIMING } from "./policy.ts";
 import { ProcessTree } from "./ProcessTree.ts";
 import * as ResourceLimits from "./ResourceLimits.ts";
@@ -875,6 +878,262 @@ it.effect("R6: an unreadable or day-old ranks file leaves the line oldest first"
     yield* writeRanks({ [id("c")]: 1 }, (yield* Clock.currentTimeMillis) - day);
     yield* nextRelease;
     assert.deepEqual(yield* started, [true, true, false, false]);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+/** The pass record as the governor last wrote it. */
+const readPasses = Effect.gen(function* () {
+  const config = yield* ServerConfig.ServerConfig;
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const text = yield* fs.readFileString(
+    path.join(config.stateDir, "resource-limits", "passes.json"),
+  );
+  return JSON.parse(text) as {
+    readonly server: { readonly id: string };
+    readonly current: Record<string, unknown> | null;
+    readonly passes: ReadonlyArray<Record<string, unknown>>;
+  };
+});
+
+/** Runs `effect` and returns the names of what it logged, such as `resource-limits.released`. */
+const logged = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+  Effect.gen(function* () {
+    const names: Array<string> = [];
+    const logger = Logger.make(({ message }) => {
+      const [name] = Array.isArray(message) ? message : [message];
+      if (typeof name === "string") names.push(name);
+    });
+    yield* effect.pipe(
+      Effect.provide(
+        Layer.merge(
+          Logger.layer([logger], { mergeWithExisting: false }),
+          Layer.succeed(References.MinimumLogLevel, "Info"),
+        ),
+      ),
+    );
+    return names;
+  });
+
+/** A governor whose `queue.resume` dispatches go through `resume` first. */
+const makeGovernorResuming = (
+  resume: (
+    dispatch: ThreadManagementService.ThreadManagementService["Service"]["dispatch"],
+    command: Parameters<ThreadManagementService.ThreadManagementService["Service"]["dispatch"]>[0],
+  ) => ReturnType<ThreadManagementService.ThreadManagementService["Service"]["dispatch"]>,
+) =>
+  Effect.gen(function* () {
+    const threads = yield* ThreadManagementService.ThreadManagementService;
+    return yield* makeGovernor.pipe(
+      Effect.provideService(ThreadManagementService.ThreadManagementService, {
+        ...threads,
+        dispatch: (command) =>
+          command.type === "queue.resume"
+            ? resume(threads.dispatch, command)
+            : threads.dispatch(command),
+      }),
+    );
+  });
+
+it.effect("D1: each pass records what it decided, and a run of one decision is one entry", () =>
+  Effect.gen(function* () {
+    const { governor, id, nextRelease } = yield* holdThreads("d1", withHelper, { helper: "c" });
+    yield* writeRanks({ [id("b")]: 5, [id("c")]: 2 });
+    yield* governor.pass(yield* recovered);
+    yield* nextRelease;
+    // Inside the spacing, with no room for another session to grow, twice.
+    yield* TestClock.adjust("15 seconds");
+    yield* governor.pass(yield* recovered);
+    yield* TestClock.adjust("15 seconds");
+    yield* governor.pass(yield* recovered);
+    yield* governor.flushRecord();
+
+    const { server, current, passes } = yield* readPasses;
+    assert.isNull(current);
+    const [first, second, waiting] = passes.slice(-3) as [
+      Record<string, unknown>,
+      Record<string, unknown>,
+      Record<string, unknown>,
+    ];
+    const started = (thread: string, heldMs: number) => ({
+      threadId: id(thread),
+      rank: 2,
+      rankFrom: id("c"),
+      heldMs,
+      unsnooze: "none",
+      resume: "ok",
+    });
+    assert.deepInclude(first, {
+      server: server.id,
+      state: "ok",
+      acting: "ok",
+      pause: null,
+      offUntil: null,
+      waiting: 4,
+      held: 4,
+      blocked: 0,
+      dropped: 0,
+      ready: 4,
+      ranks: 2,
+      release: { due: true, why: "first release" },
+      starts: [started("c", 2_000)],
+      result: "released",
+    });
+    assert.deepInclude(second, {
+      release: { due: true, why: "spacing passed" },
+      starts: [started("helper", TIMING.releaseSpacingMs + 16_000)],
+    });
+    assert.deepInclude(waiting, {
+      count: 2,
+      lastPass: (waiting.pass as number) + 1,
+      waiting: 2,
+      ready: 2,
+      oldest: { threadId: id("a"), heldMs: TIMING.releaseSpacingMs + 49_000 },
+      release: { due: false, why: "spacing: no room to grow" },
+      starts: [],
+      result: "not due",
+    });
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("D2: while a pass waits on an await, the record shows which, and for what thread", () =>
+  Effect.gen(function* () {
+    const reached = yield* Deferred.make<void>();
+    const gate = yield* Deferred.make<void>();
+    const governor = yield* makeGovernorResuming((dispatch, command) =>
+      Deferred.succeed(reached, undefined).pipe(
+        Effect.andThen(Deferred.await(gate)),
+        Effect.andThen(dispatch(command)),
+      ),
+    );
+    const threadId = ThreadId.make("thread:d2:stuck");
+    yield* createThread(threadId);
+    yield* governor.pass(yield* tight);
+    yield* send(threadId, "agent work", agent);
+    yield* governor.flushRecord();
+
+    const pass = yield* governor.pass(yield* recovered).pipe(Effect.forkChild);
+    yield* Deferred.await(reached);
+    // An await that ends quickly is never written.
+    yield* governor.flushRecord();
+    assert.isNull((yield* readPasses).current);
+    yield* TestClock.adjust(PHASE_WRITE_MS);
+    yield* governor.flushRecord();
+    const stuck = yield* readPasses;
+    assert.deepInclude(stuck.current, { server: stuck.server.id, phase: "resume", threadId });
+
+    yield* Deferred.succeed(gate, undefined);
+    yield* Fiber.join(pass);
+    yield* governor.flushRecord();
+    const done = yield* readPasses;
+    assert.isNull(done.current);
+    assert.deepInclude(done.passes.at(-1), { result: "released", ms: PHASE_WRITE_MS });
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect(
+  "D3: the record keeps its newest 1,024 entries, and marks the last server's stuck pass",
+  () =>
+    Effect.gen(function* () {
+      const config = yield* ServerConfig.ServerConfig;
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const threadId = ThreadId.make("thread:d3:stuck");
+      const old = "1@0";
+      const current = {
+        server: old,
+        pass: MAX_PASSES + 1,
+        startedAt: 5,
+        phase: "resume",
+        since: 6,
+        threadId,
+      };
+      const dir = path.join(config.stateDir, "resource-limits");
+      yield* fs.makeDirectory(dir, { recursive: true });
+      yield* fs.writeFileString(
+        path.join(dir, "passes.json"),
+        JSON.stringify({
+          version: 1,
+          at: 7,
+          server: { id: old },
+          current,
+          passes: Array.from({ length: MAX_PASSES }, (_, index) => ({
+            server: old,
+            pass: index + 1,
+          })),
+        }),
+      );
+
+      const governor = yield* makeGovernor;
+      yield* governor.restore;
+      yield* governor.pass(yield* comfortable);
+      yield* governor.flushRecord();
+
+      const record = yield* readPasses;
+      assert.lengthOf(record.passes, MAX_PASSES);
+      assert.deepEqual(record.passes[0], { server: old, pass: 3 });
+      assert.deepEqual(record.passes.at(-2), { ...current, result: "unfinished", seenAt: 7 });
+      assert.deepInclude(record.passes.at(-1), {
+        server: record.server.id,
+        pass: 1,
+        result: "nothing held",
+      });
+    }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("D4: a release whose start fails keeps its thread in line, tried once a pass", () =>
+  Effect.gen(function* () {
+    const attempts = yield* Ref.make(0);
+    const failing = yield* Ref.make(true);
+    const governor = yield* makeGovernorResuming((dispatch, command) =>
+      Effect.gen(function* () {
+        yield* Ref.update(attempts, (count) => count + 1);
+        if (yield* Ref.get(failing)) return yield* Effect.die("database is locked");
+        return yield* dispatch(command);
+      }),
+    );
+    const [first, second] = ["first", "second"].map((name) =>
+      ThreadId.make(`thread:d4:${name}`),
+    ) as [ThreadId, ThreadId];
+    yield* Effect.forEach([first, second], createThread);
+    yield* governor.pass(yield* tight);
+    yield* send(first, "agent work", agent);
+    yield* TestClock.adjust("1 second");
+    yield* send(second, "agent work", agent);
+
+    const logs = yield* logged(governor.pass(yield* recovered));
+    assert.include(logs, "resource-limits.dispatch-failed");
+    assert.notInclude(logs, "resource-limits.released");
+    assert.deepEqual(yield* runs(first), ["queued:held"]);
+    assert.deepEqual(yield* waitingThreads, [first, second]);
+    assert.equal(yield* Ref.get(attempts), 1);
+
+    yield* TestClock.adjust("15 seconds");
+    yield* governor.pass(yield* recovered);
+    assert.equal(yield* Ref.get(attempts), 2);
+    yield* Ref.set(failing, false);
+    yield* TestClock.adjust("15 seconds");
+    yield* governor.pass(yield* recovered);
+    assert.equal(yield* Ref.get(attempts), 3);
+    assert.deepEqual(yield* runs(first), ["starting"]);
+    assert.deepEqual(yield* runs(second), ["queued:held"]);
+    assert.deepEqual(yield* waitingThreads, [second]);
+
+    // No failure counted as a release, so the start that worked is still the first.
+    yield* governor.flushRecord();
+    const [failed, retried, worked] = (yield* readPasses).passes.slice(-3) as [
+      Record<string, unknown>,
+      Record<string, unknown>,
+      Record<string, unknown>,
+    ];
+    for (const entry of [failed, retried]) {
+      assert.deepInclude(entry, { waiting: 2, result: "start failed" });
+      assert.deepInclude((entry.starts as Array<object>)[0], { threadId: first, resume: "failed" });
+    }
+    assert.deepInclude(worked, {
+      release: { due: true, why: "first release" },
+      result: "released",
+    });
   }).pipe(Effect.provide(layerTest)),
 );
 

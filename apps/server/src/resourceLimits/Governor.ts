@@ -29,6 +29,12 @@ import * as ServerSettings from "../serverSettings.ts";
 import { HostReadings } from "./HostReadings.ts";
 import { makeJsonFiles } from "./jsonFiles.ts";
 import {
+  makePassRecord,
+  type PassDecision,
+  type PassResult,
+  type PassStart,
+} from "./PassRecord.ts";
+import {
   averageCpu,
   delegatedThreadIds,
   effectiveLimits,
@@ -109,11 +115,26 @@ interface Inspected {
   readonly queued: boolean;
   readonly held: boolean;
   readonly blocked: boolean;
+  /** The run that blocks it, when one does. */
+  readonly blocking: {
+    readonly runId: string;
+    readonly status: string;
+    readonly since: number;
+  } | null;
   /** A run is past preparing. Admission holds nothing new while one is, so no held run is still being written. */
   readonly started: boolean;
   /** Upstream snoozes a thread with a queue only when every queued message is a notification. */
   readonly snoozable: boolean;
 }
+
+interface Ranked {
+  readonly item: Inspected;
+  readonly rank: number | null;
+  /** The thread the board ranks: this one, or the nearest ranked thread above it. */
+  readonly rankFrom: ThreadId | null;
+}
+
+const unranked = (item: Inspected): Ranked => ({ item, rank: null, rankFrom: null });
 
 const STATE_VERSION = 1;
 const MAX_INTERRUPTED_RUN_IDS = 50;
@@ -153,9 +174,12 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
     inbox: path.join(dir, "inbox"),
     // The Task Priorities board's ranks, which teenylilconfig's task wake writes; see FORK.md.
     priority: path.join(dir, "priority.json"),
+    // T3's own record of each pass, which nothing else reads.
+    passes: path.join(dir, "passes.json"),
   };
 
   const { readJson, writeJson } = yield* makeJsonFiles;
+  const record = yield* makePassRecord(files.passes);
 
   const firstPassPending = yield* Ref.make(true);
   const savedWaiting = yield* Ref.make("");
@@ -536,6 +560,7 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
         queued: false,
         held: false,
         blocked: false,
+        blocking: null,
         started: false,
         snoozable: false,
       } satisfies Inspected;
@@ -564,15 +589,24 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
           ),
           Effect.orElseSucceed(() => false),
         ));
+    const working = runs.find((run) =>
+      ["preparing", "starting", "running", "waiting"].includes(run.status),
+    );
     return {
       entry,
       shell,
       closed: false,
       queued: queued.length > 0,
       held: queued.some((run) => run.queueHeld === true),
-      blocked: runs.some((run) =>
-        ["preparing", "starting", "running", "waiting"].includes(run.status),
-      ),
+      blocked: working !== undefined,
+      blocking:
+        working === undefined
+          ? null
+          : {
+              runId: working.id,
+              status: working.status,
+              since: DateTime.toEpochMillis(working.startedAt ?? working.requestedAt),
+            },
       started: runs.some((run) => ["starting", "running", "waiting"].includes(run.status)),
       snoozable,
     } satisfies Inspected;
@@ -611,13 +645,15 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
 
   // The board's best-ranked task goes first. A thread without a rank of its own, such as a task's helper or a
   // fork of its thread, takes the rank of the nearest thread above it that has one. A deleted thread ends the walk.
+  // `ranks` is how many threads the board ranks, or null when the file wasn't read.
   const byRank = Effect.fn("ResourceLimitsGovernor.byRank")(function* (
     ready: ReadonlyArray<Inspected>,
     now: number,
   ) {
-    if (ready.length < 2) return ready;
+    if (ready.length === 0) return { ranked: [], ranks: null };
+    yield* record.phase("ranks");
     const ranks = yield* readPriority(now);
-    if (ranks.size === 0) return ready;
+    if (ranks.size === 0) return { ranked: ready.map(unranked), ranks: 0 };
     // Each thread above is read once a pass, however many helpers share it.
     const shells = new Map<ThreadId, OrchestrationV2ThreadShell | null>();
     const shellOf = (threadId: ThreadId) =>
@@ -627,22 +663,25 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
             Effect.orElseSucceed(() => null),
             Effect.tap((shell) => Effect.sync(() => shells.set(threadId, shell))),
           );
-    const rankOf = new Map<ThreadId, number | null>();
+    const ranked: Array<Ranked> = [];
     for (const item of ready) {
+      yield* record.phase("ranks", { threadId: item.entry.threadId });
       let shell = item.shell;
       let rank: number | null = null;
+      let rankFrom: ThreadId | null = null;
       const seen = new Set<ThreadId>();
       for (let hop = 0; hop <= MAX_RANK_HOPS; hop++) {
         if (shell === null || shell.deletedAt !== null || seen.has(shell.id)) break;
         seen.add(shell.id);
         rank = ranks.get(shell.id) ?? null;
+        if (rank !== null) rankFrom = shell.id;
         const parent = shell.lineage.parentThreadId;
         if (rank !== null || parent == null) break;
         shell = yield* shellOf(parent);
       }
-      rankOf.set(item.entry.threadId, rank);
+      ranked.push({ item, rank, rankFrom });
     }
-    return releaseOrder(ready, (item) => rankOf.get(item.entry.threadId) ?? null);
+    return { ranked: releaseOrder(ranked, (entry) => entry.rank), ranks: ranks.size };
   });
 
   const sessionsFor = Effect.fn("ResourceLimitsGovernor.sessionsFor")(function* (
@@ -661,6 +700,7 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
         next.set(key, known);
         continue;
       }
+      yield* record.phase("sessions", { threadId: shell.id });
       const records = yield* projections
         .getThreadRecords(shell.id, ["providerThreads", "messages", "runs"], {
           messageRoles: ["user"],
@@ -737,8 +777,8 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
     onSome: (service) => service.getDescriptor.pipe(Effect.map((descriptor) => descriptor.label)),
   });
 
-  /** One pass over a reading, or over none when the sampler went quiet. */
-  const pass = Effect.fn("ResourceLimitsGovernor.pass")(function* (reading: HostReading | null) {
+  // The span is `pass`'s.
+  const passOver = Effect.fnUntraced(function* (reading: HostReading | null) {
     const now = yield* Clock.currentTimeMillis;
     const pause = yield* limits.refreshPause;
     const paused = pause !== null;
@@ -747,7 +787,7 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
       Effect.orElseSucceed(() => ({})),
     );
     const effective = effectiveLimits(saved, platform, totalBytes);
-    if (effective === null) return;
+    if (effective === null) return null;
     const switchedOffUntil = offUntil(yield* readJson(files.off), now);
     const remembered = yield* Ref.get(memory);
     const cpuWindow =
@@ -769,7 +809,9 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
     const state = liveState(next, now);
     const off = isOff(next, now);
 
+    yield* record.phase("inbox");
     const inbox = yield* listInbox;
+    yield* record.phase("runtime");
     const runtime =
       state !== "ok" || paused || previous.waiting.length > 0 || inbox.length > 0
         ? yield* runtimeShells
@@ -778,8 +820,10 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
     // Every pass while over the limits, and before admission sees the new state, so idle sessions
     // go before any work waits. Stop now closes them too, so nothing is left running.
     if ((state !== "ok" || pause?.mode === "stop") && sessions.releaseIdleSessions !== undefined) {
+      yield* record.phase("idle-sessions");
       const closed = yield* sessions.releaseIdleSessions({
         keepThreadIds: new Set(runtime.filter(waitsOnAlice).map((shell) => shell.id)),
+        onSession: (sessionId) => record.phase("idle-sessions", { sessionId }),
       });
       if (closed.length > 0) {
         yield* Effect.logInfo("resource-limits.closed-idle-sessions", { count: closed.length });
@@ -800,20 +844,20 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
 
     // Drop threads with nothing left waiting, and snooze the rest out of Alice's inbox.
     const firstPass = yield* Ref.getAndSet(firstPassPending, false);
-    const inspected = yield* Effect.forEach(current.waiting, inspect);
+    const inspected = yield* Effect.forEach(current.waiting, (entry) =>
+      Effect.andThen(record.phase("inspect", { threadId: entry.threadId }), inspect(entry)),
+    );
     const dropped = new Set<ThreadId>();
     const changed = new Map<ThreadId, WaitingThread>();
     for (const item of inspected) {
+      const { threadId } = item.entry;
       // A run started by hand ends the hold, and whatever's queued behind it is admitted when that run ends. Staying
       // on the line would let a later pass release a run that Stop held.
       if (item.shell === null || !item.queued || (item.started && !item.held)) {
         // A wake the restart dropped comes back as a note, so the thread keeps its place in the line.
-        if (
-          item.shell !== null &&
-          firstPass &&
-          (yield* requeueLostWake(item.entry.threadId, now))
-        ) {
-          continue;
+        if (item.shell !== null && firstPass) {
+          yield* record.phase("lost-wake", { threadId });
+          if (yield* requeueLostWake(threadId, now)) continue;
         }
         // Its held run may not be written yet. Dropping it now would leave that run with nothing to release it. A run
         // that has started means the write is over, and a clock set back mustn't stretch the wait, so a stamp from the
@@ -825,19 +869,23 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
         ) {
           continue;
         }
-        dropped.add(item.entry.threadId);
-        if (item.shell !== null) yield* unsnooze(item, now);
+        dropped.add(threadId);
+        if (item.shell !== null) {
+          yield* record.phase("unsnooze", { threadId });
+          yield* unsnooze(item, now);
+        }
         continue;
       }
       if (item.held && !item.blocked && item.snoozable && !waitsOnAlice(item.shell)) {
         const until = DateTime.formatIso(DateTime.makeUnsafe(now + TIMING.snoozeMs));
+        yield* record.phase("snooze", { threadId });
         const snoozed = yield* dispatch({
           type: "thread.snooze",
-          commandId: CommandId.make(`limits:snooze:${item.entry.threadId}:${item.entry.heldAt}`),
-          threadId: item.entry.threadId,
+          commandId: CommandId.make(`limits:snooze:${threadId}:${item.entry.heldAt}`),
+          threadId,
           snoozedUntil: until,
         });
-        changed.set(item.entry.threadId, {
+        changed.set(threadId, {
           ...item.entry,
           snoozeTried: true,
           snoozedUntil: snoozed ? until : null,
@@ -849,7 +897,10 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
       state !== "ok" || paused || inbox.length > 0
         ? yield* sessionsFor(runtime, paused, inbox.length > 0)
         : {};
-    if (inbox.length > 0) yield* ingestInbox(inbox, bySession, now, paused);
+    if (inbox.length > 0) {
+      yield* record.phase("inbox");
+      yield* ingestInbox(inbox, bySession, now, paused);
+    }
 
     // Critical: stop the newest running turn, one per interval, until memory is back.
     let lastInterruptAt = remembered.lastInterruptAt;
@@ -861,6 +912,7 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
       const turn = newestInterruptible(runningTurns(runtime, now), new Set(interruptedRunIds));
       if (turn !== undefined) {
         const { threadId, runId } = turn;
+        yield* record.phase("interrupt", { threadId });
         // Interrupt only; holding the queue would also stop delegated tasks.
         const interrupted = yield* dispatch({
           type: "run.interrupt",
@@ -883,29 +935,47 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
     let lastReleaseAt = remembered.lastReleaseAt;
     const growingSince = remembered.growingSince.filter((at) => now - at < TIMING.sessionGrowthMs);
     const released = new Set<ThreadId>();
-    if (
-      state === "ok" &&
-      !paused &&
-      (off || releaseDue({ now, lastReleaseAt, growingSince, reading, limits: effective }))
-    ) {
-      // A thread moving to the linked machine stays here, held, until the move lands or fails.
-      const ready = inspected.filter(
-        (item) =>
-          !dropped.has(item.entry.threadId) &&
-          item.held &&
-          !item.blocked &&
-          !current.moved.has(item.entry.threadId),
-      );
+    const held = inspected.filter((item) => !dropped.has(item.entry.threadId) && item.held);
+    // A thread moving to the linked machine stays here, held, until the move lands or fails.
+    const ready = held.filter((item) => !item.blocked && !current.moved.has(item.entry.threadId));
+    const release =
+      state !== "ok"
+        ? { due: false, why: `state ${state}` }
+        : pause !== null
+          ? { due: false, why: `pause ${pause.mode}` }
+          : off
+            ? { due: true, why: "switched off" }
+            : releaseDue({ now, lastReleaseAt, growingSince, reading, limits: effective });
+    const starts: Array<PassStart> = [];
+    let ranks: number | null = null;
+    if (release.due) {
       // Switched off, everything waiting goes at once.
-      for (const item of off ? ready : (yield* byRank(ready, now)).slice(0, 1)) {
-        yield* unsnooze({ ...item, entry: changed.get(item.entry.threadId) ?? item.entry }, now);
-        yield* dispatch({
+      const order = off ? { ranked: ready.map(unranked), ranks: null } : yield* byRank(ready, now);
+      ranks = order.ranks;
+      for (const { item, rank, rankFrom } of off ? order.ranked : order.ranked.slice(0, 1)) {
+        const { threadId } = item.entry;
+        const target = { ...item, entry: changed.get(threadId) ?? item.entry };
+        const snoozed = ourSnooze(target);
+        yield* record.phase("unsnooze", { threadId });
+        const unsnoozed = yield* unsnooze(target, now);
+        yield* record.phase("resume", { threadId });
+        const resumed = yield* dispatch({
           type: "queue.resume",
-          commandId: CommandId.make(`limits:release:${item.entry.threadId}:${now}`),
-          threadId: item.entry.threadId,
+          commandId: CommandId.make(`limits:release:${threadId}:${now}`),
+          threadId,
         });
-        yield* Effect.logInfo("resource-limits.released", { threadId: item.entry.threadId });
-        released.add(item.entry.threadId);
+        starts.push({
+          threadId,
+          rank,
+          rankFrom,
+          heldMs: now - item.entry.heldAt,
+          unsnooze: !snoozed ? "none" : unsnoozed ? "ok" : "failed",
+          resume: resumed ? "ok" : "failed",
+        });
+        // A start that failed isn't a release: the thread keeps its place, and the next pass tries it again.
+        if (!resumed) continue;
+        yield* Effect.logInfo("resource-limits.released", { threadId });
+        released.add(threadId);
         lastReleaseAt = now;
         growingSince.push(now);
       }
@@ -917,6 +987,7 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
     // and not in a pass where another launched or landed. It stays on the line, held, until its queue here empties.
     const mover = yield* limits.overflow;
     if (mover !== null) {
+      yield* record.phase("overflow");
       const stepped = yield* mover
         .advance(now, paused)
         .pipe(
@@ -925,7 +996,7 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
           ),
         );
       const { moved } = yield* limits.read;
-      const ready = inspected.filter(
+      const movable = inspected.filter(
         (item) =>
           !dropped.has(item.entry.threadId) &&
           item.shell !== null &&
@@ -933,11 +1004,15 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
           !item.blocked &&
           !moved.has(item.entry.threadId),
       );
-      if (!stepped && !paused && !off && released.size === 0 && ready.length > 0) {
-        const ranked = yield* byRank(ready, now);
+      if (!stepped && !paused && !off && released.size === 0 && movable.length > 0) {
+        const { ranked } = yield* byRank(movable, now);
+        yield* record.phase("overflow");
         yield* mover
           .move(
-            ranked.map((item) => ({ threadId: item.entry.threadId, heldAt: item.entry.heldAt })),
+            ranked.map(({ item }) => ({
+              threadId: item.entry.threadId,
+              heldAt: item.entry.heldAt,
+            })),
             now,
           )
           .pipe(
@@ -977,6 +1052,10 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
     }));
 
     const headroom = reading === null ? null : headroomGiB(reading);
+    const headroomRounded = headroom === null ? null : Math.round(headroom * 10) / 10;
+    const availableRounded =
+      reading === null ? null : Math.round((reading.availableBytes / GiB) * 10) / 10;
+    yield* record.phase("state-file");
     yield* writeJson(files.state, {
       version: STATE_VERSION,
       source: "t3",
@@ -986,8 +1065,8 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
       // Every agent stays held while paused, whatever the off switch says, and the hook follows that.
       off: off && !paused ? switchedOffUntil : null,
       pause,
-      headroomGiB: headroom === null ? null : Math.round(headroom * 10) / 10,
-      availableGiB: reading === null ? null : Math.round((reading.availableBytes / GiB) * 10) / 10,
+      headroomGiB: headroomRounded,
+      availableGiB: availableRounded,
       waiting: published.waiting,
       sessions: bySession,
       lastReleaseAt,
@@ -996,10 +1075,55 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
       interruptedRunIds,
     });
     yield* Ref.set(savedWaiting, published.waiting.map((entry) => entry.threadId).join());
+
+    const blocked = held.filter((item) => item.blocked);
+    const oldest = held.find((item) => !released.has(item.entry.threadId));
+    const result: PassResult = starts.some((start) => start.resume === "ok")
+      ? "released"
+      : starts.length > 0
+        ? "start failed"
+        : held.length === 0
+          ? "nothing held"
+          : !release.due
+            ? "not due"
+            : "none ready";
+    return {
+      readingAt: reading?.sampledAt ?? null,
+      headroomGiB: headroomRounded,
+      availableGiB: availableRounded,
+      state: next.state,
+      acting: state,
+      pause: pause?.mode ?? null,
+      offUntil: off ? switchedOffUntil : null,
+      waiting: current.waiting.length,
+      held: held.length,
+      blocked: blocked.length,
+      dropped: dropped.size,
+      ready: ready.length,
+      moving: held.filter((item) => current.moved.has(item.entry.threadId)).length,
+      oldest:
+        oldest === undefined
+          ? null
+          : { threadId: oldest.entry.threadId, heldMs: now - oldest.entry.heldAt },
+      blockedBy: blocked.flatMap((item) =>
+        item.blocking === null ? [] : [{ threadId: item.entry.threadId, ...item.blocking }],
+      ),
+      ranks,
+      release,
+      starts,
+      result,
+    } satisfies PassDecision;
+  });
+
+  /** One pass over a reading, or over none when the sampler went quiet. */
+  const pass = Effect.fn("ResourceLimitsGovernor.pass")(function* (reading: HostReading | null) {
+    const begun = yield* record.begin;
+    return yield* passOver(reading).pipe(Effect.onExit((exit) => record.finish(begun, exit)));
   });
 
   /** Picks up the waiting list and timers a restart left behind. */
   const restore = Effect.gen(function* () {
+    yield* record.load;
     const saved = (yield* readJson(files.state)) as {
       readonly version?: unknown;
       readonly waiting?: unknown;
@@ -1056,7 +1180,7 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
     }),
   );
 
-  return { pass, restore, followSettings, followPause, endOrphans };
+  return { pass, restore, followSettings, followPause, endOrphans, flushRecord: record.flush };
 });
 
 export const layer = Layer.effectDiscard(
@@ -1066,6 +1190,8 @@ export const layer = Layer.effectDiscard(
     const readings = yield* HostReadings;
     const governor = yield* make();
     yield* governor.restore;
+    // Runs after the loops below have stopped, so the record ends where the server did.
+    yield* Effect.addFinalizer(() => governor.flushRecord(true));
     yield* governor.followSettings.pipe(Effect.forkScoped);
     yield* governor.followPause.pipe(
       Effect.catchCause((cause) => Effect.logWarning("resource-limits.pause-failed", { cause })),
@@ -1075,6 +1201,13 @@ export const layer = Layer.effectDiscard(
     );
     yield* governor.endOrphans.pipe(
       Effect.catchCause((cause) => Effect.logWarning("resource-limits.orphans-failed", { cause })),
+      Effect.andThen(Effect.sleep(Duration.millis(TIMING.pauseCheckMs))),
+      Effect.forever,
+      Effect.forkScoped,
+    );
+    // Its own loop, so a pass stuck on an await still shows where.
+    yield* governor.flushRecord().pipe(
+      Effect.catchCause((cause) => Effect.logWarning("resource-limits.record-failed", { cause })),
       Effect.andThen(Effect.sleep(Duration.millis(TIMING.pauseCheckMs))),
       Effect.forever,
       Effect.forkScoped,

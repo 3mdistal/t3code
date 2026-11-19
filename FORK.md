@@ -774,7 +774,10 @@ Users read about it in the Memory and CPU limits section of `docs/user/remote-ac
   or one every pass while the reading would stay at its release lines once each session released in the
   last two minutes, and the next one, grows by 2 GiB (`releaseDue`). Without a reading or a release line,
   the 90 s spacing holds. On Oct 29, 18 threads waited on the PC with 30 to 50 GB free, because new work
-  joined the line faster than one every 90 s.
+  joined the line faster than one every 90 s. A release whose start fails (its `queue.resume` dispatch fails)
+  isn't a release: the thread keeps its place, the spacing doesn't move, and the next pass tries the same thread
+  again, once a pass. It used to be logged as released and dropped from the list, which left its run held with
+  nothing to release it.
 - An idle session stays open while one of its threads has a run preparing, starting, running or waiting, or while
   an open is attaching a thread to it. A run marks its session busy only once its turn starts, so opening, resuming
   or compacting looked idle: on Nov 9 the pass closed one session during Alice's `/compact` and another while her
@@ -816,8 +819,9 @@ Users read about it in the Memory and CPU limits section of `docs/user/remote-ac
     `resourceLimits/OrchestratorAdmission.ts`: `dispatchMessage`, `startNextQueuedRun`, and
     `dispatchPreparedRunRelease`. Resume, Send now, and the governor's releases pass `admitted`. A run held with
     nothing to queue behind takes upstream's queue branch, which the patch lets run without an active run.
-  - `ProviderSessionManager.ts`: `releaseIdleSessions`, which picks sessions with `idleSessionsToClose`, skips one
-    whose threads have a working run, and closes the rest through upstream's `releaseEntry`. `open` sets the
+  - `ProviderSessionManager.ts`: `releaseIdleSessions`, which picks sessions with `idleSessionsToClose`, tells the
+    governor each session it looks at (`onSession`, for `passes.json`), skips one whose threads have a working
+    run, and closes the rest through upstream's `releaseEntry`. `open` sets the
     entry's `opening` while it attaches a thread to a live session, and `removeLiveEntry` keeps an entry so marked
     when releasing it as idle. Upstream dropped `lastActivityAtMs` in v0.1.4, since nothing of its
     own read it, so the patch keeps it: set when a session opens and each time its idle timer restarts, which
@@ -910,6 +914,25 @@ Users read about it in the Memory and CPU limits section of `docs/user/remote-ac
   - `priority.json`: teenylilconfig's task wake writes `{ version: 1, at, ranks }` from the board every 10 minutes,
     each ranked task's thread ID with its rank (1 is the top). One more than a day old, more than a minute
     ahead, over 1 MiB, or malformed counts as no ranks (`priorityRanks`).
+  - `passes.json`: T3's own record of its last 1,024 passes (`PassRecord.ts`), one JSON entry a line. Nothing
+    outside T3 reads it. Held work barely moved on the PC for two and a half hours on Nov 16 while T3 read memory
+    as fine, and the trace log keeps only 8 to 10 minutes, so nothing said why.
+    - Each entry has the pass's server (`pid@startedAt`), number, start, end and length; the reading's time and
+      memory; the state the readings gave and the one the pass acted on; pause and off; how many threads waited,
+      were held, blocked, dropped, ready or moving; the oldest held thread; up to 10 blocking runs, with status
+      and since when; whether a release was due and why; each start with its rank, the thread that rank came
+      from, how long it was held, and how its unsnooze and resume went; and a result, such as `not due`,
+      `none ready`, `released` or `start failed`. A pass that failed keeps its phase and error.
+    - Passes that decide the same thing share an entry (`count`, `lastPass`, `maxMs`), so quiet hours cost one
+      line, rewritten at most once a minute while nothing else changes.
+    - `current` is the pass under way. The pass notes its phase in memory just before each await that can block,
+      with the thread or session involved (inspecting, ranks, idle-session closes, dispatches, the state file). A
+      loop of its own writes it once that phase has lasted a second, so a stuck pass shows where and a slow disk
+      can't hold up a pass. A pass the last server never finished stays as `unfinished`, with `seenAt`, when the
+      file was last written.
+    - A failed write logs a warning and is tried again in full 15 s later. Every write here now removes its
+      temporary file when the rename fails, as it does on Windows onto a file another process has open; 33
+      `state.json.*.tmp` files had piled up on the PC since Nov 3.
 - Stock compatibility: holds, notices and resume notes reuse `run.updated`, `turn-item.updated` and system
   notifications. Pause all adds no event type, and stock T3 ignores `pause.json`, treating a typed order as an
   ordinary message. Stock T3 drops `resourceLimits` the next time it saves settings. The `held` fields are tool
@@ -931,6 +954,8 @@ Users read about it in the Memory and CPU limits section of `docs/user/remote-ac
   - The interrupt and the note are separate dispatches, so a child that finalizes between them could give its parent
     a false "[interrupted]". A Codex turn waiting on Alice keeps its question and may keep a background command, since
     only an interrupt ends those.
+  - A held thread whose start keeps failing is tried again every pass, and in board-rank order everything behind
+    it waits meanwhile. `passes.json` shows it as `start failed`.
   - A crash less than a second after a run is held can lose its place in the line. **Resume** still starts it. A
     refused launch whose session has already closed stays unmatched (`resource-limits.inbox-unmatched`), with no note.
   - Mobile has no Load balancing settings, so limits are edited from web or desktop. Mobile's Resume starts held
@@ -943,6 +968,9 @@ Users read about it in the Memory and CPU limits section of `docs/user/remote-ac
   `packages/client-runtime/src/load-balancing.fork.test.ts`,
   `packages/provider-core/src/server/subagentProjection.fork.test.ts`, `apps/server/src/mcp/heldRuns.fork.test.ts`,
   and `MachineLimits.logic.fork.test.ts`. `Governor.fork.test.ts` runs the real orchestrator with fake readings and a test clock.
+  Its D tests cover `passes.json`: a pass's decision fields and a run of repeats as one entry (D1), the phase and
+  thread a stuck await shows (D2), the 1,024-entry bound and a last server's `unfinished` pass (D3), and a failed
+  `queue.resume` keeping its thread in line, tried once a pass (D4).
 
 ### Held threads move to a linked machine (`limits:`)
 
