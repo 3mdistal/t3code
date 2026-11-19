@@ -211,6 +211,9 @@ export function ServerBrowserSurface(props: {
   const [accessDenied, setAccessDenied] = useState(false);
   const access = usePreviewStreamAccess(environmentId, { retry: visible && !accessDenied });
   const [hostSetup, setHostSetup] = useState<PreviewStreamHostSetup | null>(null);
+  // fork: the host can't draw the tab yet. The ref spares a state update on every frame. See FORK.md.
+  const [unpainted, setUnpainted] = useState(false);
+  const unpaintedRef = useRef(false);
   const pendingMoveRef = useRef<MouseInput | null>(null);
   const pendingWheelRef = useRef<WheelInput | null>(null);
   const inputFrameRef = useRef<number | null>(null);
@@ -389,7 +392,13 @@ export function ServerBrowserSurface(props: {
       if (noFrameTimer !== null) clearTimeout(noFrameTimer);
       noFrameTimer = null;
     };
+    const showUnpainted = (next: boolean) => {
+      if (unpaintedRef.current === next) return;
+      unpaintedRef.current = next;
+      setUnpainted(next);
+    };
     const painter = createPreviewFramePainter(canvas, () => {
+      showUnpainted(false);
       if (hasFrameRef.current) return;
       hasFrameRef.current = true;
       clearNoFrameTimer();
@@ -424,6 +433,7 @@ export function ServerBrowserSurface(props: {
         onPopup: popupOpened,
         onFileChooser: setFileChooser,
         onSelectMenu: setSelectMenu,
+        onUnpainted: () => showUnpainted(true),
         onViewport: (viewport) => {
           viewportRef.current = viewport;
           viewportChanged(viewport);
@@ -456,6 +466,7 @@ export function ServerBrowserSurface(props: {
               }, NO_FRAME_TIMEOUT_MS);
             return;
           }
+          showUnpainted(false);
           setFileChooser(null);
           controlRef.current = null;
           setControl(null);
@@ -481,6 +492,7 @@ export function ServerBrowserSurface(props: {
     return () => {
       painter.stop();
       clearNoFrameTimer();
+      showUnpainted(false);
       if (refreshTimer !== null) clearTimeout(refreshTimer);
       client.stop();
       if (clientRef.current === client) clientRef.current = null;
@@ -888,13 +900,21 @@ export function ServerBrowserSurface(props: {
             </MenuPopup>
           </Menu>
         ) : null}
-        {visible && framesStalled && !pdfUrl ? (
+        {/* fork: the server says sooner when a desktop tab draws nothing, and why. See FORK.md. */}
+        {visible && (framesStalled || unpainted) && !pdfUrl ? (
           <div className="absolute inset-0 flex items-center justify-center bg-background p-4 text-center">
             <p role="alert" className="max-w-sm text-sm text-muted-foreground">
-              <T>
-                The server's browser loaded this page but is not drawing it. Try reloading, or open
-                the page in a browser on this computer.
-              </T>
+              {unpainted ? (
+                <T>
+                  This tab can't draw while T3's window is minimized or covered on the computer it
+                  runs on. Bring T3 into view there and the page will appear here.
+                </T>
+              ) : (
+                <T>
+                  The server's browser loaded this page but is not drawing it. Try reloading, or
+                  open the page in a browser on this computer.
+                </T>
+              )}
             </p>
           </div>
         ) : null}

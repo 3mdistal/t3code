@@ -1293,6 +1293,33 @@ the tab at 3 s, with the advice to show the T3 window.
 - `apps/server/src/preview/ServerBrowserPage.ts`: the recorder's `onstop` in `recordingEncoderScript`.
 - Test: `apps/server/src/preview/ServerBrowserPage.fork.test.ts`.
 
+### A viewer of a hidden tab (`fork:`)
+
+A server tab hosted in the desktop app paints only while T3's window on that computer is drawn. Viewing one from
+another device while that window was minimized or covered showed "Connecting..." on a blank canvas forever:
+`attachViewer` waited on an opening still the tab never painted, and that capture held the tab's capture lock.
+Upstream v0.1.11 fixed that part, so the fork cut its own: #25381 no longer awaits the opening still and gives the
+lock back after 2 s, and #38865 has the web viewer say, 10 s after it connects with no frame, that the server's
+browser isn't drawing the page and to try reloading.
+
+That advice doesn't fit a desktop tab, which a reload doesn't help. A viewer of a desktop tab that hasn't been sent
+a frame 5 s after it attached gets one `unpainted` message, and the web viewer's notice then says the tab can't draw
+while T3's window is minimized or covered, until a frame paints, the stream disconnects or the viewer stops. A tab of
+the server's own Chromium gets upstream's notice alone. A PDF tab draws in its own embed, so it never shows either.
+Older clients ignore the message, and the mobile viewer doesn't show it yet. An opening still that lands after a
+screencast frame is older than it and is dropped. Upstream v0.1.12 now unthrottles a hidden desktop tab while it has a
+viewer (#39198), so the notice should show only when that fails; whether the fork still needs it is open.
+
+- `apps/server/src/preview/ServerBrowser.ts`: in `attachViewer`, `VIEWER_FIRST_FRAME_TIMEOUT`, the `unpainted`
+  viewer output and the opening still's drop.
+- `apps/server/src/preview/ServerBrowserStream.ts` sends it as `{"type":"unpainted"}`;
+  `packages/client-runtime/src/preview/serverBrowserStream.ts` reports it as `onUnpainted`;
+  `apps/web/src/browser/ServerBrowserSurface.tsx` shows its text in upstream's notice.
+- Tests: in `ServerBrowser.test.ts`, `fork:` tests for desktop tabs that draw nothing (one notice at 5 s) and that
+  draw (none), a server tab that draws nothing (none), and an opening still beaten by a frame.
+  `packages/client-runtime/src/preview/serverBrowserStream.fork.test.ts` and
+  `apps/web/src/browser/ServerBrowserSurface.fork.browser.test.tsx`.
+
 ## Versions
 
 A release is `vX.Y.Z-alice.N`. `X.Y.Z` is the upstream stable tag the stack sits on, and `N` counts the fork's

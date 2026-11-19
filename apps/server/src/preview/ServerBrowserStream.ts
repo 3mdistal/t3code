@@ -167,7 +167,9 @@ const makeHandler = Effect.fnUntraced(function* (browser: ServerBrowser.ServerBr
             case "selectMenuClosed":
             case "popup":
             case "pointer":
-            case "probe": {
+            case "probe":
+            // fork: older clients ignore a type they don't know. See FORK.md.
+            case "unpainted": {
               const { _tag: type, ...data } = output;
               return write(JSON.stringify({ type, ...data }));
             }
