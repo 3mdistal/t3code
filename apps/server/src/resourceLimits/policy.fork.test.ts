@@ -186,7 +186,7 @@ describe("releaseDue", () => {
       growingSince,
       reading: at,
       limits,
-    });
+    }).due;
 
   it("releases 90 s apart just over the release lines", () => {
     expect(due(0, [], reading(36, 13))).toBe(true);
