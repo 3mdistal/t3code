@@ -261,12 +261,10 @@ export const make = Effect.gen(function* () {
   };
 
   /**
-   * fork: a stream of a tab stops while Windows counts T3's window hidden: minimized, hidden
-   * or covered. Screenshots and input still work, and each capturePage() draws one frame. So
-   * while a tab streams, a frame no capture brought means the page draws on its own and needs
-   * none for a second. Otherwise it gets a capture each tick for a while after a frame or an
-   * input, then every 2 s. A tick is skipped while a screenshot or another capture runs, so
-   * frame copies still go one at a time. See FORK.md.
+   * fork: a hidden window's tab streams no frames, but each capturePage() draws one. A frame no
+   * capture brought means the page draws itself, so it needs none for a second; else a capture
+   * each tick after a frame or an input, then every 2 s. A tick waits out a screenshot or
+   * capture, so copies go one at a time. See FORK.md.
    */
   const pumpFrames = (tab: AttachedTab) => {
     // A stream's start counts as an input, for a pump already running too.
