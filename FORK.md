@@ -477,6 +477,26 @@ can't cancel `capturePage()`, so a call still running then overlaps the next scr
   guest.
 - Test: `apps/desktop/src/preview/DesktopBrowserHost.fork.test.ts`.
 
+The same goes for a stream. Someone viewing a desktop tab from another device saw it freeze, or never draw, while
+T3's window on the PC was minimized, hidden or covered by other windows. In Electron 44.10.0 (Chromium 152) on the
+PC, a webview's screencast sent no frames in any of those states, and its `requestAnimationFrame` stopped, though
+direct screenshots and mouse input still worked. Each `capturePage()` on the guest drew one frame, which reached the
+screencast too, so a capture every 250 ms gave about 4 frames a second. A capture on the window's own page drew
+nothing. Electron 44 has no lasting way to keep a hidden page drawing: `incrementCapturerCount()` is gone, and
+`capturePage()` holds the page visible only while it runs.
+
+So while a tab streams, the host checks it every 250 ms. A tick that brought more than one frame means the page
+draws on its own, and gets nothing. Otherwise the tab gets a `capturePage()` each tick for 3 s after a frame or an
+input, so a page that changes keeps drawing at about 4 frames a second while someone uses it, and every 2 s after
+that. A still page gets no screencast frame from a capture, so it costs a copy every 2 s and no bandwidth. A tick is
+skipped while a screenshot or another capture runs, and a screenshot waits for the stream's capture as it does for a
+nudge, so frame copies still go one at a time. A capture took 10 to 25 ms on the PC, so one is in flight about 4% of
+the time at the fastest rate.
+
+- `apps/desktop/src/preview/DesktopBrowserHost.ts`: `pumpFrames`, started by each screencast the relay starts;
+  `captureFrame`, shared with `nudgeCapture`; the `frames` and `inputs` counts.
+- Test: `apps/desktop/src/preview/DesktopBrowserHost.fork.test.ts`, "a streamed tab in a hidden window".
+
 ### Links that open one thread (`fork:`)
 
 Alice's vault and task board link to agents' threads as `t3-thread://v1/<threadId>`, sometimes with a `#fragment`,

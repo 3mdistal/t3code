@@ -268,3 +268,182 @@ describe("DesktopBrowserHost, hidden window", () => {
     }).pipe(Effect.scoped),
   );
 });
+
+/**
+ * A hidden guest that answers commands at once, except screenshots, which wait for a frame.
+ * Each capturePage() draws one, which also reaches a screencast unless the page is `still`.
+ * With `holdCapture`, the capture itself settles only on `finishCapture`.
+ */
+const makeStreamedGuest = (options: { readonly still?: boolean; readonly holdCapture?: boolean }) => {
+  const screenshots: Array<() => void> = [];
+  const capturesPending: Array<() => void> = [];
+  const sent: Array<unknown> = [];
+  let captures = 0;
+  const debuggee = Object.assign(new NodeEvents.EventEmitter(), {
+    sendCommand: (method: string, params?: { id?: number }) =>
+      new Promise((resolve) => {
+        if (method === "Target.getTargetInfo") resolve({ targetInfo: { targetId: "GUEST" } });
+        else if (method === "Page.captureScreenshot") {
+          sent.push(params?.id);
+          screenshots.push(() => resolve({ data: "" }));
+        } else resolve({});
+      }),
+  });
+  const frame = () => debuggee.emit("message", {}, "Page.screencastFrame", { sessionId: 1 }, "");
+  const webContents = Object.assign(new NodeEvents.EventEmitter(), {
+    getURL: () => "http://localhost/",
+    getTitle: () => "Page",
+    getUserAgent: () => "Electron",
+    isDestroyed: () => false,
+    capturePage: () => {
+      captures++;
+      screenshots.splice(0).forEach((resolve) => resolve());
+      if (!options.still) frame();
+      return options.holdCapture
+        ? new Promise((resolve) => capturesPending.push(() => resolve({})))
+        : Promise.resolve({});
+    },
+  });
+  return {
+    tab: {
+      webContents: webContents as unknown as Electron.WebContents,
+      debugger: debuggee as unknown as Electron.Debugger,
+    },
+    /** Ids of the screenshots the debugger received, in order. */
+    sent,
+    captures: () => captures,
+    /** A frame the page draws on its own, as it does while the window shows. */
+    frame,
+    /** Answers waiting screenshots with a frame drawn on its own. */
+    paint: () => screenshots.splice(0).forEach((resolve) => resolve()),
+    finishCapture: () => capturesPending.splice(0).forEach((resolve) => resolve()),
+  };
+};
+
+const ticks = (count: number) =>
+  Effect.gen(function* () {
+    for (let tick = 0; tick < count; tick++) {
+      yield* TestClock.adjust("250 millis");
+      yield* settle;
+    }
+  });
+
+describe("DesktopBrowserHost, a streamed tab in a hidden window", () => {
+  it.effect("captures a frame each tick while each capture brings one", () =>
+    Effect.gen(function* () {
+      const host = yield* DesktopBrowserHost.make;
+      const guest = makeStreamedGuest({});
+      host.attach(key, guest.tab);
+
+      yield* command(host, 1, "Page.startScreencast");
+      yield* settle;
+      yield* TestClock.adjust("249 millis");
+      expect(guest.captures()).toBe(0);
+      yield* TestClock.adjust("1 millis");
+      yield* settle;
+      expect(guest.captures()).toBe(1);
+
+      // Past the 3 s a quiet stream gets, since each capture's frame counts.
+      yield* ticks(19);
+      expect(guest.captures()).toBe(20);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("leaves a tab that draws on its own alone", () =>
+    Effect.gen(function* () {
+      const host = yield* DesktopBrowserHost.make;
+      const guest = makeStreamedGuest({});
+      host.attach(key, guest.tab);
+
+      yield* command(host, 1, "Page.startScreencast");
+      yield* settle;
+      for (let tick = 0; tick < 8; tick++) {
+        guest.frame();
+        guest.frame();
+        yield* ticks(1);
+      }
+      expect(guest.captures()).toBe(0);
+
+      // The window hides.
+      yield* ticks(1);
+      expect(guest.captures()).toBe(1);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("slows to a capture every 2 s on a still page, until an input", () =>
+    Effect.gen(function* () {
+      const host = yield* DesktopBrowserHost.make;
+      const guest = makeStreamedGuest({ still: true });
+      host.attach(key, guest.tab);
+
+      yield* command(host, 1, "Page.startScreencast");
+      yield* settle;
+      yield* ticks(11);
+      expect(guest.captures()).toBe(11);
+      yield* ticks(7);
+      expect(guest.captures()).toBe(11);
+      yield* ticks(1);
+      expect(guest.captures()).toBe(12);
+      yield* ticks(8);
+      expect(guest.captures()).toBe(13);
+
+      yield* command(host, 2, "Input.dispatchMouseEvent");
+      yield* settle;
+      yield* ticks(3);
+      expect(guest.captures()).toBe(16);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("stops with the stream, and starts again with the next", () =>
+    Effect.gen(function* () {
+      const host = yield* DesktopBrowserHost.make;
+      const guest = makeStreamedGuest({});
+      host.attach(key, guest.tab);
+
+      yield* command(host, 1, "Page.startScreencast");
+      yield* settle;
+      yield* ticks(1);
+      expect(guest.captures()).toBe(1);
+      yield* command(host, 2, "Page.stopScreencast");
+      yield* settle;
+      yield* ticks(4);
+      expect(guest.captures()).toBe(1);
+
+      yield* command(host, 3, "Page.startScreencast");
+      yield* settle;
+      yield* ticks(1);
+      expect(guest.captures()).toBe(2);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("takes turns with screenshots, one frame copy at a time", () =>
+    Effect.gen(function* () {
+      const host = yield* DesktopBrowserHost.make;
+      const guest = makeStreamedGuest({ still: true, holdCapture: true });
+      host.attach(key, guest.tab);
+
+      yield* command(host, 1, "Page.startScreencast");
+      yield* settle;
+      yield* ticks(1);
+      expect(guest.captures()).toBe(1);
+
+      // A screenshot waits for the stream's capture.
+      yield* command(host, 2, "Page.captureScreenshot");
+      yield* settle;
+      expect(guest.sent).toEqual([]);
+      yield* ticks(1);
+      expect(guest.captures()).toBe(1);
+      guest.finishCapture();
+      yield* settle;
+      expect(guest.sent).toEqual([2]);
+
+      // The stream waits for the screenshot.
+      yield* ticks(1);
+      expect(guest.captures()).toBe(1);
+      guest.paint();
+      yield* settle;
+      yield* ticks(1);
+      expect(guest.captures()).toBe(2);
+    }).pipe(Effect.scoped),
+  );
+});

@@ -29,6 +29,11 @@ const FOCUS_IDLE = "5 seconds";
 // fork: how long a sent screenshot waits before `nudgeCapture`, and the next one waits on that.
 const CAPTURE_NUDGE = "500 millis";
 const CAPTURE_NUDGE_LIMIT = "5 seconds";
+// fork: how often `pumpFrames` checks a stream; it captures each tick for 3 s after a frame or
+// an input, then every 2 s.
+const FRAME_PUMP_TICK = "250 millis";
+const FRAME_PUMP_ACTIVE_TICKS = 12;
+const FRAME_PUMP_IDLE_TICKS = 8;
 
 export interface DesktopBrowserTabKey {
   readonly threadId: string;
@@ -74,6 +79,10 @@ interface AttachedTab {
   focusReleasing: boolean;
   /** The sessions streaming the guest; one stopping leaves the others' screencasts running. */
   readonly screencasts: Set<string | undefined>;
+  /** fork: screencast frames and input commands so far, which `pumpFrames` compares per tick. */
+  frames: number;
+  inputs: number;
+  framePump: object | null;
   readonly onMessage: (
     event: Electron.Event,
     method: string,
@@ -173,8 +182,28 @@ export const make = Effect.gen(function* () {
       }
     });
 
-  /** fork: each tab's capturePage() from `nudgeCapture` while it runs. */
+  /** fork: each tab's capturePage() from `nudgeCapture` or `pumpFrames` while it runs. */
   const nudgeCaptures = new WeakMap<AttachedTab, Promise<void>>();
+
+  /** fork: one capturePage(), which draws a frame; the tab's next screenshot waits on it. */
+  const captureFrame = (tab: AttachedTab) =>
+    Effect.suspend(() => {
+      let captured = () => {};
+      const gate = new Promise<void>((resolve) => {
+        captured = resolve;
+      });
+      nudgeCaptures.set(tab, gate);
+      return Effect.tryPromise((): Promise<unknown> => tab.debuggee.webContents.capturePage()).pipe(
+        Effect.timeout(CAPTURE_NUDGE_LIMIT),
+        Effect.ignore,
+        Effect.ensuring(
+          Effect.sync(() => {
+            if (nudgeCaptures.get(tab) === gate) nudgeCaptures.delete(tab);
+            captured();
+          }),
+        ),
+      );
+    });
 
   /**
    * fork: a window Windows counts hidden paints no frames, so a screenshot still unanswered
@@ -196,8 +225,6 @@ export const make = Effect.gen(function* () {
       );
     }
     let answered = false;
-    let captured = () => {};
-    let gate: Promise<void> | undefined;
     const { webContents } = tab.debuggee;
     const pending = send();
     const answer = () => {
@@ -207,27 +234,65 @@ export const make = Effect.gen(function* () {
     runFork(
       Effect.sleep(CAPTURE_NUDGE).pipe(
         Effect.andThen(Effect.try(() => !answered && current() && !webContents.isDestroyed())),
-        Effect.flatMap((due) =>
-          due
-            ? Effect.tryPromise((): Promise<unknown> => {
-                gate = new Promise<void>((resolve) => {
-                  captured = resolve;
-                });
-                nudgeCaptures.set(tab, gate);
-                return webContents.capturePage();
-              }).pipe(Effect.timeout(CAPTURE_NUDGE_LIMIT))
-            : Effect.void,
-        ),
+        Effect.flatMap((due) => (due ? captureFrame(tab) : Effect.void)),
         Effect.ignore,
+      ),
+    );
+    return pending;
+  };
+
+  /**
+   * fork: a stream of a tab stops while Windows counts T3's window hidden: minimized, hidden
+   * or covered. Screenshots and input still work, and each capturePage() draws one frame. So
+   * while a tab streams and draws at most one frame a tick, it gets a capture each tick for a
+   * while after a frame or an input, then every 2 s. A tick is skipped while a screenshot or
+   * another capture runs, so frame copies still go one at a time. See FORK.md.
+   */
+  const pumpFrames = (tab: AttachedTab) => {
+    if (tab.framePump !== null) return;
+    const pump = {};
+    tab.framePump = pump;
+    // A new relay's stream, started before this one's next tick, keeps the same pump.
+    const streaming = () =>
+      tab.relay !== null &&
+      tab.screencasts.size > 0 &&
+      tabs.get(keyOf(tab.key)) === tab &&
+      !tab.debuggee.webContents.isDestroyed();
+    runFork(
+      Effect.gen(function* () {
+        let frames = tab.frames;
+        let inputs = tab.inputs;
+        /** Ticks since a frame or an input; a stream's start counts as one. */
+        let quiet = 0;
+        let idle = 0;
+        while (true) {
+          yield* Effect.sleep(FRAME_PUMP_TICK);
+          // Cleared in the same step as the check, so a stream starting next gets a new pump.
+          if (!streaming()) {
+            tab.framePump = null;
+            return;
+          }
+          const arrived = tab.frames - frames;
+          const typed = tab.inputs !== inputs;
+          frames = tab.frames;
+          inputs = tab.inputs;
+          quiet = arrived > 0 || typed ? 0 : quiet + 1;
+          // More than a capture brings: the page draws on its own.
+          if (arrived > 1) continue;
+          if (quiet < FRAME_PUMP_ACTIVE_TICKS) idle = 0;
+          else if (++idle < FRAME_PUMP_IDLE_TICKS) continue;
+          else idle = 0;
+          if (tab.screenshotTurn !== null || nudgeCaptures.has(tab)) continue;
+          yield* captureFrame(tab);
+        }
+      }).pipe(
         Effect.ensuring(
           Effect.sync(() => {
-            if (gate !== undefined && nudgeCaptures.get(tab) === gate) nudgeCaptures.delete(tab);
-            captured();
+            if (tab.framePump === pump) tab.framePump = null;
           }),
         ),
       ),
     );
-    return pending;
   };
 
   /**
@@ -375,6 +440,7 @@ export const make = Effect.gen(function* () {
           if (sessionId === undefined && method === "Page.startScreencast") {
             tab.screencasts.add(owner);
             if (owner !== undefined) streamingOwners.add(owner);
+            pumpFrames(tab);
           } else if (sessionId === undefined && method === "Page.stopScreencast") {
             tab.screencasts.delete(owner);
           }
@@ -502,7 +568,11 @@ export const make = Effect.gen(function* () {
       agentUsed: false,
       focusReleasing: false,
       screencasts: new Set(),
+      frames: 0,
+      inputs: 0,
+      framePump: null,
       onMessage: (_event, method, params, sessionId) => {
+        if (method === "Page.screencastFrame") tab.frames += 1;
         if (method === "Browser.downloadWillBegin") {
           const guid = (params as { guid?: unknown } | undefined)?.guid;
           tab.pendingDownloadGuid = typeof guid === "string" ? guid : null;
@@ -543,7 +613,10 @@ export const make = Effect.gen(function* () {
         dropRelay(tab);
         return;
       }
-      if (AGENT_INPUT_COMMAND.test(command.value.message)) tab.agentInputAt = performance.now();
+      if (AGENT_INPUT_COMMAND.test(command.value.message)) {
+        tab.agentInputAt = performance.now();
+        tab.inputs += 1;
+      }
       relayFor(tab).receive(command.value.message);
     });
 
