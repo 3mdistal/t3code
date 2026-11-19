@@ -678,10 +678,14 @@ it.live("a recording whose first frame fails detaches its own session and can st
   ).pipe(Effect.provide(layer)),
 );
 
-/** fork: sessions opened from here on never answer a screenshot, as on a tab T3 can't draw. */
+/**
+ * fork: sessions opened from here on hold every screenshot, as on a tab T3 can't draw, until
+ * `answer` answers those asked so far.
+ */
 const hangScreenshots = (context: ReturnType<typeof makeContext>) => {
   const opened: Array<ReturnType<typeof makeSession>> = [];
   const asked = Promise.withResolvers<void>();
+  const held: Array<(answer: Record<string, unknown>) => void> = [];
   const newCDPSession = context.newCDPSession;
   context.newCDPSession = async (target) => {
     const session = await newCDPSession(target);
@@ -690,11 +694,14 @@ const hangScreenshots = (context: ReturnType<typeof makeContext>) => {
     session.send.mockImplementation((method, input) => {
       if (method !== "Page.captureScreenshot") return send(method, input);
       asked.resolve();
-      return new Promise<never>(() => {});
+      return new Promise<Record<string, unknown>>((resolve) => held.push(resolve));
     });
     return session;
   };
-  return { opened, asked: asked.promise };
+  const answer = (data: string) => {
+    for (const resolve of held.splice(0)) resolve({ data });
+  };
+  return { opened, asked: asked.promise, answer };
 };
 
 // fork: a viewer of a tab that paints nothing opens at once and hears why, and the opening still
@@ -754,6 +761,38 @@ it.effect.each(["its still", "a screencast frame"] as const)(
         expect(outputs.some((output) => output._tag === "unpainted")).toBe(false);
       }),
     ).pipe(Effect.provide(layer)),
+);
+
+// fork: an opening still that lands after a screencast frame is older than it, so the viewer
+// keeps the frame. See "A viewer of a hidden tab" in FORK.md.
+it.effect("a viewer's opening still never replaces a newer screencast frame", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { browser, tabId } = yield* ready;
+      const hung = hangScreenshots(contexts[0]!);
+      const viewer = yield* browser.attachViewer(viewerInput(tabId, false));
+      yield* Effect.promise(() => hung.asked);
+      const [still, own] = hung.opened;
+      const detached = Promise.withResolvers<void>();
+      still!.detach.mockImplementation(async () => detached.resolve());
+
+      own!.emit("Page.screencastFrame", {
+        data: Buffer.from("live").toString("base64"),
+        sessionId: 1,
+        metadata: { deviceWidth: 1280 },
+      });
+      hung.answer(Buffer.from("still").toString("base64"));
+      // The still is pushed or dropped a few microtasks after its session detaches.
+      yield* Effect.promise(() =>
+        detached.promise.then(() => new Promise((resolve) => setTimeout(resolve, 0))),
+      );
+
+      const outputs = yield* Queue.clear(viewer.output);
+      expect(outputs.filter((output) => output._tag === "frame")).toEqual([
+        expect.objectContaining({ data: Buffer.from("live") }),
+      ]);
+    }),
+  ).pipe(Effect.provide(layer)),
 );
 
 it.live("enforces provider ownership and explicit targets when a session has multiple tabs", () =>

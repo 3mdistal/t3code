@@ -799,8 +799,9 @@ export function ServerBrowserSurface(props: {
           onMouseDown={(event) => event.preventDefault()}
           onContextMenu={(event) => event.preventDefault()}
         />
-        {/* Below the control bar, and hidden with the page under the empty state. */}
-        {visible && unpainted ? (
+        {/* Below the control bar, and hidden with the page under the empty state. A PDF draws
+            in its own embed, without frames. */}
+        {visible && unpainted && !pdfUrl ? (
           <div className="absolute inset-0 z-10 flex items-center justify-center bg-background p-3 text-center">
             <p role="status" className="max-w-sm text-xs text-muted-foreground">
               This tab can't draw while T3's window is minimized or covered on the computer it runs

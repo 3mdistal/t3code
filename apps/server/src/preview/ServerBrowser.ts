@@ -2450,7 +2450,7 @@ const make = Effect.gen(function* () {
       strategy: "dropping",
     });
     // fork: the opening still goes over a session of its own, detached once the still is taken or
-    // abandoned, so a capture a hidden tab never answers ends with it. See FORK.md.
+    // abandoned, so the server stops waiting on a capture a hidden tab never answers. See FORK.md.
     const stillSession = yield* Effect.acquireRelease(
       Effect.promise(() =>
         tab.page
@@ -2505,10 +2505,12 @@ const make = Effect.gen(function* () {
       pressedKeys: new Map(),
       pressedButtons: new Map(),
       push: (next) => {
-        // fork: see VIEWER_FIRST_FRAME_TIMEOUT.
-        if (next._tag === "frame") painted = true;
+        if (Queue.offerUnsafe(output, next)) {
+          // fork: only a frame the viewer will get counts. See VIEWER_FIRST_FRAME_TIMEOUT.
+          if (next._tag === "frame") painted = true;
+          return;
+        }
         // Dropped frames must still release Chromium.
-        if (Queue.offerUnsafe(output, next)) return;
         if (next._tag === "frame") runFork(next.ack);
         // State a stalled viewer cannot miss compacts its backlog. It runs
         // synchronously so an older compaction can never land after a newer one.
@@ -2564,7 +2566,9 @@ const make = Effect.gen(function* () {
       if (data) viewer.push({ _tag: "frame", data: Buffer.from(data, "base64"), ack: Effect.void });
     };
     // fork: bounded, so a tab that can't paint holds the capture lock no longer than the limit.
-    // The detach inside the lock ends a capture left unanswered. See FORK.md.
+    // The detach inside the lock ends the server's wait on a capture left unanswered; the desktop's
+    // own screenshot isn't cancelled. A still done after a live frame may be older, so it's dropped.
+    // See FORK.md.
     const pushOpeningStill = async (still: CDPSession) => {
       const data = await withCaptureLock(tab, () =>
         runPromise(
@@ -2573,7 +2577,8 @@ const make = Effect.gen(function* () {
           ).pipe(Effect.timeoutOption(VIEWER_FIRST_FRAME_TIMEOUT), Effect.map(Option.getOrNull)),
         ).finally(() => still.detach().catch(constVoid)),
       ).catch(() => null);
-      if (data) viewer.push({ _tag: "frame", data: Buffer.from(data, "base64"), ack: Effect.void });
+      if (data && !screencastStarted)
+        viewer.push({ _tag: "frame", data: Buffer.from(data, "base64"), ack: Effect.void });
     };
     let settleTimer: ReturnType<typeof setTimeout> | null = null;
     yield* Effect.addFinalizer(() =>

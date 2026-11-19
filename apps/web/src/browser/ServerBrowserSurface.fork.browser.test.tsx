@@ -34,12 +34,13 @@ function setup() {
   }));
 }
 
-const surface = (visible: boolean) => (
+const surface = (visible: boolean, pdfUrl: string | null = null) => (
   <ServerBrowserSurface
     environmentId={EnvironmentId.make("environment-unpainted")}
     threadId="thread-unpainted"
     tabId="tab-unpainted"
     visible={visible}
+    pdfUrl={pdfUrl}
     followSize={false}
     className="flex-1"
   />
@@ -71,4 +72,20 @@ it("says why a tab is blank until it paints, disconnects or stops", async () => 
   await screen.rerender(surface(true));
   await vi.waitFor(() => expect(mocks.createClient).toHaveBeenCalledTimes(2));
   await expect.element(notice).not.toBeInTheDocument();
+});
+
+// fork: a PDF tab draws in its own embed, so the notice would cover a working page.
+it("never covers a PDF tab with the notice", async () => {
+  setup();
+  const container = document.createElement("div");
+  container.style.cssText = "width: 400px; height: 300px; display: flex;";
+  await using screen = await render(surface(true, "about:blank"), { container });
+  await vi.waitFor(() => expect(mocks.createClient).toHaveBeenCalled());
+
+  await act(() => mocks.createClient.mock.calls.at(-1)![1].onUnpainted?.());
+
+  await expect.element(screen.getByTitle("PDF document")).toBeInTheDocument();
+  await expect
+    .element(screen.getByText(/This tab can't draw while T3's window is minimized/))
+    .not.toBeInTheDocument();
 });

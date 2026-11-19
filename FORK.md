@@ -1406,10 +1406,12 @@ unanswered capture also held the tab's capture lock, so the agent's snapshots an
 `attachViewer` now returns once it has asked the screencast to start, so the stream opens and sends control at
 once. Chromium answers `Page.startScreencast` without waiting for a frame, but it isn't awaited either. The opening
 still follows in the background over a CDP session of its own: it waits 5 s at most under the capture lock, then
-that session is detached, so a capture left unanswered ends with it. A viewer still without a frame 5 s after it
-attached gets one `unpainted` message, and the web viewer says the tab can't draw while T3's window is minimized or
-covered, until a frame paints, the stream disconnects or the viewer stops. Older clients ignore the message, and
-the mobile viewer doesn't show it yet. Keeping the tab painting while the window is hidden is a desktop matter this
+that session is detached, which ends the server's wait and gives the lock back. Detaching doesn't cancel the
+desktop's own screenshot. A still that lands after a screencast frame is older than it and is dropped. A viewer
+that hasn't been sent a frame 5 s after it attached gets one `unpainted` message, and the web viewer says the tab
+can't draw while T3's window is minimized or covered, until a frame paints, the stream disconnects or the viewer
+stops. A PDF tab draws in its own embed, so it never shows the notice. Older clients ignore the message, and the
+mobile viewer doesn't show it yet. Keeping the tab painting while the window is hidden is a desktop matter this
 patch leaves alone.
 
 - `apps/server/src/preview/ServerBrowser.ts`: `attachViewer`, its `pushOpeningStill`, `VIEWER_FIRST_FRAME_TIMEOUT`
