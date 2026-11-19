@@ -768,24 +768,22 @@ it.effect.each(["its still", "a screencast frame"] as const)(
 it.effect("a viewer's opening still never replaces a newer screencast frame", () =>
   Effect.scoped(
     Effect.gen(function* () {
-      const { browser, tabId } = yield* ready;
+      const { browser, broker, tabId } = yield* ready;
       const hung = hangScreenshots(contexts[0]!);
       const viewer = yield* browser.attachViewer(viewerInput(tabId, false));
       yield* Effect.promise(() => hung.asked);
-      const [still, own] = hung.opened;
-      const detached = Promise.withResolvers<void>();
-      still!.detach.mockImplementation(async () => detached.resolve());
+      // Queued behind the still's capture lock, so it ends after the still is pushed or dropped.
+      const snapshot = yield* broker
+        .invoke<PreviewAutomationSnapshot>({ scope, tabId, operation: "snapshot", input: {} })
+        .pipe(Effect.forkScoped);
 
-      own!.emit("Page.screencastFrame", {
+      hung.opened[1]!.emit("Page.screencastFrame", {
         data: Buffer.from("live").toString("base64"),
         sessionId: 1,
         metadata: { deviceWidth: 1280 },
       });
       hung.answer(Buffer.from("still").toString("base64"));
-      // The still is pushed or dropped a few microtasks after its session detaches.
-      yield* Effect.promise(() =>
-        detached.promise.then(() => new Promise((resolve) => setTimeout(resolve, 0))),
-      );
+      yield* Fiber.join(snapshot);
 
       const outputs = yield* Queue.clear(viewer.output);
       expect(outputs.filter((output) => output._tag === "frame")).toEqual([
