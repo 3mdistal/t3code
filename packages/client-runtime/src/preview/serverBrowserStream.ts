@@ -200,6 +200,11 @@ export interface PreviewStreamEvents {
   readonly onDownload?: (download: PreviewStreamDownload) => void;
   readonly onPopup?: (tabId: string) => void;
   readonly onFileChooser?: (chooser: PreviewStreamFileChooser | null) => void;
+  /**
+   * fork: no frame reached this viewer soon after it connected, as when the host can't draw the
+   * tab. A later frame means it paints again. See "A viewer of a hidden tab" in FORK.md.
+   */
+  readonly onUnpainted?: () => void;
   readonly onConnectedChange: (connected: boolean) => void;
   /** The upgrade was refused; refresh access and start a new client. */
   readonly onUnauthorized: () => void;
@@ -312,6 +317,9 @@ export function createPreviewStreamClient(
         typeof sequence === "number"
       ) {
         events.onPointer?.({ phase, x, y, sequence });
+      } else if (type === "unpainted") {
+        // fork: see `onUnpainted`.
+        events.onUnpainted?.();
       } else if (type === "popup" && typeof tabId === "string") {
         events.onPopup?.(tabId);
       } else if (type === "clipboard" && typeof text === "string") {

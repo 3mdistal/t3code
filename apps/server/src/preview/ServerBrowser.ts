@@ -136,6 +136,9 @@ const DESKTOP_PAINT_CAPTURE = {
 const REVEAL_VIEWER_WAIT_MS = 1000;
 // A desktop panel's shown report waits on the renderer's layout, which a busy machine can push past a second.
 const REVEAL_DESKTOP_SHOWN_WAIT_MS = 3000;
+// fork: a desktop tab draws only while T3's window is drawn, so a viewer of one still without a
+// frame after this is told why. See "A viewer of a hidden tab" in FORK.md.
+const VIEWER_FIRST_FRAME_TIMEOUT = "5 seconds";
 
 const sleepUntil = (deadline: number) =>
   new Promise<void>((resolve) => setTimeout(resolve, Math.max(0, deadline - Date.now())));
@@ -258,7 +261,9 @@ export type ServerBrowserViewerOutput =
       readonly sizeBytes: number;
     }
   | { readonly _tag: "gone" }
-  | { readonly _tag: "reconnect" };
+  | { readonly _tag: "reconnect" }
+  // fork: no frame reached the viewer in time, as on a tab T3 can't draw. See FORK.md.
+  | { readonly _tag: "unpainted" };
 
 export interface ServerBrowserViewer {
   readonly output: Queue.Dequeue<ServerBrowserViewerOutput>;
@@ -3223,6 +3228,7 @@ const make = Effect.gen(function* () {
     const recentFrames: Array<number> = [];
     let screencastParams = Promise.resolve();
     let screencastScale = 1;
+    let painted = false;
     const startScreencast = (scale: number) => {
       screencastScale = scale;
       screencastParams = screencastParams.then(async () => {
@@ -3245,8 +3251,12 @@ const make = Effect.gen(function* () {
       pressedKeys: new Map(),
       pressedButtons: new Map(),
       push: (next) => {
+        if (Queue.offerUnsafe(output, next)) {
+          // fork: only a frame the viewer will get counts. See VIEWER_FIRST_FRAME_TIMEOUT.
+          if (next._tag === "frame") painted = true;
+          return;
+        }
         // Dropped frames must still release Chromium.
-        if (Queue.offerUnsafe(output, next)) return;
         if (next._tag === "frame") runFork(next.ack);
         // State a stalled viewer cannot miss compacts its backlog. It runs
         // synchronously so an older compaction can never land after a newer one.
@@ -3297,7 +3307,7 @@ const make = Effect.gen(function* () {
     }
     broadcastControl(tab);
     pushFileChooser(tab);
-    const pushStill = async () => {
+    const pushStill = async (opening = false) => {
       const data = await withCaptureLock(tab, async () => {
         let timer: ReturnType<typeof setTimeout> | undefined;
         try {
@@ -3311,7 +3321,9 @@ const make = Effect.gen(function* () {
           clearTimeout(timer);
         }
       }).catch(() => null);
-      if (data) viewer.push({ _tag: "frame", data: Buffer.from(data, "base64"), ack: Effect.void });
+      // fork: an opening still done after a live frame is older than it. See FORK.md.
+      if (data && !(opening && screencastStarted))
+        viewer.push({ _tag: "frame", data: Buffer.from(data, "base64"), ack: Effect.void });
     };
     let settleTimer: ReturnType<typeof setTimeout> | null = null;
     yield* Effect.addFinalizer(() =>
@@ -3368,7 +3380,17 @@ const make = Effect.gen(function* () {
     yield* Effect.promise(() => startScreencast(1));
     // An idle page does not repaint for a new screencast, so the viewer
     // starts from a still unless a live frame beat it.
-    if (!screencastStarted) yield* Effect.forkScoped(Effect.promise(pushStill));
+    // fork: marks the opening still; see FORK.md.
+    if (!screencastStarted) yield* Effect.forkScoped(Effect.promise(() => pushStill(true)));
+    // fork: see VIEWER_FIRST_FRAME_TIMEOUT.
+    yield* Effect.sleep(VIEWER_FIRST_FRAME_TIMEOUT).pipe(
+      Effect.andThen(
+        Effect.sync(() => {
+          if (!painted && tab.desktop) viewer.push({ _tag: "unpainted" });
+        }),
+      ),
+      Effect.forkScoped,
+    );
     return {
       output,
       input: (raw: unknown) =>
