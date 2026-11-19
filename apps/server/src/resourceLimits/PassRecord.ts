@@ -257,11 +257,21 @@ export const makePassRecord = Effect.fn("makePassRecord")(function* (file: strin
         };
       }
       if (exit.value === null) return { ...state, current };
-      const decision = {
-        ...exit.value,
-        blockedBy: exit.value.blockedBy.slice(0, MAX_LISTED),
-        starts: exit.value.starts.slice(0, MAX_LISTED),
-      };
+      // Switched off, a pass can start more than fit: failed starts go first, and the counts say what's left out.
+      const { starts, blockedBy } = exit.value;
+      const failed = starts.filter((start) => start.resume === "failed");
+      const listed =
+        starts.length <= MAX_LISTED
+          ? { starts }
+          : {
+              starts: [...failed, ...starts.filter((start) => start.resume === "ok")].slice(
+                0,
+                MAX_LISTED,
+              ),
+              startCount: starts.length,
+              failedStarts: failed.length,
+            };
+      const decision = { ...exit.value, blockedBy: blockedBy.slice(0, MAX_LISTED), ...listed };
       const key = repeatKey(server.id, decision);
       const last = state.passes.at(-1) as Record<string, unknown> | undefined;
       if (key !== null && key === state.lastKey && last !== undefined) {

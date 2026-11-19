@@ -645,12 +645,12 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
 
   // The board's best-ranked task goes first. A thread without a rank of its own, such as a task's helper or a
   // fork of its thread, takes the rank of the nearest thread above it that has one. A deleted thread ends the walk.
-  // `ranks` is how many threads the board ranks, or null when the file wasn't read.
+  // `ranks` is how many threads the board ranks, or null when the file wasn't read, as for a lone thread.
   const byRank = Effect.fn("ResourceLimitsGovernor.byRank")(function* (
     ready: ReadonlyArray<Inspected>,
     now: number,
   ) {
-    if (ready.length === 0) return { ranked: [], ranks: null };
+    if (ready.length < 2) return { ranked: ready.map(unranked), ranks: null };
     yield* record.phase("ranks");
     const ranks = yield* readPriority(now);
     if (ranks.size === 0) return { ranked: ready.map(unranked), ranks: 0 };
@@ -738,9 +738,9 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
     const launches = new Map<ThreadId, Array<string>>();
     for (const name of names) {
       const file = path.join(files.inbox, name);
-      const record = yield* readJson(file);
+      const request = yield* readJson(file);
       yield* fs.remove(file).pipe(Effect.ignore);
-      const { sessionId, about, tool } = (record ?? {}) as {
+      const { sessionId, about, tool } = (request ?? {}) as {
         readonly sessionId?: unknown;
         readonly about?: unknown;
         readonly tool?: unknown;
@@ -759,6 +759,7 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
       launches.set(thread.threadId, [...(launches.get(thread.threadId) ?? []), label]);
     }
     for (const [threadId, labels] of launches) {
+      yield* record.phase("inbox", { threadId });
       yield* queueNote(
         threadId,
         `limits:launches:${threadId}:${now}`,
@@ -1004,7 +1005,8 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
           !item.blocked &&
           !moved.has(item.entry.threadId),
       );
-      if (!stepped && !paused && !off && released.size === 0 && movable.length > 0) {
+      // A start tried here, even one that failed, keeps a move from starting this pass.
+      if (!stepped && !paused && !off && starts.length === 0 && movable.length > 0) {
         const { ranked } = yield* byRank(movable, now);
         yield* record.phase("overflow");
         yield* mover
