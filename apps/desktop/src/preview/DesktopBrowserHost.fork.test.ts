@@ -274,7 +274,10 @@ describe("DesktopBrowserHost, hidden window", () => {
  * Each capturePage() draws one, which also reaches a screencast unless the page is `still`.
  * With `holdCapture`, the capture itself settles only on `finishCapture`.
  */
-const makeStreamedGuest = (options: { readonly still?: boolean; readonly holdCapture?: boolean }) => {
+const makeStreamedGuest = (options: {
+  readonly still?: boolean;
+  readonly holdCapture?: boolean;
+}) => {
   const screenshots: Array<() => void> = [];
   const capturesPending: Array<() => void> = [];
   const sent: Array<unknown> = [];
