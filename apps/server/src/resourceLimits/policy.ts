@@ -199,33 +199,40 @@ export function nextState(
     : "ok";
 }
 
-/**
- * Whether the next held thread may start, while the machine is under its limits. Releases are
- * 90 s apart, but one may start every pass when the reading would still be at its release lines
- * after it and every session released in the last two minutes grow to full size. That needs a
- * reading and at least one release line; macOS needs memory pressure normal too.
- */
-export function releaseDue(input: {
+interface ReleaseInput {
   readonly now: number;
   readonly lastReleaseAt: number | null;
   /** Release times within the last `sessionGrowthMs`. */
   readonly growingSince: ReadonlyArray<number>;
   readonly reading: HostReading | null;
   readonly limits: EffectiveResourceLimits;
-}): boolean {
+}
+
+/**
+ * Whether the next held thread may start, while the machine is under its limits. Releases are
+ * 90 s apart, but one may start every pass when the reading would still be at its release lines
+ * after it and every session released in the last two minutes grow to full size. That needs a
+ * reading and at least one release line; macOS needs memory pressure normal too.
+ */
+export function releaseDue(input: ReleaseInput): { readonly due: boolean; readonly why: string } {
   const { now, lastReleaseAt, reading, limits } = input;
-  if (lastReleaseAt === null || now - lastReleaseAt >= TIMING.releaseSpacingMs) return true;
-  if (reading === null) return false;
-  if (limits.releaseHeadroomGiB === null && limits.releaseAvailableGiB === null) return false;
-  if (limits.usesMemoryPressure && reading.memoryPressure !== "normal") return false;
+  if (lastReleaseAt === null) return { due: true, why: "first release" };
+  if (now - lastReleaseAt >= TIMING.releaseSpacingMs) return { due: true, why: "spacing passed" };
+  if (reading === null) return { due: false, why: "spacing: no reading" };
+  if (limits.releaseHeadroomGiB === null && limits.releaseAvailableGiB === null) {
+    return { due: false, why: "spacing: no release line" };
+  }
+  if (limits.usesMemoryPressure && reading.memoryPressure !== "normal") {
+    return { due: false, why: "spacing: memory pressure" };
+  }
   const growing = input.growingSince.filter((at) => now - at < TIMING.sessionGrowthMs).length;
   const needed = (growing + 1) * SESSION_GIB;
   const roomAbove = (value: number | null, line: number | null) =>
     line === null || (value !== null && value - needed >= line);
-  return (
-    roomAbove(headroomGiB(reading), limits.releaseHeadroomGiB) &&
+  return roomAbove(headroomGiB(reading), limits.releaseHeadroomGiB) &&
     roomAbove(reading.availableBytes / GiB, limits.releaseAvailableGiB)
-  );
+    ? { due: true, why: "room to grow" }
+    : { due: false, why: "spacing: no room to grow" };
 }
 
 export type Provenance = Pick<

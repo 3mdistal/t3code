@@ -304,6 +304,8 @@ export interface ProviderSessionManagerV2Shape {
    */
   readonly releaseIdleSessions?: (input: {
     readonly keepThreadIds: ReadonlySet<ThreadId>;
+    /** fork: limits, see FORK.md. Told each session before it's looked at, for the governor's pass record. */
+    readonly onSession?: (providerSessionId: ProviderSessionId) => Effect.Effect<void>;
   }) => Effect.Effect<ReadonlyArray<ProviderSessionId>>;
 }
 
@@ -3255,6 +3257,7 @@ export const layerWithOptions = (
             const released: Array<ProviderSessionId> = [];
             const sessionsNow = (yield* Ref.get(sessions)).values();
             for (const entry of idleSessionsToClose(sessionsNow, input.keepThreadIds)) {
+              if (input.onSession) yield* input.onSession(entry.runtime.providerSessionId); // fork: limits, see FORK.md.
               const pendingWork =
                 entry.runtime.hasPendingBackgroundWork === undefined
                   ? false

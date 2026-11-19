@@ -21,22 +21,35 @@ export const makeJsonFiles = Effect.gen(function* () {
 
   let written = 0;
 
-  // A temporary file and a rename, so the hook never reads half a file. False when it couldn't be written.
+  // A temporary file and a rename, so the hook never reads half a file.
+  const replace = Effect.fnUntraced(function* (file: string, text: string) {
+    yield* fs.makeDirectory(path.dirname(file), { recursive: true });
+    const temporary = `${file}.${process.pid}.${(written += 1)}.tmp`;
+    yield* fs.writeFileString(temporary, text).pipe(
+      Effect.andThen(fs.rename(temporary, file)),
+      // Windows refuses a rename onto a file another process has open, which left these behind.
+      Effect.onError(() => fs.remove(temporary).pipe(Effect.ignore)),
+    );
+    return true;
+  });
+
+  // False when it couldn't be written.
+  const failed = (file: string) => (cause: unknown) =>
+    Effect.logWarning("resource-limits.write-failed", { file, cause }).pipe(Effect.as(false));
+
   const writeJson = Effect.fn("ResourceLimits.writeJson")(
     function* (file: string, value: unknown) {
-      yield* fs.makeDirectory(path.dirname(file), { recursive: true });
-      const temporary = `${file}.${process.pid}.${(written += 1)}.tmp`;
-      yield* fs.writeFileString(temporary, `${yield* encodeJson(value)}\n`);
-      yield* fs.rename(temporary, file);
-      return true;
+      return yield* replace(file, `${yield* encodeJson(value)}\n`);
     },
-    (effect, file) =>
-      effect.pipe(
-        Effect.catchCause((cause) =>
-          Effect.logWarning("resource-limits.write-failed", { file, cause }).pipe(Effect.as(false)),
-        ),
-      ),
+    (effect, file) => effect.pipe(Effect.catchCause(failed(file))),
   );
 
-  return { readJson, writeJson };
+  const writeText = Effect.fn("ResourceLimits.writeText")(
+    function* (file: string, text: string) {
+      return yield* replace(file, text);
+    },
+    (effect, file) => effect.pipe(Effect.catchCause(failed(file))),
+  );
+
+  return { readJson, writeJson, writeText };
 });
