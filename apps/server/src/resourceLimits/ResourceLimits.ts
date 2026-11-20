@@ -72,7 +72,8 @@ export interface MoveLaunch {
   readonly projectId: ProjectId;
   readonly title: string;
   readonly modelSelection: ModelSelection;
-  readonly workspaceStrategy: OrchestrationV2ThreadLaunchWorkspaceStrategy;
+  /** None for a checkout-free move, which starts in the project's own folder there. */
+  readonly workspaceStrategy?: OrchestrationV2ThreadLaunchWorkspaceStrategy;
   readonly message: string;
   readonly clientRequestId: string;
 }
