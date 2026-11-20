@@ -46,6 +46,8 @@ import { sourceControlDefinitions } from "../sourceControl/sourceControlDefiniti
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import { makeJsonFiles } from "./jsonFiles.ts";
 import {
+  checkoutFreePlan,
+  checkoutFreeRepository,
   isBufferedWake,
   isDefiniteRefusal,
   type MoveCandidate,
@@ -92,6 +94,12 @@ export interface OverflowHost {
     ReadonlyArray<{ readonly id: ProjectId; readonly remotes: ReadonlyMap<string, string> }>,
     OrchestratorMcpFailure
   >;
+  /** Projects there with this ID, or else with this title. */
+  readonly projectsNamed: (
+    environmentId: EnvironmentId,
+    modes: Modes,
+    name: string,
+  ) => Effect.Effect<ReadonlyArray<{ readonly id: ProjectId }>, OrchestratorMcpFailure>;
   readonly providersThere: (
     environmentId: EnvironmentId,
     modes: Modes,
@@ -616,10 +624,21 @@ export const makeOverflowMover = Effect.fn("makeOverflowMover")(function* (host:
   const start = Effect.fn("Overflow.start")(function* (input: {
     readonly threadId: ThreadId;
     readonly shell: OrchestrationV2ThreadShell;
-    readonly cwd: string;
-    readonly upstream: Upstream;
-    readonly head: string;
-    readonly remote: string;
+    /** The pushed branch it starts from there, or the project it starts in there without a checkout. */
+    readonly from:
+      | {
+          readonly cwd: string;
+          readonly upstream: Upstream;
+          readonly head: string;
+          readonly remote: string;
+        }
+      | {
+          readonly checkoutFree: {
+            readonly repository: string;
+            readonly project: string;
+            readonly note: string | null;
+          };
+        };
     readonly target: EnvironmentId;
     readonly projectId: ProjectId;
     readonly modelSelection: ModelSelection;
@@ -647,18 +666,24 @@ export const makeOverflowMover = Effect.fn("makeOverflowMover")(function* (host:
         Effect.as("next" as const),
       );
     }
-    const localBranch = movedBranchName(input.upstream.branch, threadId, now);
+    const from = input.from;
+    const localBranch =
+      "checkoutFree" in from ? null : movedBranchName(from.upstream.branch, threadId, now);
     const brief = moveBrief({
       title: shell.title,
       threadId,
       environmentId: hereId,
       machine: (yield* limits.read).machine,
-      remote: input.remote,
-      remoteBranch: input.upstream.branch,
-      localBranch,
-      head: input.head,
       summary: yield* summaryOf(threadId).pipe(Effect.orElseSucceed(() => "")),
       held: held.map(({ message }) => message.text),
+      ...("checkoutFree" in from
+        ? { checkoutFree: from.checkoutFree }
+        : {
+            remote: from.remote,
+            remoteBranch: from.upstream.branch,
+            localBranch: localBranch!,
+            head: from.head,
+          }),
     });
     if (brief === null) {
       return yield* skip(
@@ -667,21 +692,23 @@ export const makeOverflowMover = Effect.fn("makeOverflowMover")(function* (host:
         now,
       ).pipe(Effect.as("next" as const));
     }
-    // The thread there starts from the branch on its remote, which a rewind or force-push may have taken this
-    // checkout's commit out of. The brief still has the thread there check it.
-    const remoteHead = yield* call(host.remoteHead(input.cwd, input.upstream, input.head)).pipe(
-      Effect.result,
-    );
-    if (remoteHead._tag === "Failure") {
-      return yield* skip(
-        threadId,
-        `its remote couldn't be read: ${failureMessage(remoteHead.failure)}`,
-        now,
-      ).pipe(Effect.as("next" as const));
+    if (!("checkoutFree" in from)) {
+      // The thread there starts from the branch on its remote, which a rewind or force-push may have taken this
+      // checkout's commit out of. The brief still has the thread there check it.
+      const remoteHead = yield* call(host.remoteHead(from.cwd, from.upstream, from.head)).pipe(
+        Effect.result,
+      );
+      if (remoteHead._tag === "Failure") {
+        return yield* skip(
+          threadId,
+          `its remote couldn't be read: ${failureMessage(remoteHead.failure)}`,
+          now,
+        ).pipe(Effect.as("next" as const));
+      }
+      const rewound = remoteHeadBlocker({ head: from.head, ...remoteHead.success });
+      if (rewound !== null)
+        return yield* skip(threadId, rewound, now).pipe(Effect.as("next" as const));
     }
-    const rewound = remoteHeadBlocker({ head: input.head, ...remoteHead.success });
-    if (rewound !== null)
-      return yield* skip(threadId, rewound, now).pipe(Effect.as("next" as const));
     // Pause all may have been switched on during the reads.
     if ((yield* limits.refreshPause) !== null) return "stop" as const;
     const pending: MovedThread = {
@@ -692,13 +719,19 @@ export const makeOverflowMover = Effect.fn("makeOverflowMover")(function* (host:
         projectId: input.projectId,
         title: shell.title,
         modelSelection: input.modelSelection,
-        // Named as a remote branch there, so the launch fetches it rather than following a local branch's tracking.
-        workspaceStrategy: {
-          type: "worktree",
-          baseRef: `${input.remote}/${input.upstream.branch}`,
-          branch: localBranch,
-          startFromOrigin: true,
-        },
+        // Without a strategy it starts in the project's own folder there.
+        ...("checkoutFree" in from
+          ? {}
+          : {
+              // Named as a remote branch there, so the launch fetches it rather than following a local branch's
+              // tracking.
+              workspaceStrategy: {
+                type: "worktree" as const,
+                baseRef: `${from.remote}/${from.upstream.branch}`,
+                branch: localBranch!,
+                startFromOrigin: true,
+              },
+            }),
         message: brief,
         // A retry after a lost reply finds the same thread there; a later move of this thread is a new one.
         clientRequestId: `limits-move:${threadId}:${now}`,
@@ -749,12 +782,20 @@ export const makeOverflowMover = Effect.fn("makeOverflowMover")(function* (host:
         continue;
       }
       const cwd = shell.worktreePath ?? project.workspaceRoot;
-      const git = yield* host.gitStatus(cwd);
+      const checkoutFree =
+        overflow.checkoutFree === undefined
+          ? null
+          : checkoutFreeRepository(
+              { repositoryKey: project.repositoryKey, worktree: shell.worktreePath !== null },
+              overflow.checkoutFree.repositories,
+            );
+      const git = checkoutFree === null ? yield* host.gitStatus(cwd) : null;
       const candidate: MoveCandidate = {
         topLevel: shell.lineage.parentThreadId == null && shell.delegatedFrom === undefined,
         tags: current.threadTags[threadId] ?? [],
         git,
         worktree: shell.worktreePath !== null,
+        checkoutFree: checkoutFree !== null,
         heldAttachments: held.reduce((sum, { message }) => sum + message.attachments.length, 0),
         model: shell.modelSelection,
       };
@@ -763,33 +804,44 @@ export const makeOverflowMover = Effect.fn("makeOverflowMover")(function* (host:
         yield* skip(threadId, blocker, now);
         continue;
       }
-      // moveBlocker checked the branch, its upstream and its commit.
-      const { upstream, head } = git! as {
-        readonly upstream: Upstream;
-        readonly head: string;
-      };
       const modes = modesOf(shell);
       const there = yield* Effect.gen(function* () {
         providers ??= yield* call(host.providersThere(target, modes));
+        const rest = { providers, fallbackModel: overflow.fallbackModel ?? null };
+        if (checkoutFree !== null && overflow.checkoutFree !== undefined) {
+          const { project: name, note } = overflow.checkoutFree;
+          const projects = yield* call(host.projectsNamed(target, modes, name));
+          const plan = checkoutFreePlan(
+            { model: candidate.model, project: name },
+            { ...rest, projects },
+          );
+          if ("blocker" in plan) return plan;
+          return {
+            use: plan.use,
+            projectId: projects[0]!.id,
+            from: { checkoutFree: { repository: checkoutFree, project: name, note: note ?? null } },
+          };
+        }
+        // moveBlocker checked the branch, its upstream and its commit.
+        const { upstream, head } = git! as { readonly upstream: Upstream; readonly head: string };
         const projects =
           project.repositoryKey === null
             ? []
             : yield* call(host.projectsThere(target, modes, project.repositoryKey));
-        return { providers, projects };
+        const plan = movePlan({ model: candidate.model, upstream }, { ...rest, projects });
+        if ("blocker" in plan) return plan;
+        return {
+          use: plan.use,
+          projectId: projects[0]!.id,
+          from: { cwd, upstream, head, remote: plan.remote },
+        };
       }).pipe(Effect.result);
       if (there._tag === "Failure") {
         // The machine isn't answering, so nothing else moves this pass.
         yield* skip(threadId, `the linked machine: ${failureMessage(there.failure)}`, now);
         return null;
       }
-      const plan = movePlan(
-        { model: candidate.model, upstream },
-        {
-          projects: there.success.projects,
-          providers: there.success.providers,
-          fallbackModel: overflow.fallbackModel ?? null,
-        },
-      );
+      const plan = there.success;
       if ("blocker" in plan) {
         yield* skip(threadId, plan.blocker, now);
         continue;
@@ -797,12 +849,9 @@ export const makeOverflowMover = Effect.fn("makeOverflowMover")(function* (host:
       const started = yield* start({
         threadId,
         shell,
-        cwd,
-        upstream,
-        head,
-        remote: plan.remote,
+        from: plan.from,
         target,
-        projectId: there.success.projects[0]!.id,
+        projectId: plan.projectId,
         modelSelection:
           plan.use === "fallback" && overflow.fallbackModel !== undefined
             ? overflow.fallbackModel
@@ -845,6 +894,28 @@ const makeLiveHost = Effect.gen(function* () {
           ),
     ),
   );
+
+  const listThere = Effect.fn("Overflow.listThere")(function* (
+    environmentId: EnvironmentId,
+    modes: Modes,
+  ) {
+    yield* requireLinks;
+    const tool = ProjectToolkit.tools.t3_project_list;
+    const found: Array<(typeof tool.successSchema.Type)["projects"][number]> = [];
+    let cursor: number | null = 0;
+    while (cursor !== null) {
+      const listed: typeof tool.successSchema.Type = yield* peers.call({
+        environmentId,
+        tool: tool.name,
+        arguments: { cursor, limit: 100 },
+        limits: modes,
+        success: tool.successSchema,
+      });
+      found.push(...listed.projects);
+      cursor = listed.nextCursor;
+    }
+    return found;
+  });
 
   return {
     project: (projectId) =>
@@ -944,32 +1015,21 @@ const makeLiveHost = Effect.gen(function* () {
         Effect.orElseSucceed(() => environmentId),
       ),
     projectsThere: Effect.fn("Overflow.projectsThere")(function* (environmentId, modes, key) {
-      yield* requireLinks;
-      const tool = ProjectToolkit.tools.t3_project_list;
-      const found: Array<{
-        readonly id: ProjectId;
-        readonly remotes: ReadonlyMap<string, string>;
-      }> = [];
-      let cursor: number | null = 0;
-      while (cursor !== null) {
-        const listed: typeof tool.successSchema.Type = yield* peers.call({
-          environmentId,
-          tool: tool.name,
-          arguments: { cursor, limit: 100 },
-          limits: modes,
-          success: tool.successSchema,
-        });
-        for (const project of listed.projects) {
-          const identity = project.repositoryIdentity;
-          if (identity?.canonicalKey !== key) continue;
-          // The remotes the identity names: its primary one, and origin when that's another repository.
-          const remotes = new Map([[identity.canonicalKey, identity.locator.remoteName]]);
-          if (identity.origin !== undefined) remotes.set(identity.origin.canonicalKey, "origin");
-          found.push({ id: project.id, remotes });
-        }
-        cursor = listed.nextCursor;
-      }
-      return found;
+      return (yield* listThere(environmentId, modes)).flatMap((project) => {
+        const identity = project.repositoryIdentity;
+        if (identity?.canonicalKey !== key) return [];
+        // The remotes the identity names: its primary one, and origin when that's another repository.
+        const remotes = new Map([[identity.canonicalKey, identity.locator.remoteName]]);
+        if (identity.origin !== undefined) remotes.set(identity.origin.canonicalKey, "origin");
+        return [{ id: project.id, remotes }];
+      });
+    }),
+    projectsNamed: Effect.fn("Overflow.projectsNamed")(function* (environmentId, modes, name) {
+      const listed = yield* listThere(environmentId, modes);
+      const byId = listed.filter((project) => project.id === name);
+      return (byId.length > 0 ? byId : listed.filter((project) => project.title === name)).map(
+        (project) => ({ id: project.id }),
+      );
     }),
     providersThere: (environmentId, modes) =>
       requireLinks.pipe(
