@@ -2619,8 +2619,11 @@ interface CloudFaults {
 
 const decodeThreadRead = Schema.decodeSync(OrchestratorMcpThreadReadResult);
 
-/** A `t3_thread_read` answer, decoded with the real schema so the fake can't drift from it. */
-const threadReadThere = (threadId: string, first: RunThere | null) =>
+/**
+ * A `t3_thread_read` answer, decoded with the real schema so the fake can't drift from it. A thread launched into its
+ * project's own folder (`root`) has no branch or worktree there.
+ */
+const threadReadThere = (threadId: string, first: RunThere | null, root = false) =>
   decodeThreadRead({
     thread: {
       threadId,
@@ -2637,8 +2640,8 @@ const threadReadThere = (threadId: string, first: RunThere | null) =>
       interactionMode: "default",
       linkedPullRequest: null,
       titleRegeneration: null,
-      branch: "t3-moved/main",
-      worktreePath: first?.worktreePath ?? null,
+      branch: root ? null : "t3-moved/main",
+      worktreePath: root ? null : (first?.worktreePath ?? null),
       parentThreadId: null,
       relationshipToParent: null,
       runCount: first === null ? 0 : 1,
@@ -2702,6 +2705,10 @@ const makeCloud = Effect.fnUntraced(function* () {
   const attempts = yield* Ref.make<ReadonlyArray<ResourceLimits.MoveLaunch>>([]);
   const launched = yield* Ref.make<ReadonlyMap<string, string>>(new Map());
   const branches = yield* Ref.make<ReadonlySet<string>>(new Set());
+  // Threads launched into their project's own folder, and every git or repository read here.
+  const roots = yield* Ref.make<ReadonlySet<string>>(new Set());
+  const gitReads = yield* Ref.make<ReadonlyArray<string>>([]);
+  const read = (what: string) => Ref.update(gitReads, (all) => [...all, what]);
   const sendCalls = yield* Ref.make<
     ReadonlyArray<{ threadId: string; message: string; clientRequestId: string }>
   >([]);
@@ -2715,6 +2722,7 @@ const makeCloud = Effect.fnUntraced(function* () {
       Effect.succeed({ workspaceRoot: "/repo", repositoryKey: "github.com/alice/repo" }),
     gitStatus: () =>
       Effect.gen(function* () {
+        yield* read("gitStatus");
         yield* once("onGitStatus");
         return {
           branch: "main",
@@ -2728,6 +2736,7 @@ const makeCloud = Effect.fnUntraced(function* () {
     label: () => Effect.succeed("t3-cloud"),
     projectsThere: () =>
       Effect.gen(function* () {
+        yield* read("projectsThere");
         yield* once("onProjects");
         return [
           {
@@ -2751,17 +2760,21 @@ const makeCloud = Effect.fnUntraced(function* () {
         yield* once("onLaunch");
         if (fault.refuseLaunches !== null) return yield* failure("refused", fault.refuseLaunches);
         const replayed = (yield* Ref.get(launched)).get(input.clientRequestId);
+        // A launch with no strategy starts in the project's own folder, with no branch of its own.
         const branch =
-          input.workspaceStrategy?.type === "worktree" ? input.workspaceStrategy.branch! : "";
+          input.workspaceStrategy?.type === "worktree" ? input.workspaceStrategy.branch! : null;
         // A new launch can't take a branch an earlier one left there.
-        if (replayed === undefined && (yield* Ref.get(branches)).has(branch)) {
+        if (replayed === undefined && branch !== null && (yield* Ref.get(branches)).has(branch)) {
           return yield* failure(`A branch named '${branch}' already exists.`, "invalid_request");
         }
         const base = `cloud:${input.title}`;
         const taken = [...(yield* Ref.get(launched)).values()].filter((id) => id.startsWith(base));
         const threadId = replayed ?? (taken.length === 0 ? base : `${base}:${taken.length + 1}`);
         yield* Ref.update(launched, (all) => new Map(all).set(input.clientRequestId, threadId));
-        yield* Ref.update(branches, (all) => new Set(all).add(branch));
+        if (branch !== null) yield* Ref.update(branches, (all) => new Set(all).add(branch));
+        if (input.workspaceStrategy === undefined) {
+          yield* Ref.update(roots, (all) => new Set(all).add(threadId));
+        }
         if (fault.loseLaunchReplies > 0) {
           yield* Ref.update(faults, (current) => ({
             ...current,
@@ -2772,7 +2785,10 @@ const makeCloud = Effect.fnUntraced(function* () {
         return { threadId, link: `t3://cloud/${threadId}` };
       }),
     readThere: (_environmentId, _modes, threadId) =>
-      Effect.map(Ref.get(faults), (fault) => threadReadThere(threadId, fault.there)),
+      Effect.gen(function* () {
+        const fault = yield* Ref.get(faults);
+        return threadReadThere(threadId, fault.there, (yield* Ref.get(roots)).has(threadId));
+      }),
     send: (_environmentId, _modes, input) =>
       Effect.gen(function* () {
         const fault = yield* Ref.get(faults);
@@ -2796,7 +2812,7 @@ const makeCloud = Effect.fnUntraced(function* () {
       }),
     remoteHead: () =>
       Effect.andThen(
-        once("onRemoteHead"),
+        Effect.andThen(read("remoteHead"), once("onRemoteHead")),
         Effect.map(Ref.get(faults), (fault) => fault.remoteHead),
       ),
   };
@@ -2836,6 +2852,8 @@ const makeCloud = Effect.fnUntraced(function* () {
     sent: Effect.map(Ref.get(delivered), (all) => [...all.values()]),
     /** Every send, including repeats and failed ones. */
     sendCalls: Ref.get(sendCalls),
+    /** The git status, same-repository project and remote branch reads, in order. */
+    gitReads: Ref.get(gitReads),
     fault: (change: (current: CloudFaults) => CloudFaults) => Ref.update(faults, change),
     restart: start,
   };
@@ -3544,15 +3562,17 @@ it.effect(
       const governor = yield* makeGovernor;
       const cloud = yield* makeCloud();
       yield* cloud.fault((current) => ({ ...current, dirtyCheckout: true }));
+      // Listed as someone might type it, with a trailing slash.
       const checkoutFree = (project: string) => ({
         moveAfterMs: 0,
         checkoutFree: {
-          repositories: ["github.com/alice/repo"],
+          repositories: ["github.com/alice/repo/"],
           project,
           note: "Reach the vault through its tools.",
         },
       });
-      yield* overflowTo(checkoutFree("Gone"), { "thread:o18:vault": ["needs:none"] });
+      const tags = { "thread:o18:vault": ["needs:none"], "thread:o18:vault2": ["needs:none"] };
+      yield* overflowTo(checkoutFree("Gone"), tags);
       yield* governor.pass(yield* tight);
       const threadId = yield* heldThread("o18:vault");
 
@@ -3561,7 +3581,7 @@ it.effect(
       assert.lengthOf(yield* cloud.attempts, 0);
       assert.deepEqual(yield* runs(threadId), ["queued:held"]);
 
-      yield* overflowTo(checkoutFree("Vault"), { [threadId]: ["needs:none"] });
+      yield* overflowTo(checkoutFree("Vault"), tags);
       yield* TestClock.adjust(TIMING.moveRetryMs);
       yield* governor.pass(yield* tight);
       assert.equal(yield* phaseOf(threadId), "moved");
@@ -3571,5 +3591,16 @@ it.effect(
       assert.include(launch!.message, "github.com/alice/repo, which isn't on this machine");
       assert.include(launch!.message, "Reach the vault through its tools.");
       assert.notInclude(launch!.message, "git push");
+
+      // A second one moves into the same folder too, where it has no branch to collide with the first's.
+      const second = yield* heldThread("o18:vault2", "more work");
+      yield* TestClock.adjust("15 seconds");
+      yield* governor.pass(yield* tight);
+      yield* TestClock.adjust("15 seconds");
+      yield* governor.pass(yield* tight);
+      assert.equal(yield* phaseOf(second), "moved");
+      assert.lengthOf(yield* cloud.attempts, 2);
+      // Neither move read the checkout's status, a project by repository, or the remote branch.
+      assert.deepEqual(yield* cloud.gitReads, []);
     }).pipe(Effect.provide(layerTest)),
 );

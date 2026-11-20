@@ -807,7 +807,7 @@ describe("moving a held thread", () => {
     ],
     ["unpushed commits", { git: { ...git, aheadCount: 2 } }, "it has unpushed commits"],
     [
-      "a checkout-free thread with a dirty checkout off a branch, never pushed",
+      "a checkout-free thread whose checkout has no git status at all",
       { checkoutFree: true, worktree: false, git: null },
       null,
     ],
@@ -907,6 +907,18 @@ describe("moving a held thread", () => {
     expect(checkoutFreeRepository(thread, ["GitHub.com/alice/vault"])).toBe(expected);
   });
 
+  it.each([
+    "github.com/alice/vault/",
+    " github.com/alice/vault.git ",
+    "github.com/alice/vault.git/",
+  ])("checkoutFreeRepository: the listed repository written as %j still matches", (listed) => {
+    expect(
+      checkoutFreeRepository({ repositoryKey: "github.com/alice/vault", worktree: false }, [
+        listed,
+      ]),
+    ).toBe("github.com/alice/vault");
+  });
+
   it.each<[string, { projects: ReadonlyArray<unknown> }, ReturnType<typeof checkoutFreePlan>]>([
     ["its model in the named project", { projects: ["vault"] }, { use: "thread" }],
     [
@@ -968,7 +980,7 @@ describe("moving a held thread", () => {
     expect(text).toContain("git push alice/fork HEAD:feature/x");
   });
 
-  it("moveBrief without a checkout forbids cloning the repository and ends with the note", () => {
+  it("moveBrief without a checkout forbids cloning the repository, then gives the note", () => {
     const { remote: _r, remoteBranch: _b, localBranch: _l, head: _h, ...rest } = brief;
     const text = moveBrief({
       ...rest,
@@ -979,8 +991,10 @@ describe("moving a held thread", () => {
       },
     })!;
     expect(text).toContain("github.com/alice/vault, which isn't on this machine");
-    expect(text).toContain("must not be cloned");
-    expect(text).toContain("Read the vault through its tools.");
+    // The note comes straight after what the move forbids.
+    expect(text).toContain(
+      "must not be cloned, fetched or copied here.\n\nRead the vault through its tools.",
+    );
     expect(text).not.toContain("git push");
     expect(text).toContain("do the thing");
   });
