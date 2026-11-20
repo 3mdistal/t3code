@@ -1023,8 +1023,8 @@ Memory and CPU limits section of `docs/user/remote-access.md`.
   in her notes vault's own checkout on `main`, usually with unrelated uncommitted edits, and that repository must
   never be cloned onto the cloud machine, which reaches the vault through a tool service instead. A thread whose
   project's repository key (`RepositoryIdentityResolver`'s lower-case key) is listed, and which runs in the project
-  checkout rather than a worktree of its own (`checkoutFreeRepository`), skips every git check, the `ls-remote` and
-  the same-repository project lookup; the rest of `moveBlocker` still applies. It launches with no
+  checkout rather than a worktree of its own (`checkoutFreeRepository`), skips the branch, change and push checks, the `ls-remote` and
+  the same-repository project lookup (git is still read for the repository key); the rest of `moveBlocker` still applies. It launches with no
   `workspaceStrategy` (the project's own folder there) into the one project there whose ID, or else title, is
   `project` (`checkoutFreePlan`), and its brief says the repository isn't there and must not be cloned, then adds
   `note`. A thread of that repository in its own worktree moves the usual way. Everything from `pending` on is the
