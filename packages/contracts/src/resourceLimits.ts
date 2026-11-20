@@ -12,10 +12,26 @@ export const USE_PERCENT = { minimum: 50, maximum: 90, default: 80 } as const;
 /** The tags-style names of what a thread may need from a machine, such as `vault` or `windows`. */
 const Capability = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(40));
 
+const OverflowText = (maxLength: number) =>
+  Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(maxLength));
+
+/**
+ * Repositories that never go to the linked machine. A thread working in the project checkout of one of them (not a
+ * worktree of its own) moves without its checkout: it starts in the linked machine's project `project` (its ID, or
+ * else its title) with no worktree, and `note` ends its brief, such as how to reach that repository's content there.
+ * `repositories` are repository keys as T3 resolves them, such as "github.com/owner/repo".
+ */
+const OverflowCheckoutFree = Schema.Struct({
+  repositories: Schema.Array(OverflowText(200)),
+  project: OverflowText(200),
+  note: Schema.optionalKey(OverflowText(2_000)),
+});
+
 /**
  * Where a thread held here continues once it has waited `moveAfterMs`: a linked machine. `provides` lists what that
  * machine can do for a thread's `needs:<capability>` tags, and `assumeNeeds` is what a thread without any such tag
- * is taken to need. `fallbackModel` runs a thread whose own model isn't there. `mode` defaults to "auto".
+ * is taken to need. `fallbackModel` runs a thread whose own model isn't there. `checkoutFree` moves threads of
+ * repositories that stay here. `mode` defaults to "auto".
  */
 export const ResourceLimitsOverflow = Schema.Struct({
   environmentId: EnvironmentId,
@@ -24,6 +40,7 @@ export const ResourceLimitsOverflow = Schema.Struct({
   assumeNeeds: Schema.optionalKey(Schema.Array(Capability)),
   moveAfterMs: Schema.optionalKey(NonNegativeInt),
   fallbackModel: Schema.optionalKey(ModelSelection),
+  checkoutFree: Schema.optionalKey(OverflowCheckoutFree),
 });
 export type ResourceLimitsOverflow = typeof ResourceLimitsOverflow.Type;
 

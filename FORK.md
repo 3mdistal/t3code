@@ -988,8 +988,8 @@ Memory and CPU limits section of `docs/user/remote-access.md`.
 
 - Settings, in the held machine's `resourceLimits.overflow` (no UI yet; the limits dialog keeps it when it saves):
   `environmentId`, `mode` (`auto` or `off`, default `auto`), `provides` (capabilities the target has),
-  `assumeNeeds` (default `vault`, `content`, `gateway`), `moveAfterMs` (default 10 minutes) and an optional
-  `fallbackModel`, which counts only where the target lists it.
+  `assumeNeeds` (default `vault`, `content`, `gateway`), `moveAfterMs` (default 10 minutes), an optional
+  `fallbackModel`, which counts only where the target lists it, and an optional `checkoutFree` (below).
 - When: in the governor pass, while threads are waiting and nothing was released that pass, unless Pause all is on
   or the limits are switched off. It walks the release path's ranked list (board rank, then oldest) and starts
   moving the first thread that has waited `moveAfterMs` and may move. One move is under way at a time, and a pass
@@ -1021,6 +1021,17 @@ Memory and CPU limits section of `docs/user/remote-access.md`.
   a commit the PC doesn't have is skipped with the reason. The brief still gives the PC's HEAD, and the thread there
   checks it has it, fetching and resetting if not, before it starts. It pushes back with
   `git push <remote there> HEAD:<branch>`.
+- Checkout-free moves (`overflow.checkoutFree`: `repositories`, `project`, optional `note`): Alice's task threads work
+  in her notes vault's own checkout on `main`, usually with unrelated uncommitted edits, and that repository must
+  never be cloned onto the cloud machine, which reaches the vault through a tool service instead. A thread whose
+  project's repository key (`RepositoryIdentityResolver`'s lower-case key) is listed, and which runs in the project
+  checkout rather than a worktree of its own (`checkoutFreeRepository`), skips every git check, the `ls-remote` and
+  the same-repository project lookup; the rest of `moveBlocker` still applies. It launches with no
+  `workspaceStrategy` (the project's own folder there) into the one project there whose ID, or else title, is
+  `project` (`checkoutFreePlan`), and its brief says the repository isn't there and must not be cloned, then adds
+  `note`. A thread of that repository in its own worktree moves the usual way. Everything from `pending` on is the
+  same. Since `threadThere` can't tell a root launch from a worktree one, a checkout-free thread that fails before
+  it starts there is logged as "its worktree wasn't set up".
 - The branch there is `t3-moved/<branch>-<6 chars of the thread ID>-<move start, base 36>`, never the branch's own
   name: `git branch` refuses a name that exists there, and `git worktree add` one checked out in another worktree.
   The start time is frozen in the launch, so a retry of the same launch keeps the name, and a later move, after a

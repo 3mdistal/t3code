@@ -709,6 +709,8 @@ export interface MoveCandidate {
   } | null;
   /** Runs in a worktree of its own rather than the project checkout. */
   readonly worktree: boolean;
+  /** Moves without its checkout, which stays here (`checkoutFreeRepository`), so its git state doesn't matter. */
+  readonly checkoutFree: boolean;
   readonly heldAttachments: number;
   readonly model: { readonly instanceId: string; readonly model: string };
 }
@@ -727,6 +729,19 @@ export interface MoveTarget {
 }
 
 const NEEDS_PREFIX = "needs:";
+
+/**
+ * The repository a thread moves without, when it works in the project checkout (not a worktree of its own) of one
+ * that `checkoutFree` keeps here; null when it moves with its branch as usual.
+ */
+export function checkoutFreeRepository(
+  thread: { readonly repositoryKey: string | null; readonly worktree: boolean },
+  repositories: ReadonlyArray<string>,
+): string | null {
+  const key = thread.repositoryKey?.toLowerCase() ?? null;
+  if (key === null || thread.worktree) return null;
+  return repositories.some((repository) => repository.trim().toLowerCase() === key) ? key : null;
+}
 
 /**
  * What a thread needs from its machine: its `needs:<capability>` tags, or `assumeNeeds` when it has none, since a
@@ -761,6 +776,7 @@ export function moveBlocker(
   );
   if (missing.length > 0) return `it needs ${missing.join(", ")}`;
   if (candidate.heldAttachments > 0) return "a held message has attachments";
+  if (candidate.checkoutFree) return null;
   const git = candidate.git;
   if (git === null || git.branch === null || git.head === null) {
     return "its checkout isn't on a branch";
@@ -776,7 +792,7 @@ export function moveBlocker(
 }
 
 const offers = (
-  target: MoveTarget,
+  target: Pick<MoveTarget, "providers">,
   model: { readonly instanceId: string; readonly model: string },
 ) => target.providers.find((provider) => provider.instanceId === model.instanceId);
 
@@ -794,18 +810,40 @@ export function movePlan(
   if (remote === undefined) {
     return { blocker: `the project there has no remote for ${candidate.upstream.repositoryKey}` };
   }
-  const provider = offers(target, candidate.model);
+  const plan = modelPlan(candidate.model, target);
+  return "blocker" in plan ? plan : { ...plan, remote };
+}
+
+/** The model a checkout-free move runs, or why it can't move: `projects` are those there named `project`. */
+export function checkoutFreePlan(
+  candidate: Pick<MoveCandidate, "model"> & { readonly project: string },
+  target: Omit<MoveTarget, "projects"> & { readonly projects: ReadonlyArray<unknown> },
+): { readonly use: "thread" | "fallback" } | { readonly blocker: string } {
+  if (target.projects.length === 0) {
+    return { blocker: `its checkout-free project ${candidate.project} isn't there` };
+  }
+  if (target.projects.length > 1) {
+    return { blocker: `several projects there are named ${candidate.project}` };
+  }
+  return modelPlan(candidate.model, target);
+}
+
+function modelPlan(
+  model: MoveCandidate["model"],
+  target: Pick<MoveTarget, "providers" | "fallbackModel">,
+): { readonly use: "thread" | "fallback" } | { readonly blocker: string } {
+  const provider = offers(target, model);
   if (
     provider !== undefined &&
-    (provider.models.includes(candidate.model.model) || provider.omittedModels > 0)
+    (provider.models.includes(model.model) || provider.omittedModels > 0)
   ) {
-    return { use: "thread", remote };
+    return { use: "thread" };
   }
   const fallback = target.fallbackModel;
   if (fallback !== null && offers(target, fallback)?.models.includes(fallback.model) === true) {
-    return { use: "fallback", remote };
+    return { use: "fallback" };
   }
-  return { blocker: `${candidate.model.instanceId} ${candidate.model.model} isn't there` };
+  return { blocker: `${model.instanceId} ${model.model} isn't there` };
 }
 
 /**
@@ -860,23 +898,44 @@ export const MAX_BRIEF_LENGTH = 110_000;
  * The first message of a moved thread: where it came from, how to hand work back, its history, and what waited.
  * Null when the held messages alone don't fit, since the move cancels each of them here.
  */
-export function moveBrief(input: {
-  readonly title: string;
-  readonly threadId: string;
-  readonly environmentId: string;
-  readonly machine: string;
-  /** The remote there that has the branch, and the branch on it. */
-  readonly remote: string;
-  readonly remoteBranch: string;
-  readonly localBranch: string;
-  readonly head: string;
-  readonly summary: string;
-  readonly held: ReadonlyArray<string>;
-}): string | null {
+export function moveBrief(
+  input: {
+    readonly title: string;
+    readonly threadId: string;
+    readonly environmentId: string;
+    readonly machine: string;
+    readonly summary: string;
+    readonly held: ReadonlyArray<string>;
+  } & (
+    | {
+        /** The remote there that has the branch, and the branch on it. */
+        readonly remote: string;
+        readonly remoteBranch: string;
+        readonly localBranch: string;
+        readonly head: string;
+      }
+    | {
+        readonly checkoutFree: {
+          readonly repository: string;
+          readonly project: string;
+          readonly note: string | null;
+        };
+      }
+  ),
+): string | null {
+  const workspace =
+    "checkoutFree" in input
+      ? [
+          `You're in the project ${input.checkoutFree.project} here. The original thread worked in ${input.checkoutFree.repository}, which isn't on this machine: there's no checkout of it here, and it must not be cloned, fetched or copied here.`,
+          ...(input.checkoutFree.note === null ? [] : [input.checkoutFree.note]),
+        ]
+      : [
+          `You're in a new worktree on branch ${input.localBranch}, started from ${input.remote}/${input.remoteBranch}. The original checkout was at commit ${input.head}. First check this worktree has it: \`git merge-base --is-ancestor ${input.head} HEAD\`. If it doesn't, run \`git fetch ${input.remote} ${input.remoteBranch}\` and \`git reset --hard FETCH_HEAD\` and check again; if it still doesn't, stop and say so.`,
+          `The other machine sees only what's pushed, so before you finish, commit your work and push it: \`git push ${input.remote} HEAD:${input.remoteBranch}\`.`,
+        ];
   const head = [
     `This thread continues "${input.title}" (thread ${input.threadId} in environment ${input.environmentId}), which waited on ${input.machine} because that machine was over its memory or CPU limits. T3 moved it here.`,
-    `You're in a new worktree on branch ${input.localBranch}, started from ${input.remote}/${input.remoteBranch}. The original checkout was at commit ${input.head}. First check this worktree has it: \`git merge-base --is-ancestor ${input.head} HEAD\`. If it doesn't, run \`git fetch ${input.remote} ${input.remoteBranch}\` and \`git reset --hard FETCH_HEAD\` and check again; if it still doesn't, stop and say so.`,
-    `The other machine sees only what's pushed, so before you finish, commit your work and push it: \`git push ${input.remote} HEAD:${input.remoteBranch}\`.`,
+    ...workspace,
     "Messages sent to the original thread later are forwarded here.",
   ].join("\n\n");
   const held = input.held.map((text, index) => `Message ${index + 1}:\n${text}`).join("\n\n");
