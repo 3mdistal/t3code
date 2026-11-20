@@ -740,7 +740,16 @@ export function checkoutFreeRepository(
 ): string | null {
   const key = thread.repositoryKey?.toLowerCase() ?? null;
   if (key === null || thread.worktree) return null;
-  return repositories.some((repository) => repository.trim().toLowerCase() === key) ? key : null;
+  return repositories.some((repository) => repositoryKeyOf(repository) === key) ? key : null;
+}
+
+/** A listed repository as T3 keys a remote: lower case, without trailing slashes or `.git`. */
+function repositoryKeyOf(repository: string): string {
+  return repository
+    .trim()
+    .replace(/\/+$/g, "")
+    .replace(/\.git$/i, "")
+    .toLowerCase();
 }
 
 /**

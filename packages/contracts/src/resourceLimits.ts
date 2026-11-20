@@ -18,7 +18,7 @@ const OverflowText = (maxLength: number) =>
 /**
  * Repositories that never go to the linked machine. A thread working in the project checkout of one of them (not a
  * worktree of its own) moves without its checkout: it starts in the linked machine's project `project` (its ID, or
- * else its title) with no worktree, and `note` ends its brief, such as how to reach that repository's content there.
+ * else its title) with no worktree, and `note` follows that in its brief, such as how to reach that repository's content there.
  * `repositories` are repository keys as T3 resolves them, such as "github.com/owner/repo".
  */
 const OverflowCheckoutFree = Schema.Struct({
