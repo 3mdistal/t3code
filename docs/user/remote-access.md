@@ -235,6 +235,27 @@ such as `needs:vault`; the linked machine's `provides` list says what it has. A
 thread without such a tag is taken to need `assumeNeeds` (vault, content and gateway
 by default), so tag it `needs:none` to let it move. Set `mode` to `off` to stop moves.
 
+A repository you never want copied to the linked machine can still have its threads
+move, without their checkout. Add `checkoutFree` to `overflow`: `repositories` lists
+the repositories to keep here, such as `"github.com/owner/notes"`; `project` names the
+project on the linked machine to start such threads in (its title or ID); and an
+optional `note` is added to the moved thread's first message, for example to say how
+the agent reaches that repository's content there. A thread working in the project's
+own folder of a listed repository then moves even with uncommitted or unpushed
+changes, and the new thread is told the repository isn't there and must not be
+cloned. A thread in its own worktree of that repository moves as usual.
+
+```json
+"overflow": {
+  "environmentId": "…",
+  "checkoutFree": {
+    "repositories": ["github.com/owner/notes"],
+    "project": "Notes tools",
+    "note": "Read and edit the notes through the notes tools."
+  }
+}
+```
+
 ### Tailscale HTTPS
 
 Join both devices to the same tailnet. In the desktop app, enable **Tailscale
