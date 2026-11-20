@@ -18,6 +18,8 @@ import {
   heldLaunchesNote,
   idleSessionsToClose,
   type HostReading,
+  checkoutFreePlan,
+  checkoutFreeRepository,
   isAlicesMessage,
   isDefiniteRefusal,
   interruptible,
@@ -753,6 +755,7 @@ describe("moving a held thread", () => {
       head: "abc123",
     },
     worktree: true,
+    checkoutFree: false,
     heldAttachments: 0,
     model: { instanceId: "claude", model: "claude-opus-5-5" },
   };
@@ -803,6 +806,26 @@ describe("moving a held thread", () => {
       "its branch's remote isn't a known repository",
     ],
     ["unpushed commits", { git: { ...git, aheadCount: 2 } }, "it has unpushed commits"],
+    [
+      "a checkout-free thread with a dirty checkout off a branch, never pushed",
+      { checkoutFree: true, worktree: false, git: null },
+      null,
+    ],
+    [
+      "a checkout-free thread that needs what the target lacks",
+      { checkoutFree: true, worktree: false, git: null, tags: [] },
+      "it needs vault, content, gateway",
+    ],
+    [
+      "a checkout-free thread with held attachments",
+      { checkoutFree: true, worktree: false, git: null, heldAttachments: 1 },
+      "a held message has attachments",
+    ],
+    [
+      "a checkout-free thread that's another thread's task",
+      { checkoutFree: true, worktree: false, git: null, topLevel: false },
+      "it's another thread's task",
+    ],
   ])("moveBlocker: %s", (_name, candidate, expected) => {
     expect(moveBlocker({ ...movable, ...candidate }, rules)).toBe(expected);
   });
@@ -862,6 +885,46 @@ describe("moving a held thread", () => {
     expect(movePlan({ model: movable.model, upstream }, { ...cloud, ...target })).toEqual(expected);
   });
 
+  it.each<[string, { repositoryKey: string | null; worktree: boolean }, string | null]>([
+    [
+      "the project checkout of a listed repository",
+      { repositoryKey: "github.com/alice/vault", worktree: false },
+      "github.com/alice/vault",
+    ],
+    [
+      "a listed repository written in another case",
+      { repositoryKey: "github.com/Alice/Vault", worktree: false },
+      "github.com/alice/vault",
+    ],
+    [
+      "a worktree of its own keeps the usual checks",
+      { repositoryKey: "github.com/alice/vault", worktree: true },
+      null,
+    ],
+    ["another repository", { repositoryKey: "github.com/alice/repo", worktree: false }, null],
+    ["no repository", { repositoryKey: null, worktree: false }, null],
+  ])("checkoutFreeRepository: %s", (_name, thread, expected) => {
+    expect(checkoutFreeRepository(thread, ["GitHub.com/alice/vault"])).toBe(expected);
+  });
+
+  it.each<[string, { projects: ReadonlyArray<unknown> }, ReturnType<typeof checkoutFreePlan>]>([
+    ["its model in the named project", { projects: ["vault"] }, { use: "thread" }],
+    [
+      "no project there by that name",
+      { projects: [] },
+      { blocker: "its checkout-free project Vault isn't there" },
+    ],
+    [
+      "several projects there by that name",
+      { projects: ["vault", "vault"] },
+      { blocker: "several projects there are named Vault" },
+    ],
+  ])("checkoutFreePlan: %s", (_name, target, expected) => {
+    expect(
+      checkoutFreePlan({ model: movable.model, project: "Vault" }, { ...cloud, ...target }),
+    ).toEqual(expected);
+  });
+
   it.each<[string, { remote: string | null; merge: string | null }, unknown]>([
     [
       "origin",
@@ -903,6 +966,23 @@ describe("moving a held thread", () => {
     expect(text).toContain("started from alice/fork/feature/x");
     expect(text).toContain("git merge-base --is-ancestor abc123 HEAD");
     expect(text).toContain("git push alice/fork HEAD:feature/x");
+  });
+
+  it("moveBrief without a checkout forbids cloning the repository and ends with the note", () => {
+    const { remote: _r, remoteBranch: _b, localBranch: _l, head: _h, ...rest } = brief;
+    const text = moveBrief({
+      ...rest,
+      checkoutFree: {
+        repository: "github.com/alice/vault",
+        project: "Vault",
+        note: "Read the vault through its tools.",
+      },
+    })!;
+    expect(text).toContain("github.com/alice/vault, which isn't on this machine");
+    expect(text).toContain("must not be cloned");
+    expect(text).toContain("Read the vault through its tools.");
+    expect(text).not.toContain("git push");
+    expect(text).toContain("do the thing");
   });
 
   it("moveBrief cuts the history short, but refuses held messages that don't fit", () => {

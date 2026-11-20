@@ -2613,6 +2613,8 @@ interface CloudFaults {
   readonly onGitStatus: Effect.Effect<void>;
   readonly onProjects: Effect.Effect<void>;
   readonly onRemoteHead: Effect.Effect<void>;
+  /** The checkout here has uncommitted changes. */
+  readonly dirtyCheckout: boolean;
 }
 
 const decodeThreadRead = Schema.decodeSync(OrchestratorMcpThreadReadResult);
@@ -2689,6 +2691,7 @@ const makeCloud = Effect.fnUntraced(function* () {
     onGitStatus: Effect.void,
     onProjects: Effect.void,
     onRemoteHead: Effect.void,
+    dirtyCheckout: false,
   });
   const once = (hook: "onLaunch" | "onSend" | "onGitStatus" | "onProjects" | "onRemoteHead") =>
     Effect.gen(function* () {
@@ -2716,7 +2719,7 @@ const makeCloud = Effect.fnUntraced(function* () {
         return {
           branch: "main",
           isDefaultBranch: true,
-          hasWorkingTreeChanges: false,
+          hasWorkingTreeChanges: (yield* Ref.get(faults)).dirtyCheckout,
           upstream: { remote: "origin", branch: "main", repositoryKey: "github.com/alice/repo" },
           aheadCount: 0,
           head: "abc123",
@@ -2733,6 +2736,8 @@ const makeCloud = Effect.fnUntraced(function* () {
           },
         ];
       }),
+    projectsNamed: (_environmentId, _modes, name) =>
+      Effect.succeed(name === "Vault" ? [{ id: ProjectId.make("project:cloud-vault") }] : []),
     providersThere: () =>
       Effect.succeed([{ instanceId, models: [modelSelection.model], omittedModels: 0 }]),
     launch: (_environmentId, _modes, input) =>
@@ -2747,7 +2752,7 @@ const makeCloud = Effect.fnUntraced(function* () {
         if (fault.refuseLaunches !== null) return yield* failure("refused", fault.refuseLaunches);
         const replayed = (yield* Ref.get(launched)).get(input.clientRequestId);
         const branch =
-          input.workspaceStrategy.type === "worktree" ? input.workspaceStrategy.branch! : "";
+          input.workspaceStrategy?.type === "worktree" ? input.workspaceStrategy.branch! : "";
         // A new launch can't take a branch an earlier one left there.
         if (replayed === undefined && (yield* Ref.get(branches)).has(branch)) {
           return yield* failure(`A branch named '${branch}' already exists.`, "invalid_request");
@@ -2945,7 +2950,7 @@ it.effect("O1: the best-ranked held thread that has waited long enough moves, on
       startFromOrigin: true,
     });
     assert.match(
-      launch!.workspaceStrategy.type === "worktree" ? launch!.workspaceStrategy.branch! : "",
+      launch!.workspaceStrategy?.type === "worktree" ? launch!.workspaceStrategy.branch! : "",
       /^t3-moved\/main-/,
     );
     // The held work went there, and so did the move's own note, which leaves only its notice.
@@ -3443,7 +3448,7 @@ it.effect("O14: a later move of a thread whose setup failed there gets a branch 
     yield* governor.pass(yield* tight);
     assert.equal(yield* phaseOf(threadId), "moved");
     const branches = (yield* cloud.attempts).map((attempt) =>
-      attempt.workspaceStrategy.type === "worktree" ? attempt.workspaceStrategy.branch : null,
+      attempt.workspaceStrategy?.type === "worktree" ? attempt.workspaceStrategy.branch : null,
     );
     assert.lengthOf(branches, 2);
     assert.notEqual(branches[0], branches[1]);
@@ -3530,4 +3535,41 @@ it.effect("O17: a thread that couldn't move still waits after a restart", () =>
     yield* governor.pass(yield* tight);
     assert.equal(yield* phaseOf(threadId), "moved");
   }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect(
+  "O18: a checkout-free thread moves from a dirty checkout into the named project, with no worktree",
+  () =>
+    Effect.gen(function* () {
+      const governor = yield* makeGovernor;
+      const cloud = yield* makeCloud();
+      yield* cloud.fault((current) => ({ ...current, dirtyCheckout: true }));
+      const checkoutFree = (project: string) => ({
+        moveAfterMs: 0,
+        checkoutFree: {
+          repositories: ["github.com/alice/repo"],
+          project,
+          note: "Reach the vault through its tools.",
+        },
+      });
+      yield* overflowTo(checkoutFree("Gone"), { "thread:o18:vault": ["needs:none"] });
+      yield* governor.pass(yield* tight);
+      const threadId = yield* heldThread("o18:vault");
+
+      // Without its project there, it waits.
+      yield* governor.pass(yield* tight);
+      assert.lengthOf(yield* cloud.attempts, 0);
+      assert.deepEqual(yield* runs(threadId), ["queued:held"]);
+
+      yield* overflowTo(checkoutFree("Vault"), { [threadId]: ["needs:none"] });
+      yield* TestClock.adjust(TIMING.moveRetryMs);
+      yield* governor.pass(yield* tight);
+      assert.equal(yield* phaseOf(threadId), "moved");
+      const [launch] = yield* cloud.attempts;
+      assert.equal(launch!.projectId, ProjectId.make("project:cloud-vault"));
+      assert.isUndefined(launch!.workspaceStrategy);
+      assert.include(launch!.message, "github.com/alice/repo, which isn't on this machine");
+      assert.include(launch!.message, "Reach the vault through its tools.");
+      assert.notInclude(launch!.message, "git push");
+    }).pipe(Effect.provide(layerTest)),
 );
