@@ -1025,7 +1025,14 @@ const makeLiveHost = Effect.gen(function* () {
       });
     }),
     projectsNamed: Effect.fn("Overflow.projectsNamed")(function* (environmentId, modes, name) {
-      const listed = yield* listThere(environmentId, modes);
+      // Archived projects are out of use, and a project a shifting page listed twice is still one.
+      const listed = [
+        ...new Map(
+          (yield* listThere(environmentId, modes))
+            .filter((project) => !project.archivedAt)
+            .map((project) => [project.id, project]),
+        ).values(),
+      ];
       const byId = listed.filter((project) => project.id === name);
       return (byId.length > 0 ? byId : listed.filter((project) => project.title === name)).map(
         (project) => ({ id: project.id }),
