@@ -1470,7 +1470,8 @@ never downloads or installs an update on its own. Headless servers update with `
 Task Scheduler on the PC runs `node scripts/fork/sync.ts run` every Monday and Thursday at 6:00 ET. teenylilconfig
 registers the task and passes the PC's flags (`--thread-project`, `--t3`, `--usage-tool`, `--memgate`). Each run:
 
-1. Finds upstream's newest stable tag. If `fork/main` already sits on it, the run ends.
+1. Fetches the clone's full history if it's shallow (`git fetch --unshallow`), then finds upstream's newest
+   stable tag. If `fork/main` already sits on it, the run ends.
 2. Rebases the stack (`<old base>..fork/main`) onto the new tag in a scratch worktree beside the clone
    (`<clone>-sync/vX.Y.Z`). A stack commit upstream has since released, such as a backport, drops out. A conflict
    in one of upstream's own workflows resolves itself: the sync takes upstream's side, including a deletion, and
@@ -1483,8 +1484,15 @@ registers the task and passes the PC's flags (`--thread-project`, `--t3`, `--usa
    to the new stack, after the same workflow check. The release workflow then publishes `vX.Y.Z-alice.1`.
 6. On any other conflict or a CI failure, it starts **one** Claude Opus 5.5 thread at xhigh effort in Alice's
    teenylilthoughts project, on the Claude account with the most room, once the memory gate allows. The thread
-   gets this file, upstream's changes since the last base with their pull requests, and the failing step. Later
-   runs leave it alone while it works. State lives in `<clone>-sync/state.json`.
+   gets this file, upstream's changes since the last base with their pull requests, and the failing step, in a
+   message kept under 120,000 characters: past that, the list of upstream commits is cut and a `git log` command
+   gives the rest. It asks for the dedupe pass below, and for questions to go on Alice's Task Priorities board.
+   Later runs leave it alone while it works. State lives in `<clone>-sync/state.json`.
+
+A run that throws, such as a fetch that fails, starts a thread the same way, once per distinct error: the same error
+on a later run starts none. If a thread can't start (no `--thread-project`, the memory gate held launches too long,
+or `t3 thread start` failed), the state records why and the next run tries again. `sync.ts push` marks the state
+`ci-pending` and keeps the thread that owns the sync.
 
 No agent runs when nothing conflicts. `node scripts/fork/sync.ts run --dry-run` reports what a run would do
 without pushing or starting anything.
@@ -1496,7 +1504,13 @@ stopped on a conflict or Fork CI failed. Your job is a passing release, or a cle
 
 - **Assume upstream's maintainers are smart.** When they changed code a patch touches, read their pull request to
   learn why, then rebuild the patch on their new design. Don't paste the old patch back over it.
-- **If upstream now does what a patch does,** propose dropping the patch. Ask Alice before removing a feature.
+- **Run the dedupe pass.** For each patch in this file, check whether upstream's new commits cover it. Drop a patch
+  upstream covers fully, cut one it covers partly down to what upstream still lacks, and keep the rest. Prove each
+  with the fork's tests, and name the upstream pull request in the commit and in this file. Ask Alice before
+  removing anything upstream doesn't cover.
+- **Ask Alice on her Task Priorities board, never only in chat.** Find the fork sync task with
+  `node ~/.claude/skills/sync-to-vault/scripts/task-log.mjs find fork sync`, write a short Content decision page
+  (the question, the options and your suggested answer), and mark the task `needs` with that page linked.
 - **Never revert or weaken an upstream change to make a patch apply.**
 - Keep the rules for every fork change above.
 - **Never publish a release whose checks failed.** `sync.ts promote` refuses to move `fork/main` until Fork CI
