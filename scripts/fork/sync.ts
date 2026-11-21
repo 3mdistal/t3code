@@ -28,8 +28,11 @@ const CI_FINISH_TIMEOUT_MS = 4 * 60 * 60_000;
 const CI_POLL_MS = 60_000;
 const MEMORY_WAIT_MS = 6 * 60 * 60_000;
 const MEMORY_POLL_MS = 2 * 60_000;
+// `t3 thread start` refuses a longer message.
+export const BRIEF_LIMIT = 120_000;
+const FAILURE_LIMIT = 20_000;
 
-interface SyncOptions {
+export interface SyncOptions {
   readonly clone: string;
   readonly workDir: string;
   readonly dryRun: boolean;
@@ -47,6 +50,10 @@ interface SyncState {
   readonly status: "ci-pending" | "needs-agent" | "promoted";
   readonly threadId?: string;
   readonly detail?: string;
+  /** The error a thrown run started its thread for, so the same error again starts none. */
+  readonly error?: string;
+  /** Why the last thread start failed; the next run tries again. */
+  readonly threadStartFailure?: string;
   readonly updatedAt: string;
 }
 
@@ -111,6 +118,113 @@ export function syncBranch(target: string): string {
 
 export function backupTag(target: string): string {
   return `backup/fork-main-before-${target}`;
+}
+
+/**
+ * A shallow clone has no stable tag under the stack to rebase from, so `run` deepens it first.
+ * Whether it was shallow.
+ */
+export function unshallow(clone: string): boolean {
+  const shallow = () => git(clone, ["rev-parse", "--is-shallow-repository"]) === "true";
+  if (!shallow()) return false;
+  for (const remote of ["origin", "upstream"]) {
+    if (!shallow()) break;
+    if (lines(git(clone, ["remote"])).includes(remote)) {
+      git(clone, ["fetch", "--unshallow", "--no-tags", remote]);
+    }
+  }
+  if (shallow()) throw new Error(`${clone} is still a shallow clone after fetching --unshallow.`);
+  return true;
+}
+
+function cut(text: string, limit: number): string {
+  return text.length <= limit
+    ? text
+    : `${text.slice(0, limit)}\n\n[cut: ${text.length - limit} more characters]`;
+}
+
+const AFTER_THE_FIX = (target: string) => [
+  "Before pushing, run the dedupe pass: for each patch FORK.md lists, check whether upstream's new commits cover it. Drop a patch upstream covers fully, cut one it covers partly down to what upstream still lacks, and keep the rest. Prove each with the fork's tests, and update FORK.md, naming the upstream pull request behind each drop or cut.",
+  "",
+  "When the stack is fixed:",
+  `1. Push it with \`node scripts/fork/sync.ts push ${target}\` from the worktree. It refuses a stack where one of upstream's workflows could run, and Fork CI runs on \`${syncBranch(target)}\`.`,
+  `2. From the worktree, run \`node scripts/fork/sync.ts promote ${target}\`. It waits for Fork CI and moves ${FORK_MAIN_BRANCH} only if CI passed, which publishes the release.`,
+  "3. End with a message that names each patch commit you changed, with its subject, its old and new SHA, and what you changed in it, so the changes can be checked against the old patches before Alice installs the release.",
+];
+
+const ASKING_ALICE = [
+  "If you can't get it to pass, or a fix would drop or change one of Alice's features, stop and ask her on her Task Priorities board, never only in chat: find the fork sync task with `node ~/.claude/skills/sync-to-vault/scripts/task-log.mjs find fork sync`, write a short Content decision page (the question, the options and your suggested answer), and mark the task `needs` with that page linked.",
+];
+
+/**
+ * The conflict thread's first message. The list of upstream commits that touch the patches is
+ * cut to keep the message under `BRIEF_LIMIT`, with a `git log` for the rest.
+ */
+export function conflictBrief(input: {
+  readonly target: string;
+  readonly base: string;
+  readonly basedOn: string;
+  readonly worktree: string;
+  readonly clone: string;
+  readonly summary: string;
+  readonly failure: string;
+  readonly total: number;
+  readonly touching: ReadonlyArray<string>;
+}): string {
+  const stack = input.basedOn.slice(0, 12);
+  const render = (shown: number) =>
+    [
+      `The fork's sync onto upstream ${input.target} needs you: ${input.summary}.`,
+      "",
+      `You're fixing it for Alice. Work in \`${input.worktree}\`, a worktree of the fork clone \`${input.clone}\`. It holds the patch stack from \`${FORK_MAIN_BRANCH}\` (${stack}) rebased onto ${input.target}. Read FORK.md there first and follow its conflict rules.`,
+      "",
+      cut(input.failure, FAILURE_LIMIT),
+      "",
+      `Upstream's ${input.total} commits since ${input.base} are \`git log --oneline ${input.base}..${input.target}\`. These touch files the patches change:`,
+      ...(input.touching.length === 0
+        ? ["- none"]
+        : input.touching.slice(0, shown).map((line) => `- ${line}`)),
+      ...(shown < input.touching.length
+        ? [
+            `- and ${input.touching.length - shown} more: \`git log --oneline --no-merges ${input.base}..${input.target} -- $(git diff --name-only ${input.base} ${stack})\``,
+          ]
+        : []),
+      "",
+      ...AFTER_THE_FIX(input.target),
+      "",
+      ...ASKING_ALICE,
+    ].join("\n");
+  const whole = render(input.touching.length);
+  if (whole.length <= BRIEF_LIMIT) return whole;
+  let room = BRIEF_LIMIT - render(0).length;
+  let shown = 0;
+  for (const line of input.touching) {
+    room -= line.length + 3;
+    if (room < 0) break;
+    shown += 1;
+  }
+  return render(shown);
+}
+
+/** The first message of the thread for a run that threw before it knew what it was syncing. */
+export function runFailureBrief(input: {
+  readonly clone: string;
+  readonly target: string | undefined;
+  readonly error: string;
+}): string {
+  return [
+    `The fork's scheduled sync${input.target === undefined ? "" : ` onto upstream ${input.target}`} failed: \`node scripts/fork/sync.ts run\` threw before it could hand the sync over.`,
+    "",
+    `You're fixing it for Alice, in the fork clone \`${input.clone}\`. Read FORK.md there first.`,
+    "",
+    "```",
+    cut(input.error, FAILURE_LIMIT),
+    "```",
+    "",
+    `Find the cause. If it's in \`scripts/fork/\`, fix it with a test in \`scripts/fork/sync.test.ts\` and fold the fix into the \`fork:\` commit that owns \`scripts/fork/\`. Then run \`node scripts/fork/sync.ts run\` again; it hands any conflict to a new thread.`,
+    "",
+    ...ASKING_ALICE,
+  ].join("\n");
 }
 
 function lines(output: string): Array<string> {
@@ -297,47 +411,47 @@ async function startConflictThread(
     readonly failure: string;
   },
 ): Promise<void> {
-  const state = {
-    target: input.target,
-    base: input.base,
-    basedOn: input.basedOn,
-    status: "needs-agent" as const,
-    detail: input.summary,
-  };
   const changes = upstreamChanges(options, input.base, input.target, input.basedOn);
-  const message = [
-    `The fork's sync onto upstream ${input.target} needs you: ${input.summary}.`,
-    "",
-    `You're fixing it for Alice. Work in \`${input.worktree}\`, a worktree of the fork clone \`${options.clone}\`. It holds the patch stack from \`${FORK_MAIN_BRANCH}\` (${input.basedOn.slice(0, 12)}) rebased onto ${input.target}. Read FORK.md there first and follow its conflict rules.`,
-    "",
-    input.failure,
-    "",
-    `Upstream's ${changes.total} commits since ${input.base} are \`git log --oneline ${input.base}..${input.target}\`. These touch files the patches change:`,
-    ...(changes.touching.length === 0 ? ["- none"] : changes.touching.map((line) => `- ${line}`)),
-    "",
-    "When the stack is fixed:",
-    `1. Push it with \`node scripts/fork/sync.ts push ${input.target}\` from the worktree. It refuses a stack where one of upstream's workflows could run, and Fork CI runs on \`${syncBranch(input.target)}\`.`,
-    `2. From the worktree, run \`node scripts/fork/sync.ts promote ${input.target}\`. It waits for Fork CI and moves ${FORK_MAIN_BRANCH} only if CI passed, which publishes the release.`,
-    `3. End with a message that names each patch commit you changed, with its subject, its old and new SHA, and what you changed in it, so the changes can be checked against the old patches before Alice installs the release.`,
-    "",
-    "If you can't get it to pass, or a fix would drop or change one of Alice's features, stop and tell Alice here what you need.",
-  ].join("\n");
+  await startThread(options, {
+    title: `Fork sync ${input.target}: ${input.summary}`,
+    message: conflictBrief({ ...input, clone: options.clone, ...changes }),
+    state: {
+      target: input.target,
+      base: input.base,
+      basedOn: input.basedOn,
+      status: "needs-agent",
+      detail: input.summary,
+    },
+  });
+}
 
+/**
+ * Starts the agent's thread, or records in the state why it didn't, so the next run tries
+ * again: a run only stands down for a state that names a thread.
+ */
+async function startThread(
+  options: SyncOptions,
+  input: {
+    readonly title: string;
+    readonly message: string;
+    readonly state: Omit<SyncState, "updatedAt" | "threadId" | "threadStartFailure">;
+  },
+): Promise<void> {
+  const { message, state } = input;
+  const failed = (why: string) => {
+    writeState(options, { ...state, threadStartFailure: why });
+    log(why);
+    process.exitCode = 1;
+  };
   if (options.dryRun) {
-    log(`Would start a conflict thread:\n${message}`);
+    log(`Would start a thread:\n${message}`);
     return;
   }
   if (options.threadProject === undefined) {
-    writeState(options, state);
-    log(`No --thread-project, so no thread was started. It would have said:\n${message}`);
-    process.exitCode = 1;
-    return;
+    return failed(`No --thread-project, so no thread was started. It would have said:\n${message}`);
   }
   if (!(await waitForMemory(options))) {
-    writeState(options, state);
-    log("The memory gate held launches for too long; the next run starts the thread.");
-    process.exitCode = 1;
-    return;
+    return failed("The memory gate held launches for too long; the next run starts the thread.");
   }
 
   const provider = claudeAccount(options);
@@ -353,7 +467,7 @@ async function startConflictThread(
       options.threadProject,
       "-",
       "--title",
-      `Fork sync ${input.target}: ${input.summary}`,
+      input.title,
       "--provider",
       provider,
       "--model",
@@ -364,15 +478,80 @@ async function startConflictThread(
   );
   const threadId = started.stdout.trim();
   if (started.status !== 0 || threadId.length === 0) {
-    writeState(options, state);
-    log(`t3 thread start failed (${started.status}): ${started.stderr.trim()}`);
-    process.exitCode = 1;
-    return;
+    return failed(
+      `t3 thread start failed (${started.status}): ${started.stderr.trim()}; the next run tries again.`,
+    );
   }
   writeState(options, { ...state, threadId });
   log(
     `Started thread ${threadId} on ${provider}${supportsOptions ? "" : " at the default effort (this t3 has no --option)"}.`,
   );
+}
+
+/** What `run` has worked out so far, for the thread a failure starts. */
+interface RunProgress {
+  target?: string;
+  base?: string;
+  basedOn?: string;
+}
+
+/**
+ * A run that throws hands its error to an agent, through the conflict thread once it knows what
+ * it is syncing. Each error starts one thread: the same error on a later run starts none.
+ */
+export async function runAndReport(options: SyncOptions): Promise<void> {
+  const progress: RunProgress = {};
+  try {
+    await run(options, progress);
+  } catch (thrown) {
+    const error = thrown instanceof Error ? thrown.message : String(thrown);
+    log(`The run failed: ${error}`);
+    const previous = readState(options);
+    if (previous?.error === error && previous.threadId !== undefined) {
+      log(`Thread ${previous.threadId} already has this error.`);
+      process.exitCode = 1;
+      return;
+    }
+    const { target, base, basedOn } = progress;
+    const failure = [
+      "`node scripts/fork/sync.ts run` threw:",
+      "",
+      "```",
+      thrown instanceof Error ? (thrown.stack ?? error) : error,
+      "```",
+    ].join("\n");
+    if (target !== undefined && base !== undefined && basedOn !== undefined) {
+      const changes = upstreamChanges(options, base, target, basedOn);
+      await startThread(options, {
+        title: `Fork sync ${target}: the run failed`,
+        message: conflictBrief({
+          target,
+          base,
+          basedOn,
+          worktree: worktreePath(options, target),
+          clone: options.clone,
+          summary: "the run failed",
+          failure,
+          ...changes,
+        }),
+        state: { target, base, basedOn, status: "needs-agent", detail: "the run failed", error },
+      });
+    } else {
+      await startThread(options, {
+        title: `Fork sync${target === undefined ? "" : ` ${target}`}: the run failed`,
+        message: runFailureBrief({ clone: options.clone, target, error: failure }),
+        state: {
+          target: target ?? previous?.target ?? "",
+          base: previous?.base ?? "",
+          basedOn: previous?.basedOn ?? "",
+          status: "needs-agent",
+          detail: "the run failed",
+          error,
+        },
+      });
+    }
+    process.exitCode = 1;
+  }
 }
 
 function fetchRefs(options: SyncOptions, target?: string): void {
@@ -519,19 +698,29 @@ function pushSyncBranch(worktree: string, target: string): void {
   log(`Pushed ${syncBranch(target)}; Fork CI runs on it.`);
 }
 
-async function run(options: SyncOptions): Promise<void> {
+async function run(options: SyncOptions, progress: RunProgress): Promise<void> {
+  if (unshallow(options.clone))
+    log(`Fetched the full history into the shallow clone ${options.clone}.`);
   const target = newestUpstreamStableTag(options);
   if (target === undefined) throw new Error("upstream has no stable tags");
+  progress.target = target;
   fetchRefs(options, target);
   const stack = git(options.clone, ["rev-parse", `origin/${FORK_MAIN_BRANCH}`]);
   const base = baseStableTag(options.clone, stack);
+  progress.base = base;
+  progress.basedOn = stack;
   if (compareStableTags(target, base) <= 0) {
     log(`${FORK_MAIN_BRANCH} is on ${base}, the newest stable release.`);
     return;
   }
 
   const previous = readState(options);
-  if (previous?.target === target && previous.threadId !== undefined) {
+  // A thread started for a failed run doesn't own the sync, so the run goes on past it.
+  if (
+    previous?.target === target &&
+    previous.threadId !== undefined &&
+    previous.error === undefined
+  ) {
     log(`Thread ${previous.threadId} is already on the ${target} sync.`);
     return;
   }
@@ -684,8 +873,14 @@ async function main(argv: ReadonlyArray<string>): Promise<void> {
     basedOn: values["based-on"],
   };
   const [verb, target] = positionals;
-  if (verb === "run") return run(options);
-  if (verb === "push" && target !== undefined) return pushSyncBranch(process.cwd(), target);
+  if (verb === "run") return runAndReport(options);
+  if (verb === "push" && target !== undefined) {
+    pushSyncBranch(process.cwd(), target);
+    // The thread that pushed still owns the sync; `promote` reads basedOn from here.
+    const state = readState(options);
+    if (state?.target === target) writeState(options, { ...state, status: "ci-pending" });
+    return;
+  }
   if (verb === "promote" && target !== undefined) return promote(options, target);
   console.error(USAGE);
   process.exitCode = 2;

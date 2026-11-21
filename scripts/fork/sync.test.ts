@@ -8,10 +8,14 @@ import { describe, expect, it } from "vite-plus/test";
 
 import { isInertWorkflow, regenerateWorkflows } from "./ci-workflows.ts";
 import {
+  BRIEF_LIMIT,
+  conflictBrief,
   linkUpstreamPullRequests,
   memoryAllowsLaunch,
   pickClaudeAccount,
   rebaseStack,
+  runAndReport,
+  unshallow,
 } from "./sync.ts";
 
 describe("pickClaudeAccount", () => {
@@ -187,5 +191,187 @@ describe("rebaseStack", () => {
     const problem = repo.rebase();
     expect(problem?.summary).toBe("workflow rewrite failed");
     expect(problem?.failure).toContain("lint.yml needs exactly one top-level on: block");
+  });
+});
+
+describe("unshallow", () => {
+  it("fetches the full history into a shallow clone, once", () => {
+    const dir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "fork-sync-shallow-"));
+    try {
+      const git = (cwd: string, ...args: Array<string>) =>
+        NodeChildProcess.execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+      const source = NodePath.join(dir, "source");
+      NodeFS.mkdirSync(source);
+      git(source, "init", "--quiet", "--initial-branch=main");
+      git(source, "config", "user.name", "Fork Sync Test");
+      git(source, "config", "user.email", "fork-sync@example.invalid");
+      for (const message of ["one", "two", "three"]) {
+        git(source, "commit", "--quiet", "--allow-empty", "--no-gpg-sign", "--message", message);
+      }
+      const clone = NodePath.join(dir, "clone");
+      const url = `file://${source.replaceAll("\\", "/")}`;
+      git(dir, "clone", "--quiet", "--depth=1", url, clone);
+      expect(git(clone, "rev-parse", "--is-shallow-repository")).toBe("true");
+
+      expect(unshallow(clone)).toBe(true);
+      expect(git(clone, "rev-parse", "--is-shallow-repository")).toBe("false");
+      expect(git(clone, "rev-list", "--count", "HEAD")).toBe("3");
+      expect(unshallow(clone)).toBe(false);
+    } finally {
+      NodeFS.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("conflictBrief", () => {
+  const input = {
+    target: "v0.1.11",
+    base: "v0.1.6",
+    basedOn: "362ad35656099e4415c64a4b0dbc9ea8817fa55a",
+    worktree: "/sync/v0.1.11",
+    clone: "/fork",
+    summary: "rebase conflict",
+    failure: "The rebase stopped applying `abc fork: x`.",
+    total: 3,
+    touching: ["aaa fix(server): one (#1)", "bbb fix(web): two (#2)"],
+  };
+
+  it("lists every upstream commit that fits, and asks for the dedupe pass and board questions", () => {
+    const brief = conflictBrief(input);
+    expect(brief).toContain("- aaa fix(server): one (#1)\n- bbb fix(web): two (#2)\n");
+    expect(brief).not.toContain("more:");
+    expect(brief).toContain("dedupe pass");
+    expect(brief).toContain(
+      "`node ~/.claude/skills/sync-to-vault/scripts/task-log.mjs find fork sync`",
+    );
+    expect(brief).toContain("`needs`");
+    expect(brief).not.toContain("tell Alice here");
+  });
+
+  it("stays under the limit, cutting the commit list and naming a git log for the rest", () => {
+    const touching = Array.from(
+      { length: 5_000 },
+      (_, index) => `${String(index).padStart(10, "0")} fix(server): ${"a".repeat(80)} (#${index})`,
+    );
+    const brief = conflictBrief({ ...input, failure: "x".repeat(200_000), touching });
+    expect(brief.length).toBeLessThanOrEqual(BRIEF_LIMIT);
+    expect(brief).toContain(`- ${touching[0]}\n`);
+    expect(brief).not.toContain(touching.at(-1));
+    expect(brief).toMatch(
+      /- and \d+ more: `git log --oneline --no-merges v0\.1\.6\.\.v0\.1\.11 -- \$\(git diff --name-only v0\.1\.6 362ad3565609\)`/,
+    );
+    expect(brief).toContain("[cut: 180000 more characters]");
+    expect(brief).toContain("task-log.mjs find fork sync");
+  });
+});
+
+/**
+ * A `t3` that records each `thread start` and answers with `thread-<n>`, or fails with "boom"
+ * while `fail()` is on.
+ */
+function fakeT3(dir: string) {
+  const calls = NodePath.join(dir, "calls.jsonl");
+  const brief = NodePath.join(dir, "brief.txt");
+  const failFlag = NodePath.join(dir, "fail");
+  const script = NodePath.join(dir, "t3.mjs");
+  NodeFS.writeFileSync(
+    script,
+    [
+      'import * as NodeFS from "node:fs";',
+      "const args = process.argv.slice(2);",
+      'if (args.includes("--help")) { console.log("--option"); process.exit(0); }',
+      `NodeFS.appendFileSync(${JSON.stringify(calls)}, JSON.stringify(args) + "\\n");`,
+      `NodeFS.writeFileSync(${JSON.stringify(brief)}, NodeFS.readFileSync(0, "utf8"));`,
+      `if (NodeFS.existsSync(${JSON.stringify(failFlag)})) { console.error("boom"); process.exit(3); }`,
+      `console.log("thread-" + NodeFS.readFileSync(${JSON.stringify(calls)}, "utf8").trim().split("\\n").length);`,
+      "",
+    ].join("\n"),
+  );
+  let t3: string;
+  // oxlint-disable-next-line t3code/no-global-process-runtime -- no Effect runtime here; see sync.ts's header.
+  if (process.platform === "win32") {
+    t3 = NodePath.join(dir, "t3.cmd");
+    NodeFS.writeFileSync(t3, `@"${process.execPath}" "${script}" %*\r\n`);
+  } else {
+    t3 = NodePath.join(dir, "t3");
+    NodeFS.writeFileSync(t3, `#!/bin/sh\nexec "${process.execPath}" "${script}" "$@"\n`, {
+      mode: 0o755,
+    });
+  }
+  return {
+    t3,
+    starts: () =>
+      NodeFS.existsSync(calls) ? NodeFS.readFileSync(calls, "utf8").trim().split("\n").length : 0,
+    brief: () => NodeFS.readFileSync(brief, "utf8"),
+    fail: (on: boolean) =>
+      on ? NodeFS.writeFileSync(failFlag, "") : NodeFS.rmSync(failFlag, { force: true }),
+  };
+}
+
+describe("runAndReport", () => {
+  const scratch = () => {
+    const dir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "fork-sync-report-"));
+    const t3 = fakeT3(dir);
+    const exitCode = process.exitCode;
+    const options = (clone: string) => ({
+      clone,
+      workDir: NodePath.join(dir, "work"),
+      dryRun: false,
+      threadProject: "project-1",
+      t3: t3.t3,
+      usageTool: undefined,
+      memgate: undefined,
+      basedOn: undefined,
+    });
+    const state = () =>
+      JSON.parse(NodeFS.readFileSync(NodePath.join(dir, "work", "state.json"), "utf8"));
+    return {
+      dir,
+      t3,
+      options,
+      state,
+      [Symbol.dispose]: () => {
+        process.exitCode = exitCode;
+        NodeFS.rmSync(dir, { recursive: true, force: true });
+      },
+    };
+  };
+
+  it("starts one thread for each distinct error a run throws", async () => {
+    using repo = scratch();
+    const missing = NodePath.join(repo.dir, "missing");
+
+    await runAndReport(repo.options(missing));
+    expect(repo.t3.starts()).toBe(1);
+    expect(repo.t3.brief()).toContain("`node scripts/fork/sync.ts run` threw");
+    expect(repo.t3.brief()).toContain("task-log.mjs find fork sync");
+    expect(repo.state()).toMatchObject({ status: "needs-agent", threadId: "thread-1" });
+    expect(repo.state().error).toEqual(expect.any(String));
+
+    await runAndReport(repo.options(missing));
+    expect(repo.t3.starts()).toBe(1);
+
+    const notARepository = NodePath.join(repo.dir, "plain");
+    NodeFS.mkdirSync(notARepository);
+    await runAndReport(repo.options(notARepository));
+    expect(repo.t3.starts()).toBe(2);
+    expect(repo.state().threadId).toBe("thread-2");
+  });
+
+  it("records a failed thread start, and the next run tries again", async () => {
+    using repo = scratch();
+    const missing = NodePath.join(repo.dir, "missing");
+
+    repo.t3.fail(true);
+    await runAndReport(repo.options(missing));
+    expect(repo.t3.starts()).toBe(1);
+    expect(repo.state().threadId).toBeUndefined();
+    expect(repo.state().threadStartFailure).toContain("boom");
+
+    repo.t3.fail(false);
+    await runAndReport(repo.options(missing));
+    expect(repo.t3.starts()).toBe(2);
+    expect(repo.state().threadId).toBe("thread-2");
+    expect(repo.state().threadStartFailure).toBeUndefined();
   });
 });
