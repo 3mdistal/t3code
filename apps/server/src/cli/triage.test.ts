@@ -9,7 +9,7 @@ import * as NodeURL from "node:url";
 
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { assert, it } from "@effect/vitest";
+import { assert, describe, it } from "@effect/vitest";
 import { TRIAGE_PROMPT_FILE_NAME } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as NetService from "@t3tools/shared/Net";
@@ -22,6 +22,7 @@ import { expect, vi } from "vite-plus/test";
 
 import { cli } from "../binCli.ts";
 import { buildTriageLaunchPrompt } from "../triage/triagePrompt.ts";
+import { TRIAGE_ENABLED } from "../triage/triageOff.ts"; // fork: see FORK.md.
 import { matchAgentAnswer, pickAgent } from "./triage.ts";
 
 const cliPath = NodeURL.fileURLToPath(new URL("../bin.ts", import.meta.url));
@@ -78,37 +79,40 @@ async function fixture(commands: ReadonlyArray<string>) {
   };
 }
 
-it.live.each([
-  { commands: ["agy", "codex"], agent: "antigravity", command: "agy", model: "test-model" },
-  { commands: ["agy"], agent: undefined, command: "agy", model: undefined },
-  { commands: ["agy", "codex"], agent: "codex", command: "codex", model: "test-model" },
-  { commands: ["agy", "codex", "claude"], agent: "claude", command: "claude", model: undefined },
-])(
-  "launches $command with the triage prompt (agent=$agent, model=$model)",
-  ({ commands, agent, command, model }) =>
-    Effect.promise(async () => {
-      await using setup = await fixture(commands);
-      const result = await setup.run([
-        ...(agent === undefined ? [] : ["--agent", agent]),
-        ...(model === undefined ? [] : ["--model", model]),
-      ]);
-      expect(result.code, result.stdout + result.stderr).toBe(0);
-      const launch = JSON.parse(await NodeFSP.readFile(setup.record, "utf8")) as {
-        command: string;
-        args: string[];
-        cwd: string;
-      };
-      expect(launch.command).toBe(command);
-      expect(launch.args.slice(0, -1)).toEqual([
-        ...(model === undefined ? [] : ["--model", model]),
-        ...(command === "agy" ? ["--prompt-interactive"] : []),
-      ]);
-      expect(launch.args.at(-1)).toContain(NodePath.join(launch.cwd, "triage-playbook.md"));
-      expect(
-        await NodeFSP.readFile(NodePath.join(launch.cwd, "triage-playbook.md"), "utf8"),
-      ).toContain("context.md");
-    }),
-);
+// fork: `t3 triage` is off, so it launches no agent. See FORK.md.
+describe.skipIf(!TRIAGE_ENABLED)("t3 triage", () => {
+  it.live.each([
+    { commands: ["agy", "codex"], agent: "antigravity", command: "agy", model: "test-model" },
+    { commands: ["agy"], agent: undefined, command: "agy", model: undefined },
+    { commands: ["agy", "codex"], agent: "codex", command: "codex", model: "test-model" },
+    { commands: ["agy", "codex", "claude"], agent: "claude", command: "claude", model: undefined },
+  ])(
+    "launches $command with the triage prompt (agent=$agent, model=$model)",
+    ({ commands, agent, command, model }) =>
+      Effect.promise(async () => {
+        await using setup = await fixture(commands);
+        const result = await setup.run([
+          ...(agent === undefined ? [] : ["--agent", agent]),
+          ...(model === undefined ? [] : ["--model", model]),
+        ]);
+        expect(result.code, result.stdout + result.stderr).toBe(0);
+        const launch = JSON.parse(await NodeFSP.readFile(setup.record, "utf8")) as {
+          command: string;
+          args: string[];
+          cwd: string;
+        };
+        expect(launch.command).toBe(command);
+        expect(launch.args.slice(0, -1)).toEqual([
+          ...(model === undefined ? [] : ["--model", model]),
+          ...(command === "agy" ? ["--prompt-interactive"] : []),
+        ]);
+        expect(launch.args.at(-1)).toContain(NodePath.join(launch.cwd, "triage-playbook.md"));
+        expect(
+          await NodeFSP.readFile(NodePath.join(launch.cwd, "triage-playbook.md"), "utf8"),
+        ).toContain("context.md");
+      }),
+  );
+});
 
 it.each([
   { answer: "2", picked: "codex" },
@@ -144,7 +148,7 @@ it.effect.each([
   }),
 );
 
-it.live(
+it.live.skipIf(!TRIAGE_ENABLED)(
   "requires an explicit choice when Codex and Antigravity are installed without a terminal",
   () =>
     Effect.promise(async () => {
@@ -158,16 +162,18 @@ it.live(
     }),
 );
 
-it.live("reports the missing agy executable when Antigravity is explicitly requested", () =>
-  Effect.promise(async () => {
-    await using setup = await fixture(["codex"]);
-    const result = await setup.run(["--agent", "antigravity"]);
-    expect(result.code).toBe(1);
-    expect(result.stdout + result.stderr).toContain(
-      "`agy` is not installed or was not found on PATH.",
-    );
-    await expect(NodeFSP.stat(setup.record)).rejects.toMatchObject({ code: "ENOENT" });
-  }),
+it.live.skipIf(!TRIAGE_ENABLED)(
+  "reports the missing agy executable when Antigravity is explicitly requested",
+  () =>
+    Effect.promise(async () => {
+      await using setup = await fixture(["codex"]);
+      const result = await setup.run(["--agent", "antigravity"]);
+      expect(result.code).toBe(1);
+      expect(result.stdout + result.stderr).toContain(
+        "`agy` is not installed or was not found on PATH.",
+      );
+      await expect(NodeFSP.stat(setup.record)).rejects.toMatchObject({ code: "ENOENT" });
+    }),
 );
 
 const FAILING_AGENT_POSIX = `#!/bin/sh
@@ -178,7 +184,7 @@ const FAILING_AGENT_WINDOWS = `@echo Error: There is not enough space on the dis
 @exit /b 1
 `;
 
-it.live("a failed agent launch points at the prompt it could not run", () =>
+it.live.skipIf(!TRIAGE_ENABLED)("a failed agent launch points at the prompt it could not run", () =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-triage-cli-" });
