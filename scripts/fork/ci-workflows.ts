@@ -40,6 +40,9 @@ const INERT_TRIGGER = "  workflow_call:";
 
 // GitHub's free runners have about half the cores of upstream's.
 const TIMEOUT_FACTOR = 3;
+// GitHub hosts no newer macOS image yet, and a job that asks for one waits in the queue until
+// it's cancelled, so a newer Blacksmith image runs on this one. Raise it when GitHub adds one.
+const NEWEST_HOSTED_MACOS = 26;
 
 /** The top-level `on:` block's line range, through its last indented line. */
 function triggerBlock(lines: ReadonlyArray<string>, name: string) {
@@ -114,7 +117,10 @@ export function forkWorkflow(sourceText: string, spec: (typeof FORK_WORKFLOWS)[n
       return `${indent}timeout-minutes: ${Number(minutes) * TIMEOUT_FACTOR}`;
     })
     .replace(/blacksmith-\d+vcpu-ubuntu-(\d\d)(\d\d)(-arm)?/g, "ubuntu-$1.$2$3")
-    .replace(/blacksmith-\d+vcpu-macos-(\d+)/g, "macos-$1")
+    .replace(
+      /blacksmith-\d+vcpu-macos-(\d+)/g,
+      (_, version: string) => `macos-${Math.min(Number(version), NEWEST_HOSTED_MACOS)}`,
+    )
     .replace(/blacksmith-\d+vcpu-windows-(\d+)/g, "windows-$1");
   const leftover = /^\s*runs-on:.*blacksmith.*$/m.exec(text);
   if (leftover) {
