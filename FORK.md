@@ -1391,6 +1391,22 @@ matter this patch leaves alone.
   `packages/client-runtime/src/preview/serverBrowserStream.fork.test.ts` and
   `apps/web/src/browser/ServerBrowserSurface.fork.browser.test.tsx`.
 
+## Dropped patches
+
+A sync drops a patch once upstream does the same thing, and cuts one down to what upstream still doesn't do. A
+cut patch keeps its entry above, which names the upstream pull request. These left the stack whole:
+
+| Dropped in | Patch                                                                    | Upstream                                |
+| ---------- | ------------------------------------------------------------------------ | --------------------------------------- |
+| v0.1.11    | Git and every plain program start from a worker thread on Windows        | #32260, #37180, #36327 (spawn workers)  |
+| v0.1.11    | A Claude session keeps its unread output and ends its stdin at exit      | #32260 (Claude starts from its workers) |
+| v0.1.11    | Database writes run on their own thread on Windows                       | #35728 (a writer worker everywhere)     |
+| v0.1.11    | A stuck checkpoint doesn't hold every save, timed on the monotonic clock | #23496, #31804                          |
+| v0.1.11    | Pull request sweeps skip a redundant git recheck                         | #24099                                  |
+| v0.1.11    | Storage cleanup reads git 2.56's message for a broken worktree           | #33423                                  |
+| v0.1.11    | Open approval opens a delegated child on its own machine                 | #28592                                  |
+| v0.1.11    | A steer sent before the provider turn starts waits in the queue          | #34581 (a steer waits for its turn)     |
+
 ## Versions
 
 A release is `vX.Y.Z-alice.N`. `X.Y.Z` is the upstream stable tag the stack sits on, and `N` counts the fork's
