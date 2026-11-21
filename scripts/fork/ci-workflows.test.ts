@@ -102,6 +102,8 @@ jobs:
     timeout-minutes: 10
   b:
     runs-on: blacksmith-6vcpu-macos-26
+  e:
+    runs-on: blacksmith-6vcpu-macos-27
   c:
     runs-on: blacksmith-4vcpu-ubuntu-2404-arm
   d:
@@ -114,6 +116,8 @@ jobs:
     expect(generated).not.toContain("- main");
     expect(generated).toContain("runs-on: ubuntu-24.04\n    timeout-minutes: 30\n");
     expect(generated).toContain("runs-on: macos-26\n");
+    // GitHub hosts no macOS 27 runner, so asking for one would queue the job forever.
+    expect(generated).not.toContain("macos-27");
     expect(generated).toContain("runs-on: ubuntu-24.04-arm\n");
     expect(generated).toContain("runs-on: windows-2025\n");
   });
