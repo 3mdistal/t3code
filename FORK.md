@@ -29,6 +29,11 @@ headless, and agents may install and test freely on the Mac Mini.
 - Keep patches small and attach them at upstream's existing seams. Mark each changed upstream line with a `fork:`
   comment that points here.
 - Put fork-only tests in new `*.fork.test.ts` files or under `scripts/fork/`, so upstream never edits them.
+- Wrap fork copy for translation the way upstream does (`docs/internals/i18n.md`): `<T>` or `gt()` in
+  components, `msg()` in tables and helpers. The fork's keys live in one commit at the top of the stack, `fork: add
+  the fork's copy to the translation catalogs`, in English in every locale until someone translates them. A sync
+  rebuilds that commit: take upstream's catalogs, run `vp run i18n:generate` in `apps/web`, `apps/mobile` and
+  `apps/desktop`, and fill each new key in every locale with its English. `vp run i18n:check` fails until then.
 - Never publish a release whose checks failed.
 
 ## Patches
