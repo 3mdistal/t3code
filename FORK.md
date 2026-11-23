@@ -743,6 +743,9 @@ also works in a side chat, whose button cites into that chat as a click does.
 - `.github/workflows/fork-ci.yml` and `fork-windows-tests.yml` are generated from upstream's `ci.yml` and
   `windows-tests.yml`, with upstream's Blacksmith runners swapped for GitHub-hosted ones. A macOS image newer than
   any GitHub hosts runs on the newest one it does, since a job asking for a missing image waits forever.
+  `fork-ci.yml` also takes a `skip_mobile_native` input, which `fork-release.yml`'s `ci` job sets: the desktop
+  release ships no mobile app, and GitHub's macOS arm64 runners are often too busy to take the mobile lint, which
+  blocked v0.1.11's release. Pull requests and syncs still run it.
 - `scripts/fork/ci-workflows.ts` does all of the above. Never edit its output by hand: run
   `node scripts/fork/ci-workflows.ts`. The sync runs it after every rebase, and `scripts/fork/ci-workflows.test.ts`
   fails CI if any upstream workflow could run.
