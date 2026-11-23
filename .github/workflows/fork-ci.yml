@@ -8,6 +8,11 @@ on:
   push:
     branches: ["sync/**"]
   workflow_call:
+    inputs:
+      skip_mobile_native:
+        description: Skip the macOS mobile lint, for a caller that ships no mobile app.
+        type: boolean
+        default: false
   workflow_dispatch:
 
 permissions:
@@ -38,7 +43,7 @@ jobs:
       test_server: ${{ steps.detect.outputs.test_server }}
       rust: ${{ steps.detect.outputs.rust }}
       release_smoke: ${{ steps.detect.outputs.release_smoke }}
-      mobile_native: ${{ steps.detect.outputs.mobile_native }}
+      mobile_native: ${{ inputs.skip_mobile_native && 'false' || steps.detect.outputs.mobile_native }}
     steps:
       # Only the package manifests the script reads to build the dependency graph.
       # Depth 2 brings the base commit the change is diffed against.

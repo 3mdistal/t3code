@@ -97,6 +97,9 @@ on:
       - main
 
 jobs:
+  changes:
+    outputs:
+      mobile_native: \${{ steps.detect.outputs.mobile_native }}
   a:
     runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 10
@@ -136,6 +139,31 @@ jobs:
       const granted = level === "read" ? "(read|write)" : "write";
       expect(call).toMatch(new RegExp(`^ {6}${name}: ${granted}$`, "m"));
     }
+  });
+
+  it("lets the release's CI call skip the macOS mobile lint", () => {
+    const ci = read("fork-ci.yml").replaceAll("\r\n", "\n");
+    expect(ci).toContain(
+      "  workflow_call:\n    inputs:\n      skip_mobile_native:\n        description:",
+    );
+    expect(ci).toContain(
+      "      mobile_native: ${{ inputs.skip_mobile_native && 'false' || steps.detect.outputs.mobile_native }}\n",
+    );
+    expect(ci).toContain(
+      "if: ${{ !cancelled() && needs.changes.outputs.mobile_native != 'false' }}",
+    );
+    // Check accepts the skip only while the job is gated on mobile_native.
+    expect(ci).toContain('mobile_native_static_analysis: ["mobile_native"]');
+    const release = read("fork-release.yml").replaceAll("\r\n", "\n");
+    expect(/^ {2}ci:\n(?:(?: {4}.*)?\n)*/m.exec(release)?.[0]).toContain(
+      "    with:\n      skip_mobile_native: true\n",
+    );
+    // An upstream change to the gate must fail the sync, not silently run the lint again.
+    expect(() =>
+      forkWorkflow("name: CI\non:\n  push:\njobs:\n  changes:\n    outputs: {}\n", {
+        ...FORK_WORKFLOWS[0],
+      }),
+    ).toThrow(/mobile_native/);
   });
 
   it("refuses a runner it cannot map", () => {
