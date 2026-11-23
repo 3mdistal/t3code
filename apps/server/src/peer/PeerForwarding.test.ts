@@ -36,6 +36,7 @@ import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import { ThreadTagNames } from "../threadTags/ThreadTagNames.ts"; // fork: thread tags, see FORK.md.
 import * as RemoteDelegation from "./RemoteDelegation.ts";
 import * as McpHttpServer from "../mcp/McpHttpServer.ts";
 import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
@@ -221,7 +222,7 @@ const serveBox = (seen: Ref.Ref<Seen>, linkSession: Ref.Ref<string>) =>
     Layer.mergeAll(
       McpHttpServer.layerOrchestratorToolkit,
       McpHttpServer.layerProjectRegistration,
-      McpHttpServer.layerThreadToolkit,
+      McpHttpServer.layerThreadToolkit.pipe(Layer.provide(Layer.mock(ThreadTagNames)({}))), // fork: thread tags, see FORK.md.
     ).pipe(
       Layer.provide(DocumentText.layer.pipe(Layer.provideMerge(NodeServices.layer))),
       Layer.provide(NodeCrypto.layer),
@@ -276,7 +277,7 @@ const makeLaptop = Effect.gen(function* () {
   const layerHere = Layer.mergeAll(
     McpHttpServer.layerOrchestratorToolkit,
     McpHttpServer.layerProjectRegistration,
-    McpHttpServer.layerThreadToolkit,
+    McpHttpServer.layerThreadToolkit.pipe(Layer.provide(Layer.mock(ThreadTagNames)({}))), // fork: thread tags, see FORK.md.
   ).pipe(
     Layer.provide(DocumentText.layer.pipe(Layer.provideMerge(NodeServices.layer))),
     Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),

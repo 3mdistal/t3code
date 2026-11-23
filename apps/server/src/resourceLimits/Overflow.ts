@@ -306,14 +306,28 @@ export const makeOverflowMover = Effect.fn("makeOverflowMover")(function* (host:
     return messages.find((candidate) => candidate.id === run.userMessageId);
   });
 
+  // fork: thread tags, see FORK.md. Tags still in settings count until they move onto the thread.
+  const tagsOf = Effect.fn("Overflow.tagsOf")(function* (threadId: ThreadId) {
+    const shell = yield* projections.getThreadShell(threadId);
+    const { threadTags } = yield* settings.getSettings;
+    return [...(shell?.tags ?? []), ...(threadTags[threadId] ?? [])];
+  });
+
   /**
    * Installs the guard and reads the batch under the thread's command lock, which admission and Resume take too: a
    * run admitted before the claim has started by the time this reads, and one after it is held.
    */
-  const claim = Effect.fn("Overflow.claim")(function* (threadId: ThreadId, entry: MovedThread) {
+  const claim = Effect.fn("Overflow.claim")(function* (
+    threadId: ThreadId,
+    entry: MovedThread,
+    tagBlocker: (tags: ReadonlyArray<string>) => string | null,
+  ) {
     return yield* threadLocks.withLock(
       threadId,
       Effect.gen(function* () {
+        // fork: thread tags, see FORK.md. `thread.tag.set` takes this lock, so a tag set since the first look counts.
+        const blocker = tagBlocker(yield* tagsOf(threadId));
+        if (blocker !== null) return { blocker };
         yield* limits.update((snapshot) => ({
           ...snapshot,
           moved: new Map(snapshot.moved).set(threadId, entry),
@@ -643,6 +657,8 @@ export const makeOverflowMover = Effect.fn("makeOverflowMover")(function* (host:
     readonly projectId: ProjectId;
     readonly modelSelection: ModelSelection;
     readonly now: number;
+    /** fork: thread tags, see FORK.md. The move rules again, on the tags read under the claim. */
+    readonly tagBlocker: (tags: ReadonlyArray<string>) => string | null;
   }) {
     const { threadId, shell, now } = input;
     const claimed: MovedThread = {
@@ -656,7 +672,11 @@ export const makeOverflowMover = Effect.fn("makeOverflowMover")(function* (host:
       link: null,
       outbox: [],
     };
-    const { live, held } = yield* claim(threadId, claimed);
+    const underClaim = yield* claim(threadId, claimed, input.tagBlocker);
+    if ("blocker" in underClaim) {
+      return yield* skip(threadId, underClaim.blocker, now).pipe(Effect.as("next" as const));
+    }
+    const { live, held } = underClaim;
     if (live) return yield* skip(threadId, "it started here", now).pipe(Effect.as("next" as const));
     if (held.length === 0) {
       return yield* skip(threadId, "nothing is held", now).pipe(Effect.as("next" as const));
@@ -792,7 +812,8 @@ export const makeOverflowMover = Effect.fn("makeOverflowMover")(function* (host:
       const git = checkoutFree === null ? yield* host.gitStatus(cwd) : null;
       const candidate: MoveCandidate = {
         topLevel: shell.lineage.parentThreadId == null && shell.delegatedFrom === undefined,
-        tags: current.threadTags[threadId] ?? [],
+        // fork: thread tags, see FORK.md. Tags still in settings count until they move onto the thread.
+        tags: [...(shell.tags ?? []), ...(current.threadTags[threadId] ?? [])],
         git,
         worktree: shell.worktreePath !== null,
         checkoutFree: checkoutFree !== null,
@@ -857,6 +878,7 @@ export const makeOverflowMover = Effect.fn("makeOverflowMover")(function* (host:
             ? overflow.fallbackModel
             : shell.modelSelection,
         now,
+        tagBlocker: (tags) => moveBlocker({ ...candidate, tags }, rules),
       }).pipe(
         Effect.ensuring(release(threadId)),
         Effect.catchCause((cause) =>

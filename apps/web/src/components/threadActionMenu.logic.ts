@@ -99,10 +99,9 @@ export function buildDraftActionMenuItems(
 
 // fork: thread tags, see FORK.md.
 export interface ThreadTagMenuState {
-  /** Every tag in use on the thread's server. */
+  /** Every tag on the thread's server, archived threads' included, its own first. */
   readonly all: ReadonlyArray<string>;
   readonly selected: ReadonlyArray<string>;
-  readonly canEdit: boolean;
 }
 
 export interface ThreadActionMenuState {
@@ -135,8 +134,7 @@ export interface ThreadActionMenuState {
   readonly canShareWithGuest?: boolean;
   /** A No project thread with its own folder, on a server that can promote it. */
   readonly canTurnIntoProject?: boolean;
-  /** Null when the thread's server can't hold tags. */
-  readonly tags?: ThreadTagMenuState | null; // fork: thread tags, see FORK.md.
+  readonly tags?: ThreadTagMenuState; // fork: thread tags, see FORK.md.
 }
 
 /** Local navigation, read markers, and copying remain available to read-only clients. */
@@ -157,7 +155,7 @@ export function threadActionRequiresOperate(action: ThreadActionMenuId): boolean
 
 // fork: thread tags, see FORK.md.
 function threadTagMenuItems(
-  tags: ThreadTagMenuState | null | undefined,
+  tags: ThreadTagMenuState | undefined,
   resolve: MessageResolver,
 ): ReadonlyArray<ContextMenuItem<ThreadActionMenuId>> {
   if (!tags) return [];
@@ -166,12 +164,11 @@ function threadTagMenuItems(
       id: "tags",
       label: resolve(msg("Tags")),
       icon: "tag",
-      disabled: !tags.canEdit,
       children: [
         ...tags.all.map((tag) => ({
           id: `tag:${tag}` as const,
           label: tag,
-          checked: hasAnyThreadTag(tags.selected, [tag]),
+          checked: hasAnyThreadTag(tags.selected, [tag], "picked"),
         })),
         { id: "tag-new", label: resolve(msg("New tag…")), separatorBefore: tags.all.length > 0 },
       ],

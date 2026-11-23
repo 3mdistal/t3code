@@ -1,9 +1,8 @@
 // fork: thread tags, see FORK.md.
-import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { TagIcon } from "lucide-react";
 
 import { cn } from "~/lib/utils";
-import { threadTagHue, useThreadTags } from "./threadTags";
+import { threadTagHue } from "./threadTags";
 
 /** A short upright bar, since a round dot in the sidebar means a status needs attention. */
 export const threadTagDotClassName = "h-2.5 w-1 shrink-0 rounded-full";
@@ -63,11 +62,7 @@ export function ThreadTagChips(props: {
 }
 
 /** Every tag, for the row's hover card. */
-export function ThreadTagsDetail(props: {
-  readonly environmentId: EnvironmentId;
-  readonly threadId: ThreadId;
-}) {
-  const tags = useThreadTags(props.environmentId, props.threadId);
+export function ThreadTagsDetail({ tags }: { readonly tags: ReadonlyArray<string> }) {
   if (tags.length === 0) return null;
   return (
     <div className="flex min-w-0 items-start gap-2">
