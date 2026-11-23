@@ -218,7 +218,9 @@ import * as CodexUsageHistory from "./usage/CodexUsageHistory.ts";
 import * as RuntimeLayer from "./orchestration-v2/runtimeLayer.ts";
 import * as ThreadViewers from "./orchestration-v2/ThreadViewers.ts";
 import * as ResourceLimitsOverflow from "./resourceLimits/Overflow.ts"; // fork: limits, see FORK.md.
+import * as LegacyThreadTags from "./threadTags/LegacyThreadTags.ts"; // fork: thread tags, see FORK.md.
 import * as ThreadTagNames from "./threadTags/ThreadTagNames.ts"; // fork: thread tags, see FORK.md.
+import * as CommandReceiptStore from "./orchestration-v2/CommandReceiptStore.ts"; // fork: thread tags, see FORK.md.
 import * as ProjectStore from "./orchestration-v2/ProjectStore.ts";
 import * as ThreadSearch from "./orchestration-v2/ThreadSearch.ts";
 import * as ThreadSettlementService from "./orchestration-v2/ThreadSettlementService.ts";
@@ -883,6 +885,8 @@ const layerMakeRoutes = Layer.mergeAll(
   ResourceLimitsOverflow.layer.pipe(
     Layer.provide(Layer.merge(ProjectionStoreV2.layer, ThreadCommandExecutor.layer)),
   ), // fork: limits, held threads move to a linked machine; see FORK.md.
+  // fork: thread tags move out of settings onto their threads; see FORK.md.
+  LegacyThreadTags.layer.pipe(Layer.provide(CommandReceiptStore.layerFromApplicationReceipts)),
 ).pipe(
   Layer.provide(ThreadTagNames.layer), // fork: thread tags, the names menus and agents spell from; see FORK.md.
   Layer.provide(

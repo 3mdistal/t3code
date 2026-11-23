@@ -444,14 +444,14 @@ text is cut to 40, never splitting a character), and the menu and agent tools ad
   thread's own spelling, else the one in use on the server's threads, else the typed text. Tagging needs the thread
   permission pin and snooze use, from the app and from agents.
 - The 20-tag cap is soft. The menu and agent tools keep to it, but upstream's command has no cap, so two windows
-  tagging at once can pass it. Nothing breaks past 20.
+  tagging at once can pass it, and the move out of settings ignores it. Nothing breaks past 20.
 - Tags in use: the server reads every tag on its threads, archived ones included, from the projection
   (`ThreadTagNames.ts`, uncached, on a reader connection so it never queues ahead of commits; it reads only threads
   that have tags). The menu lists the thread's own tags, the tags on the threads the window has loaded, and that
   read, which it keeps per server while the sidebar is up and reads again whenever the loaded threads' tags change,
   or when a Tags menu opens on a copy over 30 s old; that menu shows the old copy and the next one the new. Servers advertise it as `threadTagNames` and serve it at
-  `orchestration.listThreadTagNames`; from a server without it, the menu lists loaded threads' tags only. Agents
-  spell new tags from the same read. A deleted thread's tags leave it.
+  `orchestration.listThreadTagNames`; from a server without it, the menu lists loaded threads' tags only. Agents and
+  the move spell new tags from the same read. A deleted thread's tags leave it.
 - The read is a required service, not a reference with an empty default, so a missed provision fails typecheck
   instead of quietly serving no names. `server.ts` provides it to the routes, which only their build sees. The
   WebSocket handlers are built per connection from the request's context, so `Ws.layer` hands them the copy it
@@ -463,31 +463,44 @@ text is cut to 40, never splitting a character), and the menu and agent tools ad
   recording, but shows the tags nowhere. A rollback keeps them, and the fork shows them again on return. The
   fork no longer reports the `threadTags` capability, so an older fork client, which wrote tags into settings,
   hides its Tags menu, and settings patches no longer carry the key, so a tag patch from one changes nothing.
-- Older fork builds kept tags under the `threadTags` settings key. It stays in the settings schema, read only,
-  so a settings save doesn't drop the tags before they move onto their threads; no settings patch writes it.
-  Until a thread's entry moves, overflow counts its tags there too, so a held thread with a `needs:` tag in
-  settings can't move early. Overflow reads the tags again when it claims a thread, under the thread's command
-  lock, which `thread.tag.set` takes too, so a `needs:` tag set while it checked git or the linked machine stops
-  the move.
+- The move out of settings: older fork builds kept tags under the `threadTags` settings key. Once the server
+  accepts commands, `LegacyThreadTags.ts` dispatches `thread.tag.set` for every tag there, even one the thread
+  already has, so each leaves a receipt, spelled as above and past the soft cap. Each add's command ID is fixed by
+  thread, tag and attempt, so a run repeated after a crash replays the first run's receipt instead of adding again
+  a tag Alice removed since. Thread and tag go in as four hex digits per UTF-16 code unit: older builds cut tags at
+  40 code units, which can leave half an emoji that `encodeURIComponent` throws on, and no two pairs can share an
+  ID. An accepted receipt settles an entry. A rejection settles it when the thread is gone (with a warning naming
+  the thread and tag) or already has the tag. A rejection on a live thread without the tag, such as a failed read
+  inside the command, keeps the entry, and the next start tries the next attempt's ID; each start probes attempts
+  0 to 2 in order and dispatches at most once per entry. After three rejections on a live thread the entry settles
+  with a warning naming the thread, the tag and the last error. An add that fails without a receipt, or an entry
+  whose move fails or dies, stays for the next start while the rest still move. The move then removes only the
+  settled entries, under the settings write lock, and an empty key drops from the settings file. The key stays in
+  the settings schema, so a save before the move can't drop it. Until a thread's entry moves, overflow counts its
+  tags there too, so a held thread with a `needs:` tag in settings can't move early. Overflow reads the tags again
+  when it claims a thread, under the thread's command lock, which `thread.tag.set` takes too, so a `needs:` tag set
+  while it checked git or the linked machine stops the move. Nothing new is persisted: no database migration and no
+  new event type.
 - Fork files: `packages/contracts/src/threadTags.ts` (beside upstream's `ThreadTag`),
-  `apps/server/src/threadTags/ThreadTagNames.ts`, and in `apps/web/src/components/sidebar/`, `threadTags.ts`,
-  `ThreadTagChips.tsx` and `NewThreadTagDialog.tsx`.
-- Upstream files it changes: the old settings key in `packages/contracts/src/settings.ts`; the read's method in
-  `packages/contracts/src/rpc.ts`, its flag in `packages/contracts/src/server.ts`, its handler and flag in `ws.ts`,
-  `RpcAuthorization.ts` and `RpcInstrumentation.ts`, and its hand-off to each connection in `ws.ts`; `setThreadTag`
-  in `packages/client-runtime`'s `operations/commands.ts` and `state/threadCommands.ts`; the tags in
+  `apps/server/src/threadTags/LegacyThreadTags.ts` and `ThreadTagNames.ts`, and in
+  `apps/web/src/components/sidebar/`, `threadTags.ts`, `ThreadTagChips.tsx` and `NewThreadTagDialog.tsx`.
+- Upstream files it changes: the old settings key in `packages/contracts/src/settings.ts`, and its internal clear in
+  `apps/server/src/serverSettings.ts`; the read's method in `packages/contracts/src/rpc.ts`, its flag in
+  `packages/contracts/src/server.ts`, its handler and flag in `ws.ts`, `RpcAuthorization.ts` and
+  `RpcInstrumentation.ts`, and its hand-off to each connection in `ws.ts`; `setThreadTag` in
+  `packages/client-runtime`'s `operations/commands.ts` and `state/threadCommands.ts`; the tags in
   `ProjectionStore.listActiveThreads`, read as the shell reads them; the two MCP tools; overflow's tags in
-  `resourceLimits/Overflow.ts`; the read's layer in `server.ts`; the thread menu in `threadActionMenu.logic.ts`,
-  `Sidebar.tsx` and `useThreadActionMenu.ts`; the chips in `SidebarThreadRow.tsx`; the dialog host in
-  `routes/__root.tsx`; and the menu's tag icon in
+  `resourceLimits/Overflow.ts`; the read and the move's layers in `server.ts`; the thread menu in
+  `threadActionMenu.logic.ts`, `Sidebar.tsx` and `useThreadActionMenu.ts`; the chips in `SidebarThreadRow.tsx`; the
+  dialog host in `routes/__root.tsx`; and the menu's tag icon in
   `contextMenuFallback.ts`. `useThreadActionMenu.test.ts` stubs the tag menu, and `agentContextBudget.json` records
   the larger MCP tool list. The harnesses that build the thread tools or the WebSocket handlers provide the read:
   `ws.test.ts`, `mcp/toolkits/core.test.ts`, `mcp/linkOrigin.test.ts`, `peer/PeerForwarding.test.ts` and
   `provider/AgentContextBudget.test.ts`.
 - Tests: `packages/contracts/src/threadTags.fork.test.ts`, `packages/shared/src/serverSettings.fork.test.ts`,
   `packages/client-runtime/src/state/threadTagFilter.fork.test.ts`,
-  `apps/server/src/threadTags/threadTags.fork.test.ts` (the read and the agent tools),
-  `apps/web/src/components/threadActionMenu.logic.fork.test.ts`, the filter's rows in
+  `apps/server/src/threadTags/threadTags.fork.test.ts` (the move, on disk across restarts too, the read and the agent
+  tools), `apps/web/src/components/threadActionMenu.logic.fork.test.ts`, the filter's rows in
   `apps/web/src/components/sidebar/sidebarView.fork.test.ts`, and the moves in
   `apps/server/src/resourceLimits/Governor.fork.test.ts`, which read `needs:` tags from the thread and from settings,
   and again under the claim (O19). `orchestration.listThreadTagNames` over a real socket, with the read provided as

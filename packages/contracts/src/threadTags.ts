@@ -66,7 +66,7 @@ const matchKeys = (tag: string, match: ThreadTagMatch) =>
   match === "picked" ? [threadTagKey(tag)] : [threadTagKey(tag), tidyThreadTag(tag).toLowerCase()];
 
 /** Each tag `thread.tag.set` accepts, by key, in its first spelling. */
-function threadTagSpellings(tags: Iterable<string>): Map<string, string> {
+export function threadTagSpellings(tags: Iterable<string>): Map<string, string> {
   const spellings = new Map<string, string>();
   for (const tag of tags) {
     if (isThreadTag(tag) && !spellings.has(threadTagKey(tag)))
@@ -80,7 +80,7 @@ function threadTagSpellings(tags: Iterable<string>): Map<string, string> {
  * use) that has it, else the text as a new tag; typed text also finds its cut form. Empty for blank
  * text.
  */
-function spellThreadTag(
+export function spellThreadTag(
   tag: string,
   match: ThreadTagMatch,
   ...sources: ReadonlyArray<ReadonlyMap<string, string>>
@@ -119,6 +119,20 @@ export function hasAnyThreadTag(
 ): boolean {
   const keys = new Set(wanted.flatMap((tag) => matchKeys(tag, match)));
   return (tags ?? []).some((tag) => keys.has(threadTagKey(tag)));
+}
+
+/** `current` without the entries in `resolved`; a thread left with none drops out. */
+export function withoutThreadTags(
+  current: ThreadTagSettings,
+  resolved: ThreadTagSettings,
+): ThreadTagSettings {
+  const next: Record<string, ReadonlyArray<string>> = {};
+  for (const [threadId, tags] of Object.entries(current)) {
+    const gone = new Set(resolved[threadId as ThreadId] ?? []);
+    const left = tags.filter((tag) => !gone.has(tag));
+    if (left.length > 0) next[threadId] = left;
+  }
+  return next as ThreadTagSettings;
 }
 
 export interface ThreadTagChange {
