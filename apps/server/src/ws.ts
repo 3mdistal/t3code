@@ -63,6 +63,7 @@ import {
   OrchestrationV2SearchThreadError,
   OrchestrationGetTurnDiffError,
   ORCHESTRATION_V2_WS_METHODS,
+  THREAD_TAG_NAMES_WS_METHOD, // fork: thread tags, see FORK.md.
   ORCHESTRATION_PROTOCOL_QUERY_PARAM,
   CLIENT_CAPABILITIES_QUERY_PARAM,
   HTTP_USAGE_LIMIT_SOURCES_CAPABILITY,
@@ -271,6 +272,7 @@ import * as UsageService from "./usage/UsageService.ts";
 import * as TraceDiagnostics from "./diagnostics/TraceDiagnostics.ts";
 import * as TriageService from "./triage/TriageService.ts";
 import { refuseTriage, TRIAGE_ENABLED } from "./triage/triageOff.ts"; // fork: see FORK.md.
+import { ThreadTagNames } from "./threadTags/ThreadTagNames.ts"; // fork: thread tags, see FORK.md.
 import * as PullRequestService from "./pullRequest/PullRequestService.ts";
 import * as IssueService from "./issue/IssueService.ts";
 import * as ThreadIssueService from "./orchestration-v2/ThreadIssueService.ts";
@@ -1641,6 +1643,7 @@ export const layerWsRpc = (
       const hostResources = yield* HostResources.HostResources;
       // fork: limits, see FORK.md.
       const resourceLimits = yield* ResourceLimits;
+      const threadTagNames = yield* ThreadTagNames; // fork: thread tags, see FORK.md.
       const processResourceMonitor = yield* ProcessResourceMonitor.ProcessResourceMonitor;
       const resourceTelemetry = yield* ResourceTelemetry.ResourceTelemetry;
       const relayClient = yield* RelayClient.RelayClient;
@@ -1966,6 +1969,7 @@ export const layerWsRpc = (
           shellResumeCompletionMarker: true,
           shellThreadFamilies: true,
           threadLinkMetadata: true,
+          threadTagNames: true, // fork: thread tags, see FORK.md.
           shellOlderSettled: true,
           threadResumeCompletionMarker: true,
           threadSnapshotPagination: true,
@@ -2189,6 +2193,18 @@ export const layerWsRpc = (
               (cause) =>
                 new OrchestrationV2GetShellSnapshotError({
                   message: "Failed to load thread link metadata",
+                  cause,
+                }),
+            ),
+          ),
+        // fork: thread tags, see FORK.md.
+        [THREAD_TAG_NAMES_WS_METHOD]: (_input) =>
+          threadTagNames.list.pipe(
+            Effect.map((tags) => ({ tags })),
+            Effect.mapError(
+              (cause) =>
+                new OrchestrationV2GetShellSnapshotError({
+                  message: "Failed to load thread tags",
                   cause,
                 }),
             ),
@@ -3823,6 +3839,7 @@ export const layer = Layer.unwrap(
     const peerThreadRelay = yield* PeerThreadRelay.PeerThreadRelay;
     const peerClientPairing = yield* PeerClientPairing.PeerClientPairing;
     const sql = yield* SqlClient.SqlClient;
+    const threadTagNames = yield* ThreadTagNames; // fork: thread tags, see FORK.md.
     return HttpRouter.add(
       "GET",
       "/ws",
@@ -3930,6 +3947,7 @@ export const layer = Layer.unwrap(
               Layer.provide(Layer.succeed(PeerLinkRequests.PeerLinkRequests, peerLinkRequests)),
               Layer.provide(Layer.succeed(PeerThreadRelay.PeerThreadRelay, peerThreadRelay)),
               Layer.provide(Layer.succeed(PeerClientPairing.PeerClientPairing, peerClientPairing)),
+              Layer.provide(Layer.succeed(ThreadTagNames, threadTagNames)), // fork: thread tags, see FORK.md.
               Layer.provide(
                 SourceControlDiscovery.layer.pipe(
                   Layer.provide(

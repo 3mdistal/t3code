@@ -1,10 +1,8 @@
-import { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
   buildBulkMenuItem,
   buildBulkTagMenuItem,
-  buildBulkTagPatches,
   bulkAllTags,
   bulkTagAdds,
   currentPinOrderKeys,
@@ -15,7 +13,6 @@ import {
 const menu = (selected: ReadonlyArray<string>, all: ReadonlyArray<string> = selected) => ({
   all,
   selected,
-  canEdit: true,
 });
 
 describe("buildBulkMenuItem", () => {
@@ -35,7 +32,7 @@ describe("buildBulkMenuItem", () => {
 });
 
 describe("buildBulkTagMenuItem", () => {
-  it("is absent when no server can hold tags", () => {
+  it("is absent when no selected thread can be tagged", () => {
     expect(buildBulkTagMenuItem([])).toBeNull();
   });
 
@@ -80,28 +77,6 @@ describe("bulkTagAdds", () => {
 
   it("removes when every thread has it, whatever the case", () => {
     expect(bulkTagAdds([["Bugs"], ["bugs"]], "bugs")).toBe(false);
-  });
-});
-
-describe("buildBulkTagPatches", () => {
-  it("writes one patch per server", () => {
-    const pc = EnvironmentId.make("pc");
-    const mac = EnvironmentId.make("mac");
-    const [a, b, c] = [ThreadId.make("a"), ThreadId.make("b"), ThreadId.make("c")];
-    expect(
-      buildBulkTagPatches(
-        [
-          { environmentId: pc, threadId: a },
-          { environmentId: mac, threadId: b },
-          { environmentId: pc, threadId: c },
-        ],
-        "bugs",
-        true,
-      ),
-    ).toEqual([
-      { environmentId: pc, threadTags: { a: { bugs: true }, c: { bugs: true } } },
-      { environmentId: mac, threadTags: { b: { bugs: true } } },
-    ]);
   });
 });
 

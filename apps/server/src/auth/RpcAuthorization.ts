@@ -31,6 +31,7 @@ import {
   type AuthEnvironmentScope,
   EnvironmentAuthorizationError,
   RpcScopeAuthorization,
+  THREAD_TAG_NAMES_WS_METHOD, // fork: thread tags, see FORK.md.
   WS_METHODS,
   WsRpcGroup,
 } from "@t3tools/contracts";
@@ -58,6 +59,7 @@ export const RPC_REQUIRED_SCOPES = {
   [ORCHESTRATION_V2_WS_METHODS.getThreadFamily]: AuthOrchestrationReadScope,
   [ORCHESTRATION_V2_WS_METHODS.getThreadTitles]: AuthOrchestrationReadScope,
   [ORCHESTRATION_V2_WS_METHODS.getThreadLinkMetadata]: AuthOrchestrationReadScope,
+  [THREAD_TAG_NAMES_WS_METHOD]: AuthOrchestrationReadScope, // fork: thread tags, see FORK.md.
   [ORCHESTRATION_V2_WS_METHODS.getWorktreeThreadIds]: AuthOrchestrationReadScope,
   [ORCHESTRATION_V2_WS_METHODS.getOlderSettledThreads]: AuthOrchestrationReadScope,
   [ORCHESTRATION_V2_WS_METHODS.getThreadProjection]: AuthOrchestrationReadScope,

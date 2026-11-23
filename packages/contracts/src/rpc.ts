@@ -6,6 +6,7 @@ import {
   OrchestrationV2SearchThreadsResult,
 } from "./orchestrationV2.ts";
 import { OrchestrationDispatchCommandError } from "./orchestrationDispatch.ts";
+import { THREAD_TAG_NAMES_WS_METHOD, ThreadTagNames } from "./threadTags.ts"; // fork: thread tags, see FORK.md.
 import {
   McpAppCallToolInput,
   McpAppCallToolResult,
@@ -2179,6 +2180,13 @@ const WsOrchestrationV2GetThreadTitlesRpc = Rpc.make(ORCHESTRATION_V2_WS_METHODS
   error: Schema.Union([OrchestrationV2GetShellSnapshotError, EnvironmentAuthorizationError]),
 });
 
+// fork: thread tags, see FORK.md.
+const WsThreadTagNamesRpc = Rpc.make(THREAD_TAG_NAMES_WS_METHOD, {
+  payload: Schema.Struct({}),
+  success: ThreadTagNames,
+  error: Schema.Union([OrchestrationV2GetShellSnapshotError, EnvironmentAuthorizationError]),
+});
+
 const WsOrchestrationV2GetThreadLinkMetadataRpc = Rpc.make(
   ORCHESTRATION_V2_WS_METHODS.getThreadLinkMetadata,
   {
@@ -2727,6 +2735,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsOrchestrationV2GetThreadFamilyRpc,
   WsOrchestrationV2GetThreadTitlesRpc,
   WsOrchestrationV2GetThreadLinkMetadataRpc,
+  WsThreadTagNamesRpc, // fork: thread tags, see FORK.md.
   WsOrchestrationV2GetWorktreeThreadIdsRpc,
   WsOrchestrationV2GetOlderSettledThreadsRpc,
   WsOrchestrationV2GetThreadProjectionRpc,

@@ -15,8 +15,6 @@ import {
   sortWorkingThreadsBySend,
 } from "../Sidebar.logic";
 
-export const NO_TAGS: ReadonlyArray<string> = [];
-
 export const SIDEBAR_STATUS_FILTERS = [
   "needs-you",
   "failed",
@@ -207,7 +205,7 @@ export function matchesSidebarViewFilters(
   view: SidebarView,
   facts: SidebarViewThreadFacts,
 ): boolean {
-  if (view.tags.length > 0 && !hasAnyThreadTag(facts.tags, view.tags)) return false;
+  if (view.tags.length > 0 && !hasAnyThreadTag(facts.tags, view.tags, "picked")) return false;
   if (view.statuses.length > 0 && !view.statuses.includes(facts.status)) return false;
   if (view.pinned.length > 0 && !view.pinned.includes(facts.pinned ? "pinned" : "not-pinned")) {
     return false;

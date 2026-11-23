@@ -63,18 +63,11 @@ describe("resourceLimits settings patch", () => {
 // fork: thread tags, see FORK.md.
 
 describe("thread tags settings", () => {
-  it("applies tag ticks to the tags the server holds", () => {
+  it("keeps the old tag map through a settings patch, so a save before the move can't drop it", () => {
     const thread = ThreadId.make("thread-a");
     const current = { ...DEFAULT_SERVER_SETTINGS, threadTags: { [thread]: ["frontend"] } };
-    const next = applyServerSettingsPatch(current, {
-      threadTags: { [thread]: { review: true, frontend: false } },
-    });
-    expect(next.threadTags).toEqual({ [thread]: ["review"] });
-    expect(applyServerSettingsPatch(next, { threadTags: { [thread]: null } }).threadTags).toEqual(
-      {},
-    );
     expect(
-      applyServerSettingsPatch(next, { enableProviderUpdateChecks: false }).threadTags,
-    ).toEqual(next.threadTags);
+      applyServerSettingsPatch(current, { enableProviderUpdateChecks: false }).threadTags,
+    ).toEqual(current.threadTags);
   });
 });

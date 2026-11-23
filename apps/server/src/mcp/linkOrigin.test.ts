@@ -37,6 +37,7 @@ import * as ProjectService from "../project/ProjectService.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import { ThreadTagNames } from "../threadTags/ThreadTagNames.ts"; // fork: thread tags, see FORK.md.
 import * as CommandReceiptStore from "../orchestration-v2/CommandReceiptStore.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as RemoteDelegation from "../peer/RemoteDelegation.ts";
@@ -116,7 +117,7 @@ const layerLaunches = Layer.effect(
 
 const layerTools = Layer.mergeAll(
   McpHttpServer.layerOrchestratorToolkit,
-  McpHttpServer.layerThreadToolkit,
+  McpHttpServer.layerThreadToolkit.pipe(Layer.provide(Layer.mock(ThreadTagNames)({}))), // fork: thread tags, see FORK.md.
   McpHttpServer.layerProjectRegistration,
 ).pipe(
   Layer.provide(DocumentText.layer.pipe(Layer.provideMerge(NodeServices.layer))),

@@ -742,6 +742,8 @@ export const ServerConfig = Schema.Struct({
    */
   shellThreadFamilies: Schema.optionalKey(Schema.Boolean),
   threadLinkMetadata: Schema.optionalKey(Schema.Boolean),
+  /** fork: thread tags, see FORK.md. `orchestration.listThreadTagNames` lists every thread's tags. */
+  threadTagNames: Schema.optionalKey(Schema.Boolean),
   /**
    * The shell can leave older settled threads out of snapshots (`omitOlderSettled`), and
    * `getOlderSettledThreads` serves them. Only servers that also advertise `shellThreadFamilies`.
