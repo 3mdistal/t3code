@@ -13,6 +13,7 @@ import { discardComposerDraft } from "../lib/discardComposerDraft";
 import { requestCustomSnooze } from "./CustomSnoozeDialog";
 import {
   readThreadTagMenu,
+  threadTagsOf,
   useBulkThreadTagMenuActions,
   useThreadTagMenuActions,
 } from "./sidebar/threadTags"; // fork: thread tags, see FORK.md.
@@ -26,7 +27,6 @@ import {
   sortByListedOrder,
 } from "./sidebar/bulkThreadActions";
 // fork: sidebar filter and sort, see FORK.md.
-import { useThreadTagsByEnvironment } from "./sidebar/threadTags";
 import { SidebarFilterMenu } from "./sidebar/SidebarFilterMenu";
 import { SidebarSortMenu } from "./sidebar/SidebarSortMenu";
 import { SidebarViewFolderHeader } from "./sidebar/SidebarViewFolderHeader";
@@ -41,7 +41,6 @@ import {
   isSidebarViewUnread,
   matchesSidebarViewFilters,
   needsMeRank,
-  NO_TAGS,
   orderSidebarFoldersByThreads,
   type SidebarFolderView,
   type SidebarViewGroup,
@@ -1131,11 +1130,8 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   // turning it off leaves the stock sidebar.
   const [storedSidebarView, setSidebarView] = useSidebarView();
   const sidebarView = boringSidebarEnabled ? storedSidebarView : DEFAULT_SIDEBAR_VIEW;
-  const threadTagsByEnvironment = useThreadTagsByEnvironment();
   const localLastVisitedAtById = useUiStateStore((store) => store.threadLastVisitedAtById);
   const projectSortOrder = useClientSettings((settings) => settings.sidebarProjectSortOrder);
-  const threadTagsOf = (thread: Pick<SidebarThreadSummary, "environmentId" | "id">) =>
-    threadTagsByEnvironment.get(thread.environmentId)?.[thread.id] ?? NO_TAGS;
   const toggleViewFolder = useStableCallback((key: string) =>
     setSidebarView((current) => ({
       ...current,
@@ -2592,11 +2588,17 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
       const archivingThreads = selectedThreads.filter((thread) =>
         threadRuntimeCanArchive(thread.runtime),
       );
-      const taggingThreads = selectedThreads.flatMap((thread) => {
-        const threadRef = scopeThreadRef(thread.environmentId, thread.id);
-        const menu = readThreadTagMenu(threadRef);
-        return menu?.canEdit ? [{ thread, threadRef, menu }] : [];
-      });
+      const taggingThreads = selectedThreads.flatMap((thread) =>
+        canOperateThreads([thread])
+          ? [
+              {
+                thread,
+                threadRef: scopeThreadRef(thread.environmentId, thread.id),
+                menu: readThreadTagMenu(thread),
+              },
+            ]
+          : [],
+      );
       const tagsMenuItem = buildBulkTagMenuItem(taggingThreads.map(({ menu }) => menu));
       // Presets sync across environments, so the first selected thread's stand for all.
       const menuOpenedAt = new Date();
@@ -2781,10 +2783,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
       // fork: bulk thread actions, see FORK.md.
       if (isTagAction) {
         // The selection stays, so a second tag doesn't need the threads picked again.
-        await handleBulkThreadTagAction(
-          taggingThreads.map(({ threadRef }) => threadRef),
-          clicked.value as BulkTagMenuId,
-        );
+        await handleBulkThreadTagAction(taggingThreads, clicked.value as BulkTagMenuId);
         return;
       }
       if (clicked.value === "pin") {
@@ -3037,6 +3036,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                 projectRef.projectId === thread.projectId,
             ),
           ) ?? null;
+        const tagMenu = readThreadTagMenu(thread); // fork: thread tags, see FORK.md.
         const clicked = await settlePromise(() =>
           api.contextMenu.show(
             buildThreadActionMenuItems({
@@ -3067,7 +3067,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
               ),
               canTurnIntoProject: canTurnThreadIntoProject(threadRef),
               canRename: !fromSearch,
-              tags: readThreadTagMenu(threadRef), // fork: thread tags, see FORK.md.
+              tags: tagMenu, // fork: thread tags, see FORK.md.
               supports: {
                 settlement: configLoaded,
                 autoSettleOptOut: supportsAutoSettleOptOut,
@@ -3087,7 +3087,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
           !checkThreadOperations([thread], isThreadTriageAction(clicked.value))
         )
           return;
-        if (handleThreadTagAction(threadRef, clicked.value)) return; // fork: thread tags, see FORK.md.
+        if (handleThreadTagAction({ threadRef, menu: tagMenu }, clicked.value)) return; // fork: thread tags, see FORK.md.
         if (clicked.value?.startsWith("snooze:")) {
           const preset =
             clicked.value === "snooze:custom"

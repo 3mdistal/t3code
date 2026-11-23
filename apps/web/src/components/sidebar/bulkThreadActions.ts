@@ -1,14 +1,7 @@
 // fork: bulk thread actions, see FORK.md.
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/models";
 import { pinOrderKeyBetween } from "@t3tools/client-runtime/state/thread-sort";
-import {
-  type ContextMenuItem,
-  type EnvironmentId,
-  hasAnyThreadTag,
-  normalizeThreadTag,
-  type ScopedThreadRef,
-  type ThreadId,
-} from "@t3tools/contracts";
+import { type ContextMenuItem, hasAnyThreadTag, threadTagKey } from "@t3tools/contracts";
 import { msg } from "gt-react";
 
 import { m } from "~/i18n/messages";
@@ -33,15 +26,14 @@ export function bulkAllTags(menus: ReadonlyArray<ThreadTagMenuState>): ReadonlyA
   const tags = new Map<string, string>();
   for (const menu of menus) {
     for (const tag of menu.all) {
-      const key = normalizeThreadTag(tag).toLocaleLowerCase();
-      if (!tags.has(key)) tags.set(key, tag);
+      if (!tags.has(threadTagKey(tag))) tags.set(threadTagKey(tag), tag);
     }
   }
   return [...tags.values()].toSorted((a, b) => a.localeCompare(b));
 }
 
 /**
- * The Tags submenu for several threads, or null when none of their servers can hold tags.
+ * The Tags submenu for several threads, or null when this connection may tag none of them.
  * Native menus have no mixed state, so a tag only some threads have says how many.
  */
 export function buildBulkTagMenuItem(
@@ -54,7 +46,7 @@ export function buildBulkTagMenuItem(
     label: m(msg("Tags ({count})", { count: menus.length })),
     children: [
       ...all.map((tag) => {
-        const have = menus.filter((menu) => hasAnyThreadTag(menu.selected, [tag])).length;
+        const have = menus.filter((menu) => hasAnyThreadTag(menu.selected, [tag], "picked")).length;
         return {
           id: `tag:${tag}` as const,
           label:
@@ -71,25 +63,7 @@ export function buildBulkTagMenuItem(
 
 /** Picking a tag every thread already has removes it; otherwise every thread gets it. */
 export function bulkTagAdds(selected: ReadonlyArray<ReadonlyArray<string>>, tag: string): boolean {
-  return !selected.every((tags) => hasAnyThreadTag(tags, [tag]));
-}
-
-/** One settings patch per server, since each server keeps its own threads' tags. */
-export function buildBulkTagPatches(
-  threadRefs: ReadonlyArray<ScopedThreadRef>,
-  tag: string,
-  add: boolean,
-): ReadonlyArray<{
-  readonly environmentId: EnvironmentId;
-  readonly threadTags: Readonly<Record<ThreadId, Readonly<Record<string, boolean>>>>;
-}> {
-  const byEnvironment = new Map<EnvironmentId, Record<ThreadId, Record<string, boolean>>>();
-  for (const { environmentId, threadId } of threadRefs) {
-    const threadTags = byEnvironment.get(environmentId) ?? {};
-    threadTags[threadId] = { [tag]: add };
-    byEnvironment.set(environmentId, threadTags);
-  }
-  return [...byEnvironment].map(([environmentId, threadTags]) => ({ environmentId, threadTags }));
+  return !selected.every((tags) => hasAnyThreadTag(tags, [tag], "picked"));
 }
 
 /** Puts threads in the order the sidebar lists them. Anything not listed goes last. */

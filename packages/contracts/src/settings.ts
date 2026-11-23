@@ -59,7 +59,7 @@ import {
   providerPoolDriver,
 } from "./providerPool.ts"; // fork: see FORK.md.
 import { ResourceLimitsSettings } from "./resourceLimits.ts"; // fork: limits, see FORK.md.
-import { ThreadTagSettings, ThreadTagSettingsPatch } from "./threadTags.ts"; // fork: thread tags, see FORK.md.
+import { ThreadTagSettings } from "./threadTags.ts"; // fork: thread tags, see FORK.md.
 import { PullRequestMergeMethod } from "./pullRequest.ts";
 import {
   CloudSpeechModelId,
@@ -1627,7 +1627,9 @@ export const ServerSettings = Schema.Struct({
   ),
   providerPools: ProviderPoolSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))), // fork: see FORK.md.
   resourceLimits: ResourceLimitsSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))), // fork: limits, see FORK.md.
-  threadTags: ThreadTagSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))), // fork: thread tags, see FORK.md.
+  // fork: thread tags, see FORK.md. Older builds' tags; no settings patch writes them, and the move
+  // onto their threads clears them.
+  threadTags: ThreadTagSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   observability: ObservabilitySettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   sourceControlHosts: Schema.Record(Schema.String, SourceControlHostSettings).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
@@ -2071,8 +2073,6 @@ export const ServerSettingsPatch = Schema.Struct({
   providerPools: Schema.optionalKey(ProviderPoolSettingsPatch),
   // fork: limits, see FORK.md. Replaces the whole object, so an omitted field returns to its default.
   resourceLimits: Schema.optionalKey(ResourceLimitsSettings),
-  // fork: thread tags, see FORK.md. Per thread and per tag, so two windows tagging at once both land.
-  threadTags: Schema.optionalKey(ThreadTagSettingsPatch),
 
   usageHistoryRetentionDays: Schema.optionalKey(UsageHistoryRetentionDays),
 

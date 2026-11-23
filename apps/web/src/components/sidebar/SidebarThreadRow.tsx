@@ -141,7 +141,7 @@ import { ThreadDetailsIssueRows } from "../chat/ThreadDetailsIssueRows";
 import { IssueGlyph, issueStatePresentation } from "../issue/issuePresentation";
 import { useThreadIntentPrefetch } from "./useThreadIntentPrefetch";
 import { ThreadTagChips, ThreadTagsDetail } from "./ThreadTagChips"; // fork: thread tags, see FORK.md.
-import { useThreadTags } from "./threadTags"; // fork: thread tags, see FORK.md.
+import { threadTagsOf } from "./threadTags"; // fork: thread tags, see FORK.md.
 
 // The fields thread rows show. Provider status pushes refresh `checkedAt`,
 // status and auth on every provider; leaving those out keeps each
@@ -371,8 +371,7 @@ function SidebarThreadTooltip({
             <MiddleTruncate value={formatWorktreePathForDisplay(worktreePath)} className="flex" />
           </div>
         ) : null}
-        <ThreadTagsDetail environmentId={thread.environmentId} threadId={thread.id} />{" "}
-        {/* fork: thread tags, see FORK.md. */}
+        <ThreadTagsDetail tags={threadTagsOf(thread)} /> {/* fork: thread tags, see FORK.md. */}
         {branchMismatch ? (
           <div className="flex min-w-0 items-start gap-2 text-warning">
             <CircleAlertIcon aria-hidden className="mt-0.5 size-3 shrink-0 stroke-current" />
@@ -1300,7 +1299,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   ) : null;
 
   const diff = latestRunDiff(thread);
-  const threadTags = useThreadTags(thread.environmentId, thread.id); // fork: thread tags, see FORK.md.
+  const threadTags = threadTagsOf(thread); // fork: thread tags, see FORK.md.
   // fork: row icon slots, see FORK.md. Always on the title line, so a meta line never moves them.
   // A two-line row keeps them on line two, so the title has line one to itself.
   const titleLineIcons = (

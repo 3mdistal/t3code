@@ -33,9 +33,8 @@ describe("thread tags menu", () => {
   it("ticks the thread's tags, matching case, and ends with New tag", () => {
     const item = tagsItem({
       ...baseState,
-      tags: { all: ["backend", "Frontend"], selected: ["frontend"], canEdit: true },
+      tags: { all: ["backend", "Frontend"], selected: ["frontend"] },
     });
-    expect(item?.disabled).toBe(false);
     expect(item?.children).toEqual([
       { id: "tag:backend", label: "backend", checked: false },
       { id: "tag:Frontend", label: "Frontend", checked: true },
@@ -44,15 +43,13 @@ describe("thread tags menu", () => {
   });
 
   it("offers only New tag before any tag exists", () => {
-    const item = tagsItem({ ...baseState, tags: { all: [], selected: [], canEdit: true } });
+    const item = tagsItem({ ...baseState, tags: { all: [], selected: [] } });
     expect(item?.children).toEqual([{ id: "tag-new", label: "New tag…", separatorBefore: false }]);
   });
 
-  it("is hidden on servers without tags and disabled without permission", () => {
-    expect(tagsItem({ ...baseState, tags: null })).toBeUndefined();
+  it("is left out without tags to show, and disabled where the connection can't change threads", () => {
     expect(tagsItem(baseState)).toBeUndefined();
-    const tags = { all: ["backend"], selected: [], canEdit: true };
-    expect(tagsItem({ ...baseState, tags: { ...tags, canEdit: false } })?.disabled).toBe(true);
+    const tags = { all: ["backend"], selected: [] };
     expect(tagsItem({ ...baseState, canOperate: false, tags })?.disabled).toBe(true);
   });
 });

@@ -6,6 +6,7 @@ import {
   type RunId,
   OrchestratorMcpFailure,
   type OrchestrationV2Command,
+  planThreadTagChanges, // fork: thread tags, see FORK.md.
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import { modelSelectionCommandType } from "@t3tools/shared/model";
@@ -24,8 +25,8 @@ import type * as ThreadManagement from "../../../orchestration-v2/ThreadManageme
 import * as ThreadMessageIntake from "../../../orchestration-v2/ThreadMessageIntake.ts";
 import * as ThreadSearch from "../../../orchestration-v2/ThreadSearch.ts";
 import * as ScheduledTasks from "../../../scheduledTasks/ScheduledTaskService.ts";
-import * as Settings from "../../../serverSettings.ts"; // fork: thread tags, see FORK.md.
 import { queuedRunsInDeliveryOrder } from "../../../orchestration-v2/QueuedRunOrder.ts";
+import { ThreadTagNames } from "../../../threadTags/ThreadTagNames.ts"; // fork: thread tags, see FORK.md.
 import { ThreadToolkit } from "./tools.ts";
 
 function queueEntry(
@@ -404,26 +405,36 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
   t3_thread_organize: writesThread((input) =>
     Effect.gen(function* () {
       const { threads, projection, caller } = yield* readThread(input.threadId);
+      // fork: thread tags, see FORK.md. A new tag takes the spelling the server's threads already use.
+      if (input.action === "tag" || input.action === "untag") {
+        const tagged = input.action === "tag";
+        const tags = yield* required(input.tags, "tags");
+        const inUse = tagged
+          ? yield* (yield* ThreadTagNames).list.pipe(Effect.mapError(unavailable))
+          : [];
+        const plan = planThreadTagChanges(
+          projection.thread.tags ?? [],
+          inUse,
+          tags.map((tag) => ({ tag, tagged })),
+          "typed",
+        );
+        for (const change of plan.commands) {
+          yield* threads
+            .dispatch({
+              commandId: yield* newCommandId(),
+              threadId: projection.thread.id,
+              type: "thread.tag.set",
+              ...change,
+            })
+            .pipe(Effect.mapError(dispatchFailure));
+        }
+        return { tags: plan.tags };
+      }
       const common = { commandId: yield* newCommandId(), threadId: projection.thread.id };
       if (input.action === "settle") {
         return yield* threads
           .settleThread({ ...common, byOwnAgent: caller?.id === projection.thread.id })
           .pipe(Effect.mapError(dispatchFailure));
-      }
-      // fork: thread tags, see FORK.md.
-      if (input.action === "tag" || input.action === "untag") {
-        const tags = yield* required(input.tags, "tags");
-        const settings = yield* Settings.ServerSettingsService;
-        const next = yield* settings
-          .updateSettings({
-            threadTags: {
-              [projection.thread.id]: Object.fromEntries(
-                tags.map((tag) => [tag, input.action === "tag"]),
-              ),
-            },
-          })
-          .pipe(Effect.mapError(unavailable));
-        return { tags: next.threadTags[projection.thread.id] ?? [] };
       }
       let command: OrchestrationV2Command;
       switch (input.action) {

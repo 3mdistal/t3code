@@ -1,4 +1,5 @@
 import { ORCHESTRATION_V2_WS_METHODS, WS_METHODS, type WsRpcGroup } from "@t3tools/contracts";
+import { THREAD_TAG_NAMES_WS_METHOD } from "@t3tools/contracts"; // fork: thread tags, see FORK.md.
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -27,6 +28,7 @@ const RPC_AGGREGATES = {
   [ORCHESTRATION_V2_WS_METHODS.getThreadFamily]: "orchestration",
   [ORCHESTRATION_V2_WS_METHODS.getThreadTitles]: "orchestration",
   [ORCHESTRATION_V2_WS_METHODS.getThreadLinkMetadata]: "orchestration",
+  [THREAD_TAG_NAMES_WS_METHOD]: "orchestration", // fork: thread tags, see FORK.md.
   [ORCHESTRATION_V2_WS_METHODS.getWorktreeThreadIds]: "orchestration",
   [ORCHESTRATION_V2_WS_METHODS.getOlderSettledThreads]: "orchestration",
   [ORCHESTRATION_V2_WS_METHODS.getThreadProjection]: "orchestrationV2",

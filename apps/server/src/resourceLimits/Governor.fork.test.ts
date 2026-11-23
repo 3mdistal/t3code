@@ -75,32 +75,34 @@ const layerLimits = ResourceLimits.layer.pipe(
   Layer.provide(Layer.succeed(HostProcess.Platform, "win32")),
   Layer.provide(Layer.succeed(ResourceLimits.TotalMemoryBytes, 128 * GiB)),
 );
-const layerTest = ThreadManagementService.layer.pipe(
-  Layer.provideMerge(
-    Layer.mergeAll(
-      layerDatabase,
-      layerProjections,
-      EventStore.layer.pipe(Layer.provide(layerDatabase)),
-      EffectOutbox.layer.pipe(Layer.provide(layerDatabase)),
-      ProviderReplayHarness.layerWithRegistry(
-        { name: "resource-limits" },
-        ProviderAdapterRegistry.layerFromAdapters([adapter]),
-        { databaseLayer: layerDatabase, runEffectWorker: false },
+const layerTestWith = (settings: Parameters<typeof ServerSettings.layerTest>[0] = {}) =>
+  ThreadManagementService.layer.pipe(
+    Layer.provideMerge(
+      Layer.mergeAll(
+        layerDatabase,
+        layerProjections,
+        EventStore.layer.pipe(Layer.provide(layerDatabase)),
+        EffectOutbox.layer.pipe(Layer.provide(layerDatabase)),
+        ProviderReplayHarness.layerWithRegistry(
+          { name: "resource-limits" },
+          ProviderAdapterRegistry.layerFromAdapters([adapter]),
+          { databaseLayer: layerDatabase, runEffectWorker: false },
+        ),
       ),
     ),
-  ),
-  Layer.provideMerge(ServerSettings.layerTest()),
-  Layer.provideMerge(CommandReceiptStore.layer.pipe(Layer.provide(layerDatabase))),
-  Layer.provideMerge(layerLimits),
-  // The same per-thread lock the orchestrator takes, by layer memoization, as the server shares it with the mover.
-  Layer.provideMerge(ThreadCommandExecutor.layer),
-  Layer.provideMerge(
-    ServerConfig.layerTest(process.cwd(), { prefix: "t3-resource-limits-" }).pipe(
-      Layer.provide(NodeServices.layer),
+    Layer.provideMerge(ServerSettings.layerTest(settings)),
+    Layer.provideMerge(CommandReceiptStore.layer.pipe(Layer.provide(layerDatabase))),
+    Layer.provideMerge(layerLimits),
+    // The same per-thread lock the orchestrator takes, by layer memoization, as the server shares it with the mover.
+    Layer.provideMerge(ThreadCommandExecutor.layer),
+    Layer.provideMerge(
+      ServerConfig.layerTest(process.cwd(), { prefix: "t3-resource-limits-" }).pipe(
+        Layer.provide(NodeServices.layer),
+      ),
     ),
-  ),
-  Layer.provideMerge(NodeServices.layer),
-);
+    Layer.provideMerge(NodeServices.layer),
+  );
+const layerTest = layerTestWith();
 
 /** A process table that never changes, and ends nothing. */
 const quietProcessTree: ProcessTree["Service"] = {
@@ -1100,8 +1102,9 @@ it.effect(
       ) as [ThreadId, ThreadId];
       // Both may move, and have waited long enough to, so only the tried start keeps them here.
       const cloud = yield* makeCloud();
-      yield* overflowTo({}, { [first]: ["needs:none"], [second]: ["needs:none"] });
+      yield* overflowTo({});
       yield* Effect.forEach([first, second], createThread);
+      yield* tagThreads({ [first]: "needs:none", [second]: "needs:none" });
       yield* governor.pass(yield* tight);
       yield* send(first, "agent work", agent);
       yield* TestClock.adjust("1 second");
@@ -2859,10 +2862,7 @@ const makeCloud = Effect.fnUntraced(function* () {
   };
 });
 
-const overflowTo = (
-  extra: Record<string, unknown> = {},
-  threadTags: Record<string, Array<string>> = {},
-) =>
+const overflowTo = (extra: Record<string, unknown> = {}) =>
   Effect.flatMap(ServerSettings.ServerSettingsService, (settings) =>
     settings.updateSettings({
       resourceLimits: {
@@ -2872,8 +2872,21 @@ const overflowTo = (
           ...extra,
         },
       },
-      threadTags,
     } as never),
+  );
+
+/** Tags threads the way the sidebar and agents do, on the thread itself. */
+const tagThreads = (threadTags: Record<ThreadId, string>) =>
+  Effect.forEach(Object.entries(threadTags) as Array<[ThreadId, string]>, ([threadId, tag]) =>
+    Effect.flatMap(Orchestrator.OrchestratorV2, (orchestrator) =>
+      orchestrator.dispatch({
+        type: "thread.tag.set",
+        commandId: CommandId.make(`tag:${threadId}:${tag}`),
+        threadId,
+        tag,
+        tagged: true,
+      }),
+    ),
   );
 
 const movedPath = Effect.gen(function* () {
@@ -2921,10 +2934,12 @@ const later = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
   );
 
 /** A held thread that may move at once. */
+/** A thread that may move, with agent work held. */
 const heldThread = (name: string, text = "work") =>
   Effect.gen(function* () {
     const threadId = ThreadId.make(`thread:${name}`);
     yield* createThread(threadId);
+    yield* tagThreads({ [threadId]: "needs:none" });
     yield* send(threadId, text, agent);
     return threadId;
   });
@@ -2945,11 +2960,9 @@ it.effect("O1: the best-ranked held thread that has waited long enough moves, on
     const [older, ranked, fresh] = ["older", "ranked", "fresh"].map((name) =>
       ThreadId.make(`thread:o1:${name}`),
     ) as [ThreadId, ThreadId, ThreadId];
-    yield* overflowTo(
-      {},
-      { [older]: ["needs:none"], [ranked]: ["needs:none"], [fresh]: ["needs:none"] },
-    );
+    yield* overflowTo({});
     yield* Effect.forEach([older, ranked, fresh], createThread);
+    yield* tagThreads({ [older]: "needs:none", [ranked]: "needs:none", [fresh]: "needs:none" });
     yield* governor.pass(yield* tight);
     yield* send(older, "older work", agent);
     yield* send(ranked, "ranked work", agent);
@@ -2991,22 +3004,28 @@ it.effect("O1: the best-ranked held thread that has waited long enough moves, on
   }).pipe(Effect.provide(layerTest)),
 );
 
+const o2 = (name: string) => ThreadId.make(`thread:o2:${name}`);
+
 it.effect(
   "O2: an ineligible or untagged thread keeps its place, and nothing moves while paused",
   () =>
     Effect.gen(function* () {
       const governor = yield* makeGovernor;
       const cloud = yield* makeCloud();
-      const [untagged, windows, free] = ["untagged", "windows", "free"].map((name) =>
-        ThreadId.make(`thread:o2:${name}`),
-      ) as [ThreadId, ThreadId, ThreadId];
-      yield* overflowTo(
-        { provides: ["notion"] },
-        { [windows]: ["needs:windows"], [free]: ["needs:none"] },
-      );
-      yield* Effect.forEach([untagged, windows, free], createThread);
+      const [untagged, pc, legacy, free] = ["untagged", "pc", "legacy", "free"].map(o2) as [
+        ThreadId,
+        ThreadId,
+        ThreadId,
+        ThreadId,
+      ];
+      yield* overflowTo({ provides: ["notion"] });
+      yield* Effect.forEach([untagged, pc, legacy, free], createThread);
+      // fork: thread tags. A `needs:` still in settings counts until it moves onto the thread.
+      yield* tagThreads({ [pc]: "needs:pc", [legacy]: "needs:none", [free]: "needs:none" });
       yield* governor.pass(yield* tight);
-      yield* Effect.forEach([untagged, windows, free], (threadId) => send(threadId, "work", agent));
+      yield* Effect.forEach([untagged, pc, legacy, free], (threadId) =>
+        send(threadId, "work", agent),
+      );
       yield* TestClock.adjust("2 minutes");
 
       yield* writePause("finish");
@@ -3018,8 +3037,9 @@ it.effect(
       assert.lengthOf(yield* cloud.attempts, 1);
       assert.deepEqual(yield* runs(free), ["cancelled:held", "cancelled:held"]);
       assert.deepEqual(yield* runs(untagged), ["queued:held"]);
-      assert.deepEqual(yield* runs(windows), ["queued:held"]);
-    }).pipe(Effect.provide(layerTest)),
+      assert.deepEqual(yield* runs(pc), ["queued:held"]);
+      assert.deepEqual(yield* runs(legacy), ["queued:held"]);
+    }).pipe(Effect.provide(layerTestWith({ threadTags: { [o2("legacy")]: ["needs:pc"] } }))),
 );
 
 it.effect(
@@ -3029,8 +3049,9 @@ it.effect(
       const governor = yield* makeGovernor;
       const cloud = yield* makeCloud();
       const threadId = ThreadId.make("thread:o3:moved");
-      yield* overflowTo({ moveAfterMs: 0 }, { [threadId]: ["needs:none"] });
+      yield* overflowTo({ moveAfterMs: 0 });
       yield* createThread(threadId);
+      yield* tagThreads({ [threadId]: "needs:none" });
       yield* governor.pass(yield* tight);
       yield* send(threadId, "work", agent);
       yield* governor.pass(yield* tight);
@@ -3075,7 +3096,7 @@ it.effect(
       const governor = yield* makeGovernor;
       const cloud = yield* makeCloud();
       yield* cloud.fault((current) => ({ ...current, refuseLaunches: "orchestration_error" }));
-      yield* overflowTo({ moveAfterMs: 0 }, { "thread:o4:asleep": ["needs:none"] });
+      yield* overflowTo({ moveAfterMs: 0 });
       yield* governor.pass(yield* tight);
       const threadId = yield* heldThread("o4:asleep");
       yield* governor.pass(yield* tight);
@@ -3120,7 +3141,7 @@ it.effect(
       const governor = yield* makeGovernor;
       const cloud = yield* makeCloud();
       yield* cloud.fault((current) => ({ ...current, loseLaunchReplies: 1 }));
-      yield* overflowTo({ moveAfterMs: 0 }, { "thread:o5:lost": ["needs:none"] });
+      yield* overflowTo({ moveAfterMs: 0 });
       yield* governor.pass(yield* tight);
       const threadId = yield* heldThread("o5:lost", "first");
       yield* governor.pass(yield* tight);
@@ -3159,11 +3180,7 @@ it.effect("O6: a restart at each phase carries the move on without repeating it"
       ["confirmed", { cancelFailures: 1 }],
       ["moved", {}],
     ] as const;
-    const names = phases.map(([phase]) => `thread:o6:${phase}`);
-    yield* overflowTo(
-      { moveAfterMs: 0 },
-      Object.fromEntries(names.map((name) => [name, ["needs:none"]])),
-    );
+    yield* overflowTo({ moveAfterMs: 0 });
     yield* governor.pass(yield* tight);
     for (const [phase, fault] of phases) {
       const threadId = yield* heldThread(`o6:${phase}`);
@@ -3197,7 +3214,7 @@ it.effect(
       const governor = yield* makeGovernor;
       const cloud = yield* makeCloud();
       const limits = yield* ResourceLimits.ResourceLimits;
-      yield* overflowTo({ moveAfterMs: 0 }, { "thread:o7:unwritable": ["needs:none"] });
+      yield* overflowTo({ moveAfterMs: 0 });
       yield* governor.pass(yield* tight);
       const threadId = yield* heldThread("o7:unwritable");
 
@@ -3232,7 +3249,7 @@ it.effect(
       const governor = yield* makeGovernor;
       const cloud = yield* makeCloud();
       yield* cloud.fault((current) => ({ ...current, there: null }));
-      yield* overflowTo({ moveAfterMs: 0 }, { "thread:o8:late": ["needs:none"] });
+      yield* overflowTo({ moveAfterMs: 0 });
       yield* governor.pass(yield* tight);
       const threadId = yield* heldThread("o8:late");
       yield* governor.pass(yield* tight);
@@ -3266,7 +3283,7 @@ it.effect(
     Effect.gen(function* () {
       const governor = yield* makeGovernor;
       const cloud = yield* makeCloud();
-      yield* overflowTo({ moveAfterMs: 0 }, { "thread:o9:forward": ["needs:none"] });
+      yield* overflowTo({ moveAfterMs: 0 });
       yield* governor.pass(yield* tight);
       const threadId = yield* heldThread("o9:forward");
       yield* governor.pass(yield* tight);
@@ -3313,10 +3330,7 @@ it.effect(
     Effect.gen(function* () {
       const governor = yield* makeGovernor;
       const cloud = yield* makeCloud();
-      yield* overflowTo(
-        { moveAfterMs: 0 },
-        { "thread:o10:claimed": ["needs:none"], "thread:o10:started": ["needs:none"] },
-      );
+      yield* overflowTo({ moveAfterMs: 0 });
       yield* governor.pass(yield* tight);
 
       // Claimed: the Resume is held, and what it would have started goes there.
@@ -3346,7 +3360,7 @@ it.effect("O11: Pause all switched on during a move's reads stops it before it l
   Effect.gen(function* () {
     const governor = yield* makeGovernor;
     const cloud = yield* makeCloud();
-    yield* overflowTo({ moveAfterMs: 0 }, { "thread:o11:paused": ["needs:none"] });
+    yield* overflowTo({ moveAfterMs: 0 });
     yield* governor.pass(yield* tight);
     const threadId = yield* heldThread("o11:paused");
     const onProjects = yield* later(writePause("finish"));
@@ -3388,7 +3402,7 @@ it.effect(
       const governor = yield* makeGovernor;
       const cloud = yield* makeCloud();
       yield* cloud.fault((current) => ({ ...current, there: runThere.queued }));
-      yield* overflowTo({ moveAfterMs: 0 }, { "thread:o12:edited": ["needs:none"] });
+      yield* overflowTo({ moveAfterMs: 0 });
       yield* governor.pass(yield* tight);
       const threadId = yield* heldThread("o12:edited", "fix the bug");
       yield* governor.pass(yield* tight);
@@ -3423,7 +3437,7 @@ it.effect("O13: a branch rewound or gone on its remote doesn't move", () =>
   Effect.gen(function* () {
     const governor = yield* makeGovernor;
     const cloud = yield* makeCloud();
-    yield* overflowTo({ moveAfterMs: 0 }, { "thread:o13:rewound": ["needs:none"] });
+    yield* overflowTo({ moveAfterMs: 0 });
     yield* governor.pass(yield* tight);
     const threadId = yield* heldThread("o13:rewound");
     for (const remoteHead of [
@@ -3455,7 +3469,7 @@ it.effect("O14: a later move of a thread whose setup failed there gets a branch 
     const governor = yield* makeGovernor;
     const cloud = yield* makeCloud();
     yield* cloud.fault((current) => ({ ...current, there: runThere.setupFailed }));
-    yield* overflowTo({ moveAfterMs: 0 }, { "thread:o14:retried": ["needs:none"] });
+    yield* overflowTo({ moveAfterMs: 0 });
     yield* governor.pass(yield* tight);
     const threadId = yield* heldThread("o14:retried");
     yield* governor.pass(yield* tight);
@@ -3479,7 +3493,7 @@ it.effect("O15: a launch that never answers ends with the call, and the move sta
     const cloud = yield* makeCloud();
     const stalled = yield* Deferred.make<void>();
     yield* cloud.fault((current) => ({ ...current, stallLaunches: stalled }));
-    yield* overflowTo({ moveAfterMs: 0 }, { "thread:o15:stalled": ["needs:none"] });
+    yield* overflowTo({ moveAfterMs: 0 });
     yield* governor.pass(yield* tight);
     const threadId = yield* heldThread("o15:stalled");
     const pass = yield* governor.pass(yield* tight).pipe(Effect.forkChild);
@@ -3501,10 +3515,7 @@ it.effect("O16: a pass where one move lands starts no other", () =>
     const governor = yield* makeGovernor;
     const cloud = yield* makeCloud();
     yield* cloud.fault((current) => ({ ...current, there: runThere.queued }));
-    yield* overflowTo(
-      { moveAfterMs: 0 },
-      { "thread:o16:first": ["needs:none"], "thread:o16:second": ["needs:none"] },
-    );
+    yield* overflowTo({ moveAfterMs: 0 });
     yield* governor.pass(yield* tight);
     const first = yield* heldThread("o16:first");
     yield* governor.pass(yield* tight);
@@ -3534,7 +3545,7 @@ it.effect("O17: a thread that couldn't move still waits after a restart", () =>
       ...current,
       remoteHead: { remoteHead: "def456", containsHead: false },
     }));
-    yield* overflowTo({ moveAfterMs: 0 }, { "thread:o17:waiting": ["needs:none"] });
+    yield* overflowTo({ moveAfterMs: 0 });
     yield* governor.pass(yield* tight);
     const threadId = yield* heldThread("o17:waiting");
     yield* governor.pass(yield* tight);
@@ -3571,8 +3582,7 @@ it.effect(
           note: "Reach the vault through its tools.",
         },
       });
-      const tags = { "thread:o18:vault": ["needs:none"], "thread:o18:vault2": ["needs:none"] };
-      yield* overflowTo(checkoutFree("Gone"), tags);
+      yield* overflowTo(checkoutFree("Gone"));
       yield* governor.pass(yield* tight);
       const threadId = yield* heldThread("o18:vault");
 
@@ -3581,7 +3591,7 @@ it.effect(
       assert.lengthOf(yield* cloud.attempts, 0);
       assert.deepEqual(yield* runs(threadId), ["queued:held"]);
 
-      yield* overflowTo(checkoutFree("Vault"), tags);
+      yield* overflowTo(checkoutFree("Vault"));
       yield* TestClock.adjust(TIMING.moveRetryMs);
       yield* governor.pass(yield* tight);
       assert.equal(yield* phaseOf(threadId), "moved");
@@ -3603,4 +3613,23 @@ it.effect(
       // Neither move read the checkout's status, a project by repository, or the remote branch.
       assert.deepEqual(yield* cloud.gitReads, []);
     }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("O19: a needs: tag set after the first look, before the claim, stops the move", () =>
+  Effect.gen(function* () {
+    const governor = yield* makeGovernor;
+    const cloud = yield* makeCloud();
+    yield* overflowTo({ moveAfterMs: 0 });
+    yield* governor.pass(yield* tight);
+    const threadId = yield* heldThread("o19:tagged");
+    // fork: thread tags. Tagged while the first look reads git, after it read the tags.
+    const onGitStatus = yield* later(tagThreads({ [threadId]: "needs:pc" }));
+    yield* cloud.fault((current) => ({ ...current, onGitStatus }));
+    yield* governor.pass(yield* tight);
+    assert.lengthOf(yield* cloud.attempts, 0);
+    assert.isUndefined(yield* phaseOf(threadId));
+    const limits = yield* ResourceLimits.ResourceLimits;
+    assert.isFalse((yield* limits.read).moved.has(threadId));
+    assert.deepEqual(yield* runs(threadId), ["queued:held"]);
+  }).pipe(Effect.provide(layerTest)),
 );

@@ -413,38 +413,74 @@ development builds don't, and the phone app doesn't read these links; it does re
 
 ### Thread tags (`fork:`)
 
-Threads carry free-form tags. Right-click a thread, open Tags, and tick a tag or add a new one; the row shows its
-tags as small colored chips on the branch line of two-line rows, as colored dots after the title on one-line
-rows, and in full in the hover card. Agents tag and untag with `t3_thread_organize` (`tag` and `untag`, with
-`tags`), and `t3_thread_list` returns each thread's tags and filters by `tags`, matching any of them. Tags match
-regardless of case, and a new tag takes the spelling already in use. A tag holds up to 40 characters (an agent's
-longer tag, up to upstream's 64, is cut to 40), and a thread up to 20 tags.
+Threads carry free-form tags. Right-click a thread, open Tags, and tick a tag or add a new one; the same Tags menu is
+among the thread's actions in ⌘K, which upstream v0.1.12 builds from the right-click menu (#40742). The row shows its
+tags as small colored chips on the machine line of two-line rows (upstream v0.1.12 shows the machine there in place of
+the branch, #40736), as colored dots after the title on one-line rows, and in full in the hover card. Agents tag and
+untag with `t3_thread_organize` (`tag` and `untag`, with `tags`), and `t3_thread_list` returns each thread's tags and
+filters by `tags`, matching any of them. Tags match regardless of case, and a new tag takes the spelling already in
+use. A new tag holds up to 40 characters (longer text is cut to 40, never splitting a character), and the menu and
+agent tools add no more than 20 to a thread.
 
-- Upstream v0.1.11 added its own tags (#29053): stored on the thread, set by the `thread.tag.set` command, and
-  used only to hide tagged threads while recording (`hideTaggedThreads`). It has no menu, agent tool or filter
-  that sets or reads them. The fork's tags stay a separate store for now, so upstream's hiding doesn't see them.
-  `packages/contracts/src/threadTags.ts` holds both; the fork's agent tools check each tag with upstream's
-  `ThreadTag`.
-
-- Stock compatibility: tags live under the new `threadTags` settings key on the server that owns the thread,
-  mapping thread id to tags. Stock T3 ignores the key, and drops it the next time it saves settings, so after a
-  rollback the threads stay but their tags are gone.
-- A patch adds or removes one tag at a time, removals first, and the server applies it to the tags it holds, so
-  ticks from two windows both land. A list replaces a thread's tags. Writing tags from the app needs the
-  settings-write scope, and the server reports the `threadTags` capability so older servers hide the menu. An agent
-  tags with the thread permissions that pin and snooze use, not the environment-settings ones, because a tag only
-  organizes one thread.
-- Tags of a deleted thread stay in settings, so their names stay in the Tags menu.
-- Fork files: `packages/contracts/src/threadTags.ts`, and in `apps/web/src/components/sidebar/`, `threadTags.ts`,
+- Storage: upstream's own tags (v0.1.11, #29053), kept on the thread and set by its `thread.tag.set` command, one
+  tag added or removed at a time. Upstream has no menu, agent tool or filter for them, and matches exact case. The
+  fork's `planThreadTagChanges` turns a tick or an agent's call into those commands. Stored tags compare whole,
+  trimmed and lowercased the same in every locale, so two tags that share their first 40 characters stay apart and
+  untagging removes only the ones that match; only typed text is cut to 40. A tag picked in the menu, the sidebar
+  filter or a bulk action matches by that key alone, so `waiting  on review` and `waiting on review` stay apart;
+  typed text (a new tag in the menu, an agent's `tags`) also matches with its spaces tidied. A new tag takes the
+  thread's own spelling, else the one in use on the server's threads, else the typed text. Tagging needs the thread
+  permission pin and snooze use, from the app and from agents.
+- The 20-tag cap is soft. The menu and agent tools keep to it, but upstream's command has no cap, so two windows
+  tagging at once can pass it. Nothing breaks past 20.
+- Tags in use: the server reads every tag on its threads, archived ones included, from the projection
+  (`ThreadTagNames.ts`, uncached, on a reader connection so it never queues ahead of commits; it reads only threads
+  that have tags). The menu lists the thread's own tags, the tags on the threads the window has loaded, and that
+  read, which it keeps per server while the sidebar is up and reads again whenever the loaded threads' tags change,
+  or when a Tags menu opens on a copy over 30 s old; that menu shows the old copy and the next one the new. Servers advertise it as `threadTagNames` and serve it at
+  `orchestration.listThreadTagNames`; from a server without it, the menu lists loaded threads' tags only. Agents
+  spell new tags from the same read. A deleted thread's tags leave it.
+- The read is a required service, not a reference with an empty default, so a missed provision fails typecheck
+  instead of quietly serving no names. `server.ts` provides it to the routes, which only their build sees. The
+  WebSocket handlers are built per connection from the request's context, so `Ws.layer` hands them the copy it
+  was built with, as it does its other build-time services. `t3_thread_organize` declares it, so its
+  registration hands it to each call.
+- Upstream's hiding while recording (`hideTaggedThreads`, `hiddenThreadTags`) sees these tags. It matches exact
+  case, so list a tag as it's spelled.
+- Stock compatibility: stock T3 v0.1.11 and later keeps the tags on their threads and hides tagged threads while
+  recording, but shows the tags nowhere. A rollback keeps them, and the fork shows them again on return. The
+  fork no longer reports the `threadTags` capability, so an older fork client, which wrote tags into settings,
+  hides its Tags menu, and settings patches no longer carry the key, so a tag patch from one changes nothing.
+- Older fork builds kept tags under the `threadTags` settings key. It stays in the settings schema, read only,
+  so a settings save doesn't drop the tags before they move onto their threads; no settings patch writes it.
+  Until a thread's entry moves, overflow counts its tags there too, so a held thread with a `needs:` tag in
+  settings can't move early. Overflow reads the tags again when it claims a thread, under the thread's command
+  lock, which `thread.tag.set` takes too, so a `needs:` tag set while it checked git or the linked machine stops
+  the move.
+- Fork files: `packages/contracts/src/threadTags.ts` (beside upstream's `ThreadTag`),
+  `apps/server/src/threadTags/ThreadTagNames.ts`, and in `apps/web/src/components/sidebar/`, `threadTags.ts`,
   `ThreadTagChips.tsx` and `NewThreadTagDialog.tsx`.
-- Upstream files it changes: the settings schema, patch and capability in `packages/contracts`, the patch in
-  `packages/shared/src/serverSettings.ts`, the capability in `ServerEnvironment.ts`, the two MCP tools, the thread
-  menu in `threadActionMenu.logic.ts`, `Sidebar.tsx` and `useThreadActionMenu.ts`, the chips in
-  `SidebarThreadRow.tsx`, the dialog host in `routes/__root.tsx`, and the menu's tag icon in
-  `contextMenuFallback.ts`. `apps/server/src/mcp/toolkits/core.test.ts` provides settings to the thread tools,
-  `useThreadActionMenu.test.ts` stubs the tag menu, and `agentContextBudget.json` records the larger MCP tool list.
+- Upstream files it changes: the old settings key in `packages/contracts/src/settings.ts`; the read's method in
+  `packages/contracts/src/rpc.ts`, its flag in `packages/contracts/src/server.ts`, its handler and flag in `ws.ts`,
+  `RpcAuthorization.ts` and `RpcInstrumentation.ts`, and its hand-off to each connection in `ws.ts`; `setThreadTag`
+  in `packages/client-runtime`'s `operations/commands.ts` and `state/threadCommands.ts`; the tags in
+  `ProjectionStore.listActiveThreads`, read as the shell reads them; the two MCP tools; overflow's tags in
+  `resourceLimits/Overflow.ts`; the read's layer in `server.ts`; the thread menu in `threadActionMenu.logic.ts`,
+  `Sidebar.tsx` and `useThreadActionMenu.ts`; the chips in `SidebarThreadRow.tsx`; the dialog host in
+  `routes/__root.tsx`; and the menu's tag icon in
+  `contextMenuFallback.ts`. `useThreadActionMenu.test.ts` stubs the tag menu, and `agentContextBudget.json` records
+  the larger MCP tool list. The harnesses that build the thread tools or the WebSocket handlers provide the read:
+  `ws.test.ts`, `mcp/toolkits/core.test.ts`, `mcp/linkOrigin.test.ts`, `peer/PeerForwarding.test.ts` and
+  `provider/AgentContextBudget.test.ts`.
 - Tests: `packages/contracts/src/threadTags.fork.test.ts`, `packages/shared/src/serverSettings.fork.test.ts`,
-  `apps/server/src/mcp/threadTags.fork.test.ts` and `apps/web/src/components/threadActionMenu.logic.fork.test.ts`.
+  `packages/client-runtime/src/state/threadTagFilter.fork.test.ts`,
+  `apps/server/src/threadTags/threadTags.fork.test.ts` (the read and the agent tools),
+  `apps/web/src/components/threadActionMenu.logic.fork.test.ts`, the filter's rows in
+  `apps/web/src/components/sidebar/sidebarView.fork.test.ts`, and the moves in
+  `apps/server/src/resourceLimits/Governor.fork.test.ts`, which read `needs:` tags from the thread and from settings,
+  and again under the claim (O19). `orchestration.listThreadTagNames` over a real socket, with the read provided as
+  `server.ts` provides it, is a fork test in upstream's `apps/server/src/ws.test.ts`, the only harness that builds
+  `Ws.layer`.
 
 ### Sidebar filter and sort (`fork:`)
 
@@ -522,7 +558,7 @@ none.
   each thread its order key up front. One at a time they would each land on top and reverse.
 - Archive leaves out running threads, which the server refuses, and asks first only when the single-thread setting
   does.
-- Stock compatibility: nothing new is stored. These are the thread commands and the `threadTags` settings patch
+- Stock compatibility: nothing new is stored. These are the thread commands, `thread.tag.set` among them, that
   the single-thread menu already uses.
 - Fork file: `apps/web/src/components/sidebar/bulkThreadActions.ts`. `threadTags.ts` gains the bulk tag handler.
 - Upstream files it changes: `Sidebar.tsx` (the multi-select menu, and `attemptPin` taking an order key).
@@ -1004,8 +1040,9 @@ Memory and CPU limits section of `docs/user/remote-access.md`.
   reads the batch inside the lock. A run admitted before the claim has started by then, and the thread doesn't
   move ("it started here"); a message or Resume after it is held. The claim lives only in memory, since nothing
   has left the PC yet, and is dropped if the move doesn't reach `pending`. Attachments and the brief's size are
-  checked again on the batch read under the claim. `server.ts` gives the mover the same lock instance as the
-  orchestrator by layer memoization; that's the only reason the mover's layer provides it.
+  checked again on the batch read under the claim, and the thread's tags are read again under the lock before it
+  (see Thread tags). `server.ts` gives the mover the same lock instance as the orchestrator by layer memoization;
+  that's the only reason the mover's layer provides it.
 - Which commit: the branch's upstream comes from `branch.<name>.remote` and `.merge`, so a remote that isn't
   `origin`, or has a slash in its name, reads right. Its URL's repository key picks the remote there from the
   project's identity there (its primary remote, or `origin`), so a fork tracked as `fork` here and `origin` there
