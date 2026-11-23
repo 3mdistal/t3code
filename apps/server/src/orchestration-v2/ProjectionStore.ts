@@ -1,5 +1,6 @@
 import type { ProjectThreadAwarenessV2Input } from "@t3tools/shared/agentAwareness";
 import { applyOrchestrationV2ThreadVisit, pendingGuestMessageCount } from "@t3tools/contracts";
+import { storedThreadTagsFromJson } from "@t3tools/contracts"; // fork: thread tags, see FORK.md.
 import { applyThreadPullRequestLinkUpdate } from "../sourceControl/threadPullRequests.ts";
 import { projectTurnItemForWire } from "./WireProjection.ts";
 import * as Stream from "effect/Stream";
@@ -531,6 +532,7 @@ export type ActiveThreadListEntry = Pick<
   | "settledAt"
   | "snoozedUntil"
   | "updatedAt"
+  | "tags" // fork: thread tags, see FORK.md.
 >;
 
 export interface OlderSettledThreadsQuery {
@@ -9637,6 +9639,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         readonly settled_override: string | null;
         readonly settled_at: string | null;
         readonly snoozed_until: string | null;
+        readonly tags: string | null; // fork: thread tags, see FORK.md.
       }>`
         SELECT
           t.thread_id,
@@ -9652,7 +9655,10 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           json_extract(t.payload_json, '$.delegatedFrom.title') AS delegated_from_title,
           json_extract(t.payload_json, '$.settledOverride') AS settled_override,
           json_extract(t.payload_json, '$.settledAt') AS settled_at,
-          json_extract(t.payload_json, '$.snoozedUntil') AS snoozed_until
+          json_extract(t.payload_json, '$.snoozedUntil') AS snoozed_until,
+          -- fork: thread tags, see FORK.md. Only an array, decoded as the shell decodes it.
+          CASE WHEN json_type(t.payload_json, '$.tags') = 'array'
+            THEN json_extract(t.payload_json, '$.tags') END AS tags
         FROM orchestration_v2_projection_threads t
         WHERE t.deleted_at IS NULL
           AND t.archived_at IS NULL${projectId === undefined ? sql`` : sql` AND t.project_id = ${projectId}`}
@@ -9678,6 +9684,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         settledAt: row.settled_at === null ? null : DateTime.makeUnsafe(row.settled_at),
         snoozedUntil: row.snoozed_until === null ? null : DateTime.makeUnsafe(row.snoozed_until),
         updatedAt: DateTime.makeUnsafe(row.updated_at),
+        ...(row.tags === null ? {} : { tags: storedThreadTagsFromJson(row.tags) }), // fork: thread tags, see FORK.md.
       }));
     }, Effect.mapError(shellSnapshotReadError));
 

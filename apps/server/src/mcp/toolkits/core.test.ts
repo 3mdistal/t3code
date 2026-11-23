@@ -57,6 +57,7 @@ import * as SecretRequests from "../../secrets/SecretRequests.ts";
 import * as RemoteDelegation from "../../peer/RemoteDelegation.ts";
 import * as ScheduledTaskService from "../../scheduledTasks/ScheduledTaskService.ts";
 import * as ServerSettings from "../../serverSettings.ts";
+import { ThreadTagNames } from "../../threadTags/ThreadTagNames.ts"; // fork: thread tags, see FORK.md.
 import * as McpHttpServer from "../McpHttpServer.ts";
 import * as McpInvocationContext from "../McpInvocationContext.ts";
 import * as McpToolAccessTestkit from "../McpToolAccess.testkit.ts";
@@ -92,7 +93,7 @@ const layerThreadToolkit = McpHttpServer.layerThreadToolkit.pipe(
   Layer.provide(Layer.mock(PeerForwarding.PeerForwarding)({})),
   Layer.provide(Layer.mock(PeerLinkRequests.PeerLinkRequests)({})),
   Layer.provide(Layer.mock(PeerLinks.PeerLinks)({})),
-  Layer.provide(ServerSettings.layerTest()), // fork: thread tags, see FORK.md.
+  Layer.provide(Layer.mock(ThreadTagNames)({})), // fork: thread tags, see FORK.md.
 );
 
 const threadId = ThreadId.make("mcp-core-thread");
@@ -899,7 +900,7 @@ it.effect("search names the calling thread, so an agent can tell its own match a
       McpHttpServer.layerThreadToolkit.pipe(
         Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
         Layer.provide(NodeCrypto.layer),
-        Layer.provide(ServerSettings.layerTest()), // fork: thread tags, see FORK.md.
+        Layer.provide(Layer.mock(ThreadTagNames)({})), // fork: thread tags, see FORK.md.
         Layer.provide(McpToolAccessTestkit.liveThreadsLayer),
         Layer.provide(
           Layer.mock(ThreadSearch.ThreadSearch)({
@@ -1141,7 +1142,7 @@ it.effect.each([
       McpHttpServer.layerThreadToolkit.pipe(
         Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
         Layer.provide(NodeCrypto.layer),
-        Layer.provide(ServerSettings.layerTest()), // fork: thread tags, see FORK.md.
+        Layer.provide(Layer.mock(ThreadTagNames)({})), // fork: thread tags, see FORK.md.
         Layer.provide(Layer.mock(ThreadManagement.ThreadManagementService)({})),
         Layer.provide(Layer.mock(ThreadSearch.ThreadSearch)({})),
         Layer.provide(Layer.mock(PeerForwarding.PeerForwarding)({})),
@@ -1181,7 +1182,7 @@ it.effect("run_scheduled_task_now reports why a started run failed to dispatch",
       McpHttpServer.layerThreadToolkit.pipe(
         Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
         Layer.provide(NodeCrypto.layer),
-        Layer.provide(ServerSettings.layerTest()), // fork: thread tags, see FORK.md.
+        Layer.provide(Layer.mock(ThreadTagNames)({})), // fork: thread tags, see FORK.md.
         Layer.provide(Layer.mock(ThreadManagement.ThreadManagementService)({})),
         Layer.provide(Layer.mock(ThreadSearch.ThreadSearch)({})),
         Layer.provide(Layer.mock(PeerForwarding.PeerForwarding)({})),

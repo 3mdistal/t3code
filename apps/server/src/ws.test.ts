@@ -5,6 +5,7 @@ import { WebSocket } from "@effect/platform-node/NodeWS";
 import * as NodeHttp from "node:http";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as NodeSocket from "@effect/platform-node/NodeSocket"; // fork: thread tags, see FORK.md.
 import { assert, it } from "@effect/vitest";
 import {
   AuthAccessReadScope,
@@ -27,6 +28,7 @@ import {
   ProviderThreadId,
   RunId,
   SourceControlRepositoryError,
+  THREAD_TAG_NAMES_WS_METHOD, // fork: thread tags, see FORK.md.
   WS_METHODS,
   WsRpcGroup,
   WsServerRefreshProvidersRpc,
@@ -63,6 +65,8 @@ import * as VcsProcess from "./vcs/VcsProcess.ts";
 import * as ProviderInstallationGate from "./provider/ProviderInstallationGate.ts";
 import * as Ws from "./ws.ts";
 import { RpcGroup, RpcMessage, RpcServer } from "effect/rpc";
+import { RpcClient, RpcSerialization } from "effect/rpc"; // fork: thread tags, see FORK.md.
+import * as Socket from "effect/socket/Socket"; // fork: thread tags, see FORK.md.
 import * as RpcTest from "effect/rpc/RpcTest";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as Statement from "effect/sql/Statement";
@@ -154,6 +158,7 @@ import * as TraceDiagnostics from "./diagnostics/TraceDiagnostics.ts";
 import * as TriageService from "./triage/TriageService.ts";
 import * as TextGenerators from "./textGeneration/TextGenerators.ts";
 import * as WorkspacePaths from "./workspace/WorkspacePaths.ts";
+import * as ThreadTagNames from "./threadTags/ThreadTagNames.ts"; // fork: thread tags, see FORK.md.
 import * as ServerSecretStore from "./auth/ServerSecretStore.ts";
 import * as SecretCheck from "./secrets/SecretCheck.ts";
 import * as ServerConfigModule from "./config.ts";
@@ -895,6 +900,7 @@ const layerUnusedConfigRpcServices = Layer.mergeAll(
   Layer.mock(WorkspaceEntries.WorkspaceEntries)({}),
   Layer.mock(WorkspaceFileSystem.WorkspaceFileSystem)({}),
   Layer.mock(WorktreeSetupTracker.WorktreeSetupTracker)({}),
+  Layer.mock(ThreadTagNames.ThreadTagNames)({}), // fork: thread tags, see FORK.md.
 );
 
 const layerConfigSources = Layer.mergeAll(
@@ -1004,6 +1010,98 @@ it.live.each([
       );
       assert.equal(socket.extensions, extensions);
     }).pipe(Effect.scoped),
+);
+
+// fork: thread tags, see FORK.md. Each connection builds its handlers from the request's context,
+// so they must get the read server.ts provides with the routes, not the request's copy.
+it.live("orchestration.listThreadTagNames answers with the tags on the server's threads", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const thread = (id: string, payload: object, deletedAt: string | null = null) => sql`
+      INSERT INTO orchestration_v2_projection_threads (
+        thread_id, project_id, title, default_provider, runtime_mode, interaction_mode,
+        created_at, updated_at, deleted_at, payload_json
+      ) VALUES (
+        ${id}, 'project', ${id}, 'codex', 'full-access', 'default',
+        '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z', ${deletedAt}, ${JSON.stringify(payload)}
+      )`;
+    yield* thread("live", { tags: ["Review", "frontend"] });
+    yield* thread("archived", { archivedAt: "2026-01-02T00:00:00.000Z", tags: ["old-label"] });
+    yield* thread("deleted", { tags: ["gone"] }, "2026-01-03T00:00:00.000Z");
+    const services = Layer.mergeAll(
+      layerUnusedConfigRpcServices,
+      Layer.mock(ServerBrowser.ServerBrowser)({
+        profileReporter: Effect.succeed(() => Effect.void),
+      }),
+      Layer.mock(EnvironmentAuth.EnvironmentAuth)({
+        authenticateWebSocketUpgrade: () =>
+          Effect.succeed({
+            sessionId: AuthSessionId.make("thread-tag-names"),
+            subject: "one-time-token",
+            method: "bearer-access-token",
+            scopes: [AuthOrchestrationReadScope],
+          }),
+      }),
+      Layer.mock(SessionStore.SessionStore)({
+        cookieName: "thread-tag-names",
+        legacyCookieName: undefined,
+        markConnected: () => Effect.void,
+        markDisconnected: () => Effect.void,
+        awaitInvalidation: () => Effect.never,
+      }),
+      Layer.mock(AnalyticsService.AnalyticsService)({ recordOwners: () => Effect.void }),
+      Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
+        namedProjectsRoot: process.cwd(),
+      }),
+      Layer.mock(ScratchThreadPromotion.ScratchThreadPromotion)({}),
+      Layer.mock(ProviderRegistry.ProviderRegistry)({}),
+      Layer.mock(UsageLimitSources.UsageLimitSources)({}),
+      Layer.mock(ExternalLauncher.ExternalLauncher)({}),
+      Layer.mock(RemoteOpenTargets.RemoteOpenTargets)({}),
+      Layer.mock(DirectEndpoints.DirectEndpoints)({}),
+      Layer.mock(ServerEnvironment.ServerEnvironment)({}),
+      Layer.mock(VcsProcess.VcsProcess)({
+        run: (input) =>
+          Effect.fail(
+            new VcsProcessSpawnError({
+              operation: input.operation,
+              command: input.command,
+              cwd: input.cwd,
+              cause: "No VCS commands in this fixture",
+            }),
+          ),
+      }),
+      ProviderInstallationGate.layer,
+      FetchHttpClient.layer,
+    );
+    const context = yield* Layer.build(
+      // As server.ts provides it: to the routes, so only their build sees it.
+      HttpRouter.serve(Ws.layer.pipe(Layer.provide(ThreadTagNames.layer)), {
+        disableListenLog: true,
+      }).pipe(
+        Layer.provideMerge(
+          NodeHttpServer.layer(NodeHttp.createServer, { host: "127.0.0.1", port: 0 }),
+        ),
+        Layer.provide(services),
+      ),
+    );
+    const origin = HttpServer.formatAddress(Context.get(context, HttpServer.HttpServer).address);
+    const answer = yield* RpcClient.make(WsRpcGroup).pipe(
+      Effect.flatMap((client) => client[THREAD_TAG_NAMES_WS_METHOD]({})),
+      Effect.provide(
+        RpcClient.layerProtocolSocket({ retryTransientErrors: false }).pipe(
+          Layer.provide(
+            Socket.layerWebSocket(
+              `${origin.replace(/^http/, "ws")}/ws?${ORCHESTRATION_PROTOCOL_QUERY_PARAM}=${ORCHESTRATION_PROTOCOL_VERSION}`,
+            ),
+          ),
+          Layer.provide(NodeSocket.layerWebSocketConstructor),
+          Layer.provide(RpcSerialization.layerJson),
+        ),
+      ),
+    );
+    assert.deepEqual(answer, { tags: ["frontend", "old-label", "Review"] });
+  }).pipe(Effect.scoped, Effect.provide(layerConfigSources)),
 );
 
 it.effect.each([

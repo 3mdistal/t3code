@@ -143,6 +143,7 @@ export function useThreadActionMenu(input: {
       };
       const isRegeneratingTitle = thread.titleRegeneration != null;
       const snoozePresets = resolveSnoozePresets(now, timestampFormat, threadRef.environmentId);
+      const tagMenu = readThreadTagMenu(thread); // fork: thread tags, see FORK.md.
       const items = buildThreadActionMenuItems({
         canOperate: readEnvironmentScope(threadRef.environmentId, AuthOrchestrationOperateScope),
         canFind: onFind !== undefined,
@@ -159,7 +160,7 @@ export function useThreadActionMenu(input: {
         snoozePresets,
         canShareWithGuest,
         canTurnIntoProject: canTurnThreadIntoProject(threadRef),
-        tags: readThreadTagMenu(threadRef), // fork: thread tags, see FORK.md.
+        tags: tagMenu, // fork: thread tags, see FORK.md.
       });
       const clicked = await settlePromise(() => api.contextMenu.show(items, position));
       if (clicked._tag === "Failure" || clicked.value === null) return;
@@ -174,7 +175,7 @@ export function useThreadActionMenu(input: {
         );
         return;
       }
-      if (handleThreadTagAction(threadRef, action)) return; // fork: thread tags, see FORK.md.
+      if (handleThreadTagAction({ threadRef, menu: tagMenu }, action)) return; // fork: thread tags, see FORK.md.
       if (action.startsWith("snooze:")) {
         const preset =
           action === "snooze:custom"

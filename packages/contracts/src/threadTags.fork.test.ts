@@ -9,81 +9,139 @@ import {
   ServerSettingsPatch,
 } from "./settings.ts";
 import {
-  applyThreadTagsPatch,
   hasAnyThreadTag,
   listThreadTags,
   normalizeThreadTag,
+  planThreadTagChanges,
+  storedThreadTagsFromJson,
+  THREAD_TAG_MAX_LENGTH,
   THREAD_TAGS_PER_THREAD,
 } from "./threadTags.ts";
 
 // fork: thread tags, see FORK.md.
 
 const decodeServerSettings = Schema.decodeSync(ServerSettings);
-const decodeServerSettingsPatch = Schema.decodeSync(ServerSettingsPatch);
-const a = ThreadId.make("thread-a");
-const b = ThreadId.make("thread-b");
+const decodeServerSettingsPatch = Schema.decodeUnknownSync(ServerSettingsPatch);
+const tag = (name: string) => ({ tag: name, tagged: true });
+const untag = (name: string) => ({ tag: name, tagged: false });
 
-describe("thread tags", () => {
-  it("adds and removes one tag at a time, so two windows ticking at once both land", () => {
-    const first = applyThreadTagsPatch({}, { [a]: { frontend: true } });
-    const both = applyThreadTagsPatch(first, { [a]: { "waiting on review": true } });
-    expect(both).toEqual({ [a]: ["frontend", "waiting on review"] });
-    expect(applyThreadTagsPatch(both, { [a]: { frontend: false } })).toEqual({
-      [a]: ["waiting on review"],
+describe("planThreadTagChanges", () => {
+  it("sends one thread.tag.set per tag, and nothing for a tag the thread has in any case", () => {
+    expect(
+      planThreadTagChanges([], [], [tag("frontend"), tag("waiting on review")], "typed"),
+    ).toEqual({
+      commands: [tag("frontend"), tag("waiting on review")],
+      tags: ["frontend", "waiting on review"],
+    });
+    expect(planThreadTagChanges(["Frontend"], [], [tag("FRONTEND")], "typed")).toEqual({
+      commands: [],
+      tags: ["Frontend"],
     });
   });
 
-  it("matches tags regardless of case and keeps the spelling already in use", () => {
-    const current = { [a]: ["Frontend"] };
-    const next = applyThreadTagsPatch(current, {
-      [b]: { frontend: true },
-      [a]: { FRONTEND: true },
-    });
-    expect(next).toEqual({ [a]: ["Frontend"], [b]: ["Frontend"] });
-    expect(applyThreadTagsPatch(next, { [a]: { frontend: false } })).toEqual({ [b]: ["Frontend"] });
+  it("spells a new tag as it is already in use, and removes every spelling that matches", () => {
+    expect(
+      planThreadTagChanges([], ["zeta", "Frontend"], [tag("frontend")], "typed").commands,
+    ).toEqual([tag("Frontend")]);
+    expect(
+      planThreadTagChanges(["Frontend", "frontend", "keep"], [], [untag("FRONTEND")], "typed"),
+    ).toEqual({ commands: [untag("Frontend"), untag("frontend")], tags: ["keep"] });
+    expect(planThreadTagChanges(["keep"], [], [untag("gone")], "typed").commands).toEqual([]);
   });
 
-  it("drops a thread with no tags left, clears a thread with null, and skips blank tags", () => {
-    const current = { [a]: ["one", "two"], [b]: ["three"] };
-    expect(applyThreadTagsPatch(current, { [a]: null, [b]: { "  ": true } })).toEqual({
-      [b]: ["three"],
-    });
-    expect(applyThreadTagsPatch(current, { [a]: ["Two", "two", " "], [b]: [] })).toEqual({
-      [a]: ["two"],
-    });
-    expect(normalizeThreadTag("  waiting \n on   review ")).toBe("waiting on review");
+  it("cuts a new tag to 40 characters on one line, and skips a blank one", () => {
+    const long = `waiting \n on   ${"x".repeat(64)}`;
+    const [added] = planThreadTagChanges([], [], [tag(long), tag("  ")], "typed").commands;
+    expect(added?.tag).toBe(normalizeThreadTag(long));
+    expect(added?.tag).toHaveLength(THREAD_TAG_MAX_LENGTH);
+    expect(added?.tag.startsWith("waiting on xxx")).toBe(true);
+    expect(normalizeThreadTag("a\u0000b")).toBe("a b");
+    // A cut that lands inside a surrogate pair drops the half.
+    expect(normalizeThreadTag(`${"x".repeat(39)}😀`)).toBe("x".repeat(39));
   });
 
-  it("caps tags per thread", () => {
-    const many = Object.fromEntries(
-      Array.from({ length: THREAD_TAGS_PER_THREAD + 5 }, (_, index) => [`tag ${index}`, true]),
-    );
-    expect(applyThreadTagsPatch({}, { [a]: many })[a]).toHaveLength(THREAD_TAGS_PER_THREAD);
+  it("matches stored tags whole, so two sharing their first 40 characters stay apart", () => {
+    const stem = "s".repeat(THREAD_TAG_MAX_LENGTH);
+    const [one, two] = [`${stem} one`, `${stem} two`];
+    expect(planThreadTagChanges([one, two], [], [untag(two.toUpperCase())], "typed")).toEqual({
+      commands: [untag(two)],
+      tags: [one],
+    });
+    expect(planThreadTagChanges([one], [two], [tag(one), tag(two)], "typed")).toEqual({
+      commands: [tag(two)],
+      tags: [one, two],
+    });
+    expect(hasAnyThreadTag([one], [two], "typed")).toBe(false);
+    expect(listThreadTags([[one, two]])).toEqual([one, two]);
   });
 
-  it("removes before it adds, so swapping a tag on a full thread keeps the new one", () => {
+  it("matches a tag picked from a list by its whole spelling, so two spacings stay apart", () => {
+    const [two, one] = ["waiting  on review", "waiting on review"];
+    expect(planThreadTagChanges([two, one], [two, one], [untag(two)], "picked")).toEqual({
+      commands: [untag(two)],
+      tags: [one],
+    });
+    expect(planThreadTagChanges([one], [two, one], [tag(two)], "picked")).toEqual({
+      commands: [tag(two)],
+      tags: [one, two],
+    });
+    // Typed, the same text finds either spacing.
+    expect(planThreadTagChanges([two, one], [], [untag(two)], "typed").tags).toEqual([]);
+  });
+
+  it("takes no tag past the soft cap of 20, but a swap on a full thread keeps its new tag", () => {
     const full = Array.from({ length: THREAD_TAGS_PER_THREAD }, (_, index) => `t${index}`);
-    const next = applyThreadTagsPatch({ [a]: full }, { [a]: { new: true, t0: false } })[a];
-    expect(next).toHaveLength(THREAD_TAGS_PER_THREAD);
-    expect(next).toContain("new");
-    expect(next).not.toContain("t0");
-  });
-
-  it("lists every tag once in order and matches any wanted tag", () => {
-    const settings = { [a]: ["zeta", "Alpha"], [b]: ["alpha", "beta"] };
-    expect(listThreadTags(settings)).toEqual(["Alpha", "beta", "zeta"]);
-    expect(hasAnyThreadTag(settings[a], ["ALPHA", "gamma"])).toBe(true);
-    expect(hasAnyThreadTag(settings[b], ["gamma"])).toBe(false);
-    expect(hasAnyThreadTag(undefined, ["gamma"])).toBe(false);
-    const spaced = applyThreadTagsPatch({}, { [a]: { "waiting   on review": true } });
-    expect(hasAnyThreadTag(spaced[a], ["waiting   on review"])).toBe(true);
-  });
-
-  it("is an optional settings key that needs settings write", () => {
-    expect(decodeServerSettings({}).threadTags).toEqual({});
-    const patch = decodeServerSettingsPatch({
-      threadTags: { [a]: { frontend: true }, [b]: null },
+    expect(planThreadTagChanges(full, [], [tag("one more")], "typed")).toEqual({
+      commands: [],
+      tags: full,
     });
-    expect(requiredScopesForServerSettingsPatch(patch)).toEqual([AuthSettingsWriteScope]);
+    const swapped = planThreadTagChanges(full, [], [tag("new"), untag("T0")], "typed");
+    expect(swapped.commands).toEqual([untag("t0"), tag("new")]);
+    expect(swapped.tags).toHaveLength(THREAD_TAGS_PER_THREAD);
+    expect(
+      planThreadTagChanges(
+        [],
+        [],
+        Array.from({ length: 25 }, (_, i) => tag(`tag ${i}`)),
+        "typed",
+      ).commands,
+    ).toHaveLength(THREAD_TAGS_PER_THREAD);
+  });
+});
+
+describe("thread tag reads", () => {
+  it("lists every tag once in order and matches any wanted tag", () => {
+    expect(listThreadTags([["zeta", "Alpha"], ["alpha", "beta"], undefined])).toEqual([
+      "Alpha",
+      "beta",
+      "zeta",
+    ]);
+    expect(hasAnyThreadTag(["zeta", "Alpha"], ["ALPHA", "gamma"], "picked")).toBe(true);
+    expect(hasAnyThreadTag(["beta"], ["gamma"], "picked")).toBe(false);
+    expect(hasAnyThreadTag(undefined, ["gamma"], "typed")).toBe(false);
+    // Typed text also matches tidied; a tag picked from a list matches its own spelling only.
+    expect(hasAnyThreadTag(["waiting on review"], ["waiting   on review"], "typed")).toBe(true);
+    expect(hasAnyThreadTag(["waiting on review"], ["waiting   on review"], "picked")).toBe(false);
+  });
+
+  it("reads stored tags as the shell does: an array of strings, or none", () => {
+    expect(storedThreadTagsFromJson('["a","B"]')).toEqual(["a", "B"]);
+    expect(storedThreadTagsFromJson('["a",1]')).toEqual([]);
+    expect(storedThreadTagsFromJson("not json")).toEqual([]);
+  });
+});
+
+describe("the old settings key", () => {
+  it("stays readable until it moves, but no settings patch can write it", () => {
+    const a = ThreadId.make("thread-a");
+    expect(decodeServerSettings({}).threadTags).toEqual({});
+    expect(decodeServerSettings({ threadTags: { [a]: ["frontend"] } }).threadTags).toEqual({
+      [a]: ["frontend"],
+    });
+    for (const threadTags of [{}, { [a]: ["frontend"] }, { [a]: { frontend: true } }]) {
+      const patch = decodeServerSettingsPatch({ enableProviderUpdateChecks: false, threadTags });
+      expect(patch).toEqual({ enableProviderUpdateChecks: false });
+      expect(requiredScopesForServerSettingsPatch(patch)).toEqual([AuthSettingsWriteScope]);
+    }
   });
 });

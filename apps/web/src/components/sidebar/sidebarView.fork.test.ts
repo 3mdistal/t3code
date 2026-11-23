@@ -79,6 +79,10 @@ describe("sidebar view filters", () => {
     expect(matchesSidebarViewFilters(view(), facts())).toBe(true);
     expect(matchesSidebarViewFilters(view({ tags: ["frontend", "backend"] }), tagged)).toBe(true);
     expect(matchesSidebarViewFilters(view({ tags: ["backend"] }), tagged)).toBe(false);
+    // A picked tag matches its own spacing only.
+    const spaced = facts({ tags: ["waiting  on review"] });
+    expect(matchesSidebarViewFilters(view({ tags: ["waiting  on review"] }), spaced)).toBe(true);
+    expect(matchesSidebarViewFilters(view({ tags: ["waiting on review"] }), spaced)).toBe(false);
     expect(
       matchesSidebarViewFilters(view({ tags: ["frontend"], statuses: ["failed"] }), tagged),
     ).toBe(false);
