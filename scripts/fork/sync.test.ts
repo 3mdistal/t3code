@@ -59,11 +59,14 @@ describe("linkUpstreamPullRequests", () => {
   });
 });
 
+// The gate scripts/fork/ci-workflows.ts lets the release override.
+const CI_CHANGES_JOB =
+  "  changes:\n    outputs:\n      mobile_native: ${{ steps.detect.outputs.mobile_native }}\n";
+
 const UPSTREAM_FILES = {
   ".gitattributes": "* text=auto eol=lf\n",
   "app.txt": "upstream\n",
-  ".github/workflows/ci.yml":
-    "name: CI\n\non:\n  pull_request:\n\njobs:\n  a:\n    runs-on: blacksmith-8vcpu-ubuntu-2404\n",
+  ".github/workflows/ci.yml": `name: CI\n\non:\n  pull_request:\n\njobs:\n${CI_CHANGES_JOB}  a:\n    runs-on: blacksmith-8vcpu-ubuntu-2404\n`,
   ".github/workflows/windows-tests.yml":
     "name: Windows Tests\n\non:\n  workflow_dispatch:\n\njobs:\n  a:\n    runs-on: blacksmith-8vcpu-windows-2025\n",
   ".github/workflows/release.yml":
@@ -144,8 +147,7 @@ describe("rebaseStack", () => {
       upstream: {
         ".github/workflows/release.yml":
           'name: Release\n\non:\n  push:\n    tags: ["v*.*.*"]\n  schedule:\n    - cron: "8 * * * *"\n\njobs:\n  a:\n    runs-on: ubuntu-24.04\n',
-        ".github/workflows/ci.yml":
-          "name: CI\n\non:\n  pull_request:\n  merge_group:\n\njobs:\n  a:\n    runs-on: blacksmith-8vcpu-ubuntu-2404\n    timeout-minutes: 7\n",
+        ".github/workflows/ci.yml": `name: CI\n\non:\n  pull_request:\n  merge_group:\n\njobs:\n${CI_CHANGES_JOB}  a:\n    runs-on: blacksmith-8vcpu-ubuntu-2404\n    timeout-minutes: 7\n`,
         ".github/workflows/deploy.yml":
           "name: Deploy\n\non:\n  push:\n    branches: [main]\n\njobs:\n  a:\n    runs-on: ubuntu-24.04\n",
       },
