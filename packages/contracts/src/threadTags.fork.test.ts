@@ -16,6 +16,7 @@ import {
   storedThreadTagsFromJson,
   THREAD_TAG_MAX_LENGTH,
   THREAD_TAGS_PER_THREAD,
+  withoutThreadTags,
 } from "./threadTags.ts";
 
 // fork: thread tags, see FORK.md.
@@ -143,5 +144,12 @@ describe("the old settings key", () => {
       expect(patch).toEqual({ enableProviderUpdateChecks: false });
       expect(requiredScopesForServerSettingsPatch(patch)).toEqual([AuthSettingsWriteScope]);
     }
+  });
+
+  it("clears only the entries the move settled", () => {
+    const [a, b] = [ThreadId.make("thread-a"), ThreadId.make("thread-b")];
+    expect(
+      withoutThreadTags({ [a]: ["one", "two"], [b]: ["three"] }, { [a]: ["one"], [b]: ["three"] }),
+    ).toEqual({ [a]: ["two"] });
   });
 });

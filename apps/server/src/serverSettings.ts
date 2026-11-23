@@ -21,7 +21,9 @@ import {
   globalIdleCompaction,
   isSecretReference,
   type SecretReference,
+  type ThreadTagSettings, // fork: thread tags, see FORK.md.
   withIdleCompaction,
+  withoutThreadTags, // fork: thread tags, see FORK.md.
 } from "@t3tools/contracts";
 import * as Cache from "effect/Cache";
 import * as Cause from "effect/Cause";
@@ -305,6 +307,14 @@ export class ServerSettingsService extends Context.Service<
       use: (settings: ServerSettings) => Effect.Effect<A, E, R>,
     ) => Effect.Effect<A, E | ServerSettingsError, R>;
 
+    /**
+     * fork: thread tags, see FORK.md. Removes these entries from the old `threadTags` key under the
+     * write lock, keeping any others. Optional so hand-built test services needn't change.
+     */
+    readonly clearLegacyThreadTags?: (
+      resolved: ThreadTagSettings,
+    ) => Effect.Effect<void, ServerSettingsError>;
+
     readonly streamChanges: Stream.Stream<ServerSettings>;
 
     /** Subscribe before reading a snapshot to retain changes before lazy stream startup. */
@@ -368,6 +378,11 @@ const makeTest = Effect.fn("serverSettings.makeTest")(function* (
       ),
     withSettingsSnapshot: (use) =>
       writeSemaphore.withPermits(1)(getSettings.pipe(Effect.flatMap(use))),
+    // fork: thread tags, see FORK.md.
+    clearLegacyThreadTags: (resolved) =>
+      updateTestSettings((current) =>
+        Effect.succeed({ ...current, threadTags: withoutThreadTags(current.threadTags, resolved) }),
+      ).pipe(Effect.asVoid),
     streamChanges: Stream.empty,
     subscribeChanges: Effect.succeed(Stream.empty),
   } satisfies ServerSettingsService["Service"];
@@ -1482,6 +1497,11 @@ const make = Effect.gen(function* () {
         }),
       ),
     withSettingsSnapshot,
+    // fork: thread tags, see FORK.md.
+    clearLegacyThreadTags: (resolved) =>
+      updateAndPersistSettings({}, (current) =>
+        Effect.succeed({ ...current, threadTags: withoutThreadTags(current.threadTags, resolved) }),
+      ).pipe(Effect.asVoid),
     get streamChanges() {
       return materializeChanges(Stream.fromPubSub(changesPubSub));
     },
