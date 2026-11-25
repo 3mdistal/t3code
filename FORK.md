@@ -1448,6 +1448,26 @@ matter this patch leaves alone.
   `packages/client-runtime/src/preview/serverBrowserStream.fork.test.ts` and
   `apps/web/src/browser/ServerBrowserSurface.fork.browser.test.tsx`.
 
+### Auto and Full access answer MCP approval prompts (`fork:`)
+
+An MCP server can ask the client to approve a call before it runs it: an Agent-Native app sends a form with an
+`approve`/`deny` choice for an action that needs approval, such as marking a Mail draft sent. Upstream answers that
+prompt itself only in Codex's Full access; Claude in every mode, and Codex in Auto, show an approval card. An agent
+thread in Auto or Full access has nobody watching it, so the card waits until Alice finds it, even though the thread's
+mode already let the call run. Alice asked on Nov 23, 2026 never to approve these in T3.
+
+Now Auto and Full access answer the prompt with upstream's own acceptance, for Claude and Codex: it picks an
+approve-style option the form offers and fills nothing else. A prompt asking for a value, or for a URL visit, is still
+cancelled without a card, as upstream does. Supervised and Auto-accept edits show the card as before. Nothing is
+persisted, so there is no migration or new event type.
+
+- `apps/server/src/orchestration-v2/Adapters/McpApprovalPrompts.ts` holds the rule. `ClaudeAdapterV2.ts` checks it
+  in `onElicitation` before the card, and `CodexAdapterV2.ts` in place of upstream's Full access check.
+- Tests: `Adapters/McpApprovalPrompts.fork.test.ts` covers the rule and the answer to Agent-Native's form.
+  `ClaudeAdapterV2.test.ts`'s MCP elicitation tests, whose harness lives in that file, start their turns in Supervised
+  and add a `fork:` case for Auto and Full access. `CodexAdapterV2.test.ts`'s MCP access approval test adds an Auto
+  case.
+
 ## Dropped patches
 
 A sync drops a patch once upstream does the same thing, and cuts one down to what upstream still doesn't do. A
