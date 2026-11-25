@@ -8358,6 +8358,28 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           assert.isEmpty(runtimeRequests());
         }).pipe(Effect.scoped, Effect.provide(testLayer)),
     );
+
+    // fork: Claude's own mode wins when it still asks people; see FORK.md.
+    it.effect.each(["plan", "default"] as const)(
+      "shows the card in Auto while Claude is in %s",
+      (permissionMode) =>
+        Effect.gen(function* () {
+          const { harness, elicit, awaitCard } = yield* startElicitationTurn(undefined, "auto");
+          yield* harness.offerAndWait(
+            claudeSdkFrame({
+              type: "system",
+              subtype: "status",
+              status: null,
+              permissionMode,
+              uuid: `elicitation-enter-${permissionMode}`,
+              session_id: WAKE_NATIVE_SESSION,
+            }),
+          );
+          const answer = yield* elicit(approvalOnly);
+          assert.equal((yield* awaitCard(1)).kind, "mcp-elicitation");
+          assert.isUndefined(answer.pollUnsafe());
+        }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    );
   });
 
   it.effect(
