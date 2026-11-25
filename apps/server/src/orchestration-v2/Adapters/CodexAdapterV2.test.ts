@@ -1913,7 +1913,9 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                   : {
                       turnPolicy: {
                         approvalPolicy: "on-request",
-                        ...(runtimeMode === "auto" ? { approvalsReviewer: "auto_review" } : {}),
+                        ...(runtimeMode === "auto"
+                          ? { approvalsReviewer: "auto_review" as const }
+                          : {}),
                         sandboxPolicy: { type: "workspaceWrite" },
                       },
                     }),
