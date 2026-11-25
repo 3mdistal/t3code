@@ -94,6 +94,7 @@ import {
   codexReviewedFullAccessThreadConfig,
   codexUnreviewedMcpServers,
 } from "./CodexReviewedFullAccess.ts";
+import { runtimeModeAnswersMcpApprovals } from "./McpApprovalPrompts.ts"; // fork: see FORK.md.
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Digest from "effect/crypto/Digest";
@@ -6220,7 +6221,8 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               } satisfies CodexSchema.McpServerElicitationRequestResponse;
             }
 
-            if (context.input.runtimePolicy.runtimeMode === "full-access") {
+            // fork: Auto answers it too; see FORK.md.
+            if (runtimeModeAnswersMcpApprovals(context.input.runtimePolicy.runtimeMode)) {
               return acceptance;
             }
 

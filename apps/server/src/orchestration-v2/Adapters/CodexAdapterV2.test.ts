@@ -80,6 +80,7 @@ import { resolveProviderCompatibility } from "../../provider/providerCompatibili
 import * as CodexAdapterV2 from "./CodexAdapterV2.ts";
 import { withCodexReplayChildMetadata } from "./CodexAdapterV2.testkit.ts";
 import * as CodexAdapterV2Testkit from "./CodexAdapterV2.testkit.ts";
+import { runtimeModeAnswersMcpApprovals } from "./McpApprovalPrompts.ts"; // fork: see FORK.md.
 
 const replayTranscriptJson = Schema.fromJsonString(CodexReplay.CodexAppServerReplayTranscript);
 const encodeReplayTranscriptJson = Schema.encodeEffect(replayTranscriptJson);
@@ -672,7 +673,8 @@ function codexReplayPreamble(input: {
   readonly effort?: string;
   readonly turnPolicy?: Pick<
     typeof CodexClient.V2TurnStartParams.Type,
-    "approvalPolicy" | "sandboxPolicy"
+    // fork: Auto's reviewer, for its MCP approval case; see FORK.md.
+    "approvalPolicy" | "approvalsReviewer" | "sandboxPolicy"
   >;
 }): Array<CodexReplay.CodexAppServerReplayEntry> {
   return [
@@ -1682,6 +1684,8 @@ describe("CodexAdapterV2 post-settle continuation", () => {
   it.effect.each([
     { runtimeMode: "full-access", turnIdKind: "present" },
     { runtimeMode: "auto-accept-edits", turnIdKind: "null" },
+    // fork: Auto answers MCP approvals itself; see FORK.md.
+    { runtimeMode: "auto", turnIdKind: "present" },
   ] as const)(
     "handles MCP access approvals in $runtimeMode with a $turnIdKind turn id",
     ({ runtimeMode, turnIdKind }) =>
@@ -1692,7 +1696,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         const pending = yield* Queue.unbounded<OrchestrationV2RuntimeRequest>();
         const harness = yield* makeCodexReplayHarness(
           makeCodexReplayTranscript({
-            scenario: `mcp-approval-${turnIdKind}`,
+            scenario: `mcp-approval-${runtimeMode}-${turnIdKind}`,
             entries: [
               ...codexReplayPreamble({
                 nativeThreadId,
@@ -1703,6 +1707,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                   : {
                       turnPolicy: {
                         approvalPolicy: "on-request",
+                        ...(runtimeMode === "auto" ? { approvalsReviewer: "auto_review" } : {}),
                         sandboxPolicy: { type: "workspaceWrite" },
                       },
                     }),
@@ -1758,7 +1763,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           ...turnInput,
           runtimePolicy: { ...turnInput.runtimePolicy, runtimeMode },
         });
-        if (runtimeMode === "full-access") {
+        if (runtimeModeAnswersMcpApprovals(runtimeMode)) {
           const request = yield* Effect.raceFirst(
             harness.firstTerminal.pipe(Effect.as(undefined)),
             Queue.take(pending),
