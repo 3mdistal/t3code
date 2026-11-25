@@ -10,6 +10,7 @@ import { claudeTaskOutputRoot, tailClaudeTaskOutput } from "./ClaudeTaskOutputTa
 import { isClaudeTranscriptMissing } from "./ClaudeLostSession.ts";
 import { makeClaudeWakeOwnership, claudeWakeTaskIds } from "./ClaudeWakeOwnership.ts"; // fork: see FORK.md.
 import { makeClaudeRuntimeRequests, offerClaudeSteer } from "./ClaudeRuntimeRequests.ts"; // fork: see FORK.md.
+import { runtimeModeAnswersMcpApprovals } from "./McpApprovalPrompts.ts"; // fork: see FORK.md.
 import {
   dynamicToolTitle,
   formatReadToolLabel,
@@ -13408,6 +13409,10 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             // "decline" for an explicit no; "cancel" tells the server the
             // request was dismissed and may be asked another way.
             return { action: "cancel" } satisfies ElicitationResult;
+          }
+          // fork: Auto and Full access answer it themselves, as Codex's Full access does; see FORK.md.
+          if (runtimeModeAnswersMcpApprovals(context.input.runtimePolicy.runtimeMode)) {
+            return acceptance;
           }
           const grantKey = `${request.serverName}\u0000${request.message}`;
           if ((yield* Ref.get(mcpElicitationSessionGrants)).has(grantKey)) {
