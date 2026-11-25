@@ -32,7 +32,7 @@ describe("MCP approval prompts", () => {
   };
 
   it("approve an Agent-Native action, for Claude and Codex alike", () => {
-    const approved = { action: "accept", content: { decision: "approve" } };
+    const approved = { action: "accept", content: { decision: "approve" } } as const;
     assert.deepEqual(claudeMcpElicitationAcceptance(agentNative), approved);
     assert.deepEqual(toMcpElicitationResponse(agentNative, "accept"), approved);
   });
