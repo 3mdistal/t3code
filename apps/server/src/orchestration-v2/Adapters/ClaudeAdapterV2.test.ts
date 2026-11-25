@@ -8118,6 +8118,8 @@ describe("ClaudeAdapterV2 background wake turns", () => {
 
     const startElicitationTurn = Effect.fnUntraced(function* (
       options?: Parameters<typeof makeWakeHarnessWithOptions>[0],
+      // fork: the card shows only in Supervised and Auto-accept edits; see FORK.md.
+      runtimeMode: (typeof CLAUDE_TEST_RUNTIME_POLICY)["runtimeMode"] = "approval-required",
     ) {
       const harness = yield* makeWakeHarnessWithOptions(options);
       yield* harness.runtime.startTurn(
@@ -8128,6 +8130,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           attemptId: RunAttemptId.make("attempt-claude-elicitation"),
           text: "Deploy web.",
           attachments: [],
+          runtimePolicy: { ...CLAUDE_TEST_RUNTIME_POLICY, runtimeMode },
         }),
       );
       const onElicitation = harness.getOpenedOptions()?.onElicitation;
@@ -8315,6 +8318,45 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         yield* Scope.close(session, Exit.void);
         assert.deepEqual(yield* Fiber.join(answer), { action: "cancel" });
       }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    );
+
+    // fork: Auto and Full access answer an approval prompt themselves; see FORK.md.
+    it.effect.each(["auto", "full-access"] as const)(
+      "answers an approval prompt in %s without a card",
+      (runtimeMode) =>
+        Effect.gen(function* () {
+          const { elicit, runtimeRequests } = yield* startElicitationTurn(undefined, runtimeMode);
+          // The form an Agent-Native app sends before an action that needs approval.
+          const agentNative: ElicitationRequest = {
+            serverName: "mail-beta",
+            message: 'Action "mark-sent" requires your approval before it can run.',
+            mode: "form",
+            requestedSchema: {
+              type: "object",
+              properties: { decision: { type: "string", enum: ["approve", "deny"] } },
+              required: ["decision"],
+            },
+          };
+          assert.deepEqual(yield* Fiber.join(yield* elicit(agentNative)), {
+            action: "accept",
+            content: { decision: "approve" },
+          });
+          assert.deepEqual(yield* Fiber.join(yield* elicit(approvalOnly)), {
+            action: "accept",
+            content: {},
+          });
+          // A prompt for a value is never filled in.
+          const valueForm: ElicitationRequest = {
+            ...approvalOnly,
+            requestedSchema: {
+              type: "object",
+              properties: { reason: { type: "string" } },
+              required: ["reason"],
+            },
+          };
+          assert.deepEqual(yield* Fiber.join(yield* elicit(valueForm)), { action: "cancel" });
+          assert.isEmpty(runtimeRequests());
+        }).pipe(Effect.scoped, Effect.provide(testLayer)),
     );
   });
 
