@@ -13410,8 +13410,14 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             // request was dismissed and may be asked another way.
             return { action: "cancel" } satisfies ElicitationResult;
           }
-          // fork: Auto and Full access answer it themselves, as Codex's Full access does; see FORK.md.
-          if (runtimeModeAnswersMcpApprovals(context.input.runtimePolicy.runtimeMode)) {
+          // fork: Auto and Full access answer it themselves, as Codex's Full access does, unless
+          // Claude itself still asks (Plan, or Full access fallen back to Default); see FORK.md.
+          const activePermissionMode =
+            (yield* Ref.get(queryContext))?.permissionMode ?? context.queryPolicy.permissionMode;
+          if (
+            runtimeModeAnswersMcpApprovals(context.input.runtimePolicy.runtimeMode) &&
+            (activePermissionMode === "auto" || activePermissionMode === "bypassPermissions")
+          ) {
             return acceptance;
           }
           const grantKey = `${request.serverName}\u0000${request.message}`;
