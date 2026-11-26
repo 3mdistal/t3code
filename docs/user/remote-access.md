@@ -267,6 +267,11 @@ such as `needs:vault`; the linked machine's `provides` list says what it has. A
 thread without such a tag is taken to need `assumeNeeds` (vault, content and gateway
 by default), so tag it `needs:none` to let it move. Set `mode` to `off` to stop moves.
 
+Threads move a few at a time. While 3 threads this machine moved are busy on the
+linked machine (running, about to run, or waiting on you or on background work), the
+rest keep their place here; set `maxBusy` to change that number. If the linked machine
+doesn't answer, they wait too.
+
 A repository you never want copied to the linked machine can still have its threads
 move, without their checkout. Add `checkoutFree` to `overflow`: `repositories` lists
 the repositories to keep here, such as `"github.com/owner/notes"`; `project` names the
