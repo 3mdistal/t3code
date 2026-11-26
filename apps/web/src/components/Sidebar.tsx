@@ -3453,6 +3453,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                         event.preventDefault();
                         openProjectSettings(project);
                       }}
+                      onAddProject={openAddProjectCommandPalette}
                       tags={sidebarFilterFacets.tags}
                       statuses={sidebarFilterFacets.statuses}
                       pinned={sidebarFilterFacets.pinned}
