@@ -1032,6 +1032,279 @@ it.effect("offers a continuation for a later wake after a queued continuation is
   ),
 );
 
+const echoedAssistant = (uuid: string, text: string, promptUuid: string) =>
+  frame({
+    type: "assistant",
+    uuid,
+    session_id: sessionId,
+    parent_tool_use_id: null,
+    user_message_uuid: promptUuid,
+    message: {
+      id: `msg-${uuid}`,
+      role: "assistant",
+      type: "message",
+      model: modelSelection.model,
+      content: [{ type: "text", text }],
+      stop_reason: null,
+      stop_sequence: null,
+      usage: { input_tokens: 1, output_tokens: 1 },
+    },
+  });
+
+const echoedResult = (uuid: string, promptUuid: string) =>
+  frame({ ...(result(uuid, false) as object), user_message_uuid: promptUuid });
+
+const wakeResult = (uuid: string) =>
+  frame({ ...(result(uuid, false) as object), origin: { kind: "task-notification" } });
+
+const promptLifecycle = (promptUuid: string, state: "queued" | "started" | "completed") =>
+  frame({
+    type: "command_lifecycle",
+    command_uuid: promptUuid,
+    state,
+    uuid: `${state}-${promptUuid}`,
+    session_id: sessionId,
+  });
+
+// Claude starts a turn of its own while T3 still has older messages queued. As recorded in
+// claude_background_wake_before_queued_prompt, Claude queues the prompt T3 offers meanwhile and
+// starts it only after its own turn's result.
+it.effect.each([
+  "Claude ends its own turn before reading the next message",
+  "Claude reads the next message into its own turn",
+] as const)("finishes a buffered Claude wake queued behind older messages when %s", (cli) =>
+  Effect.gen(function* () {
+    const cwd = yield* checkpointWorkspace("claude-wake-behind-queue");
+    const sdkMessages = yield* Queue.unbounded<SDKMessage>();
+    const processed = new WeakMap<SDKMessage, Deferred.Deferred<void>>();
+    const offerAndWait = Effect.fnUntraced(function* (message: SDKMessage) {
+      const done = yield* Deferred.make<void>();
+      processed.set(message, done);
+      yield* Queue.offer(sdkMessages, message);
+      yield* Deferred.await(done);
+    });
+    const offers: SDKUserMessage[] = [];
+    const fileSystem = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const random = yield* SecureRandom.SecureRandom;
+    const idAllocator = yield* IdAllocator.IdAllocatorV2;
+    const services =
+      yield* Effect.context<
+        Effect.Services<ReturnType<typeof ClaudeAdapterV2.makeClaudeAdapterV2>>
+      >();
+    const registry = ProviderAdapterRegistry.layerFromAdaptersEffect(
+      Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapterV2.makeClaudeAdapterV2({
+          instanceId: modelSelection.instanceId,
+          settings,
+          environment: {},
+          attachmentsDir: cwd,
+          fileSystem,
+          path,
+          random,
+          idAllocator,
+          continuationRequests: yield* ProviderContinuationRequests.ProviderContinuationRequests,
+          queryRunner: {
+            allocateSessionId: Effect.succeed(sessionId),
+            open: () =>
+              Effect.succeed({
+                // Resolve each frame's Deferred once the adapter pulls the next one.
+                messages: Stream.fromQueue(sdkMessages).pipe(
+                  Stream.flatMap((message) =>
+                    Stream.make(message).pipe(
+                      Stream.concat(
+                        Stream.fromEffect(
+                          Effect.suspend(() => {
+                            const done = processed.get(message);
+                            return done === undefined
+                              ? Effect.void
+                              : Deferred.succeed(done, undefined);
+                          }),
+                        ).pipe(Stream.drain),
+                      ),
+                    ),
+                  ),
+                ),
+                offer: (message) => Effect.sync(() => void offers.push(message)),
+                setModel: () => Effect.void,
+                applyFlagSettings: () => Effect.void,
+                setPermissionMode: () => Effect.void,
+                renameSession: () => Effect.void,
+                backgroundTasks: () => Effect.succeed(false),
+                mcpServerStatus: Effect.succeed([]),
+                readMcpResource: () => Effect.die("unexpected MCP resource read"),
+                callMcpTool: () => Effect.die("unexpected MCP tool call"),
+                listPermissionRules: Effect.die("unexpected permission rules read"),
+                stopTask: () => Effect.void,
+                interrupt: Effect.void,
+                close: Effect.void,
+              }),
+            forkSession: () => Effect.die("unused"),
+            subagentLaunchToolUseId: () => Effect.succeed(null),
+            subagentModel: () => Effect.succeed(null),
+            assertComplete: Effect.void,
+          },
+        }).pipe(Effect.provideContext(services));
+        return [adapter];
+      }),
+    );
+    yield* Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+      const threadId = ThreadId.make("thread:wake-behind-queue");
+      const older = ["watch-1", "watch-2", "watch-3", "watch-4", "watch-5", "watch-6"];
+      const isWake = (messageId: string) => messageId !== "first" && !older.includes(messageId);
+      const watch = (predicate: (event: OrchestrationV2DomainEvent) => boolean) =>
+        orchestrator.streamDomainEvents.pipe(
+          Stream.filter(predicate),
+          Stream.take(1),
+          Stream.runDrain,
+          Effect.forkScoped,
+        );
+      const runUpdated = (matches: (messageId: string) => boolean, status: string) =>
+        watch(
+          (event) =>
+            event.type === "run.updated" &&
+            matches(event.payload.userMessageId) &&
+            event.payload.status === status,
+        );
+      const offeredText = (offer: SDKUserMessage) => JSON.stringify(offer.message.content);
+      // Claude answers an offered prompt with a turn of its own that echoes the prompt's uuid.
+      const answer = Effect.fnUntraced(function* (offer: SDKUserMessage, text: string) {
+        yield* offerAndWait(promptLifecycle(offer.uuid!, "started"));
+        yield* offerAndWait(echoedAssistant(`reply-${offer.uuid}`, text, offer.uuid!));
+        yield* offerAndWait(echoedResult(`result-${offer.uuid}`, offer.uuid!));
+        yield* offerAndWait(promptLifecycle(offer.uuid!, "completed"));
+      });
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("create"),
+        threadId,
+        projectId: ProjectId.make("project:wake-behind-queue"),
+        title: "Wake behind queue",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: cwd,
+        createdBy: "user",
+        creationSource: "web",
+      });
+
+      const firstRunning = yield* runUpdated((id) => id === "first", "running");
+      yield* orchestrator.dispatch({
+        type: "message.dispatch",
+        commandId: CommandId.make("first"),
+        threadId,
+        messageId: MessageId.make("first"),
+        text: "Run the build in the background, then watch the pull request.",
+        attachments: [],
+        dispatchMode: { type: "start_immediately" },
+        createdBy: "user",
+        creationSource: "web",
+      });
+      yield* worker.drain();
+      yield* Fiber.join(firstRunning);
+      // Pull request watch messages queue behind the running turn.
+      for (const id of older) {
+        yield* orchestrator.dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make(id),
+          threadId,
+          messageId: MessageId.make(id),
+          text: `Pull request update ${id}`,
+          notification: { source: { kind: "monitor" }, outcome: "updated", summary: id },
+          attachments: [],
+          dispatchMode: { type: "queue_after_active" },
+          createdBy: "agent",
+          creationSource: "server",
+        });
+      }
+      yield* offerAndWait(backgroundTaskStarted("build-1"));
+      const firstWaiting = yield* runUpdated((id) => id === "first", "waiting");
+      yield* answer(offers[0]!, "first reply");
+      yield* Fiber.join(firstWaiting);
+
+      // Before T3 starts the next queued run, the finished build starts Claude's own turn.
+      const wakeQueued = yield* watch(
+        (event) =>
+          event.type === "run.created" &&
+          event.payload.status === "queued" &&
+          isWake(event.payload.userMessageId),
+      );
+      yield* offerAndWait(backgroundTaskNotification("build-1"));
+      yield* offerAndWait(wakeAssistant("wake-1"));
+      yield* Fiber.join(wakeQueued);
+
+      for (const [index, id] of older.entries()) {
+        const running = yield* runUpdated((messageId) => messageId === id, "running");
+        yield* worker.drain();
+        yield* Fiber.join(running);
+        const offer = offers[index + 1];
+        assert.ok(offer !== undefined, `${id} must reach Claude`);
+        assert.include(offeredText(offer), `Pull request update ${id}`);
+        const waiting = yield* runUpdated((messageId) => messageId === id, "waiting");
+        if (index > 0) {
+          yield* answer(offer, `${id} reply`);
+        } else if (cli === "Claude ends its own turn before reading the next message") {
+          yield* offerAndWait(promptLifecycle(offer.uuid!, "queued"));
+          yield* offerAndWait(wakeResult("wake-1-result"));
+          yield* answer(offer, `${id} reply`);
+        } else {
+          yield* offerAndWait(promptLifecycle(offer.uuid!, "started"));
+          yield* offerAndWait(echoedAssistant("wake-reads-watch-1", `${id} reply`, offer.uuid!));
+          yield* offerAndWait(
+            frame({ ...(wakeResult("wake-1-result") as object), user_message_uuid: offer.uuid }),
+          );
+          yield* offerAndWait(promptLifecycle(offer.uuid!, "completed"));
+        }
+        yield* Fiber.join(waiting);
+      }
+      const wakeWaiting = yield* runUpdated(isWake, "waiting");
+      yield* worker.drain();
+      yield* Fiber.join(wakeWaiting);
+      yield* worker.drain();
+
+      const projection = yield* orchestrator.getThreadProjection(threadId);
+      assert.deepEqual(
+        projection.runs.map((run) => ({
+          message: isWake(run.userMessageId) ? "wake" : run.userMessageId,
+          status: run.status,
+          replies: projection.turnItems.flatMap((item) =>
+            item.runId === run.id && item.type === "assistant_message" ? [item.text] : [],
+          ),
+        })),
+        [
+          { message: "first", status: "completed", replies: ["first reply"] },
+          ...older.map((id) => ({ message: id, status: "completed", replies: [`${id} reply`] })),
+          {
+            message: "wake",
+            status: "completed",
+            replies: ["Background build finished (wake-1)."],
+          },
+        ],
+      );
+      assert.lengthOf(offers, older.length + 1, "each queued message reaches Claude once");
+    }).pipe(
+      Effect.provide(
+        ProviderReplayHarness.layerWithRegistry({ name: "claude-wake-behind-queue" }, registry, {
+          runEffectWorker: false,
+          runContinuationWorker: true,
+        }),
+      ),
+    );
+  }).pipe(
+    Effect.provide(
+      Layer.mergeAll(
+        IdAllocator.layer,
+        McpProviderSessions.layer,
+        NodeServices.layer,
+        NodeCrypto.layer,
+      ),
+    ),
+  ),
+);
+
 // A steer Claude never read runs as the next turn, between the messages sent before and after
 // it, even when they share a millisecond and the later one picks another model.
 it.effect.each([
