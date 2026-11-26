@@ -23,6 +23,7 @@ import {
 import { rehypeChipPunctuation } from "../components/chat/markdownChipPunctuation";
 import { rehypeHeadingIds } from "../components/chat/markdownFragments";
 import { rehypeTextDirection } from "../components/chat/markdownTextDirection";
+import type { ReplyPullRequestLink } from "../components/chat/replyPullRequestLinks"; // fork: see FORK.md.
 
 /** What a kind of message adds to chat Markdown. Pass a stable object: renderers cache by it. */
 export interface MarkdownExtensions {
@@ -44,6 +45,8 @@ export interface MarkdownExtensions {
   };
   /** Expand GitHub `:alias:` emoji shortcodes in prose outside code. */
   readonly githubEmoji?: boolean;
+  /** fork: bare pull request numbers in a finished reply link; see FORK.md. */
+  readonly replyPullRequestLinks?: (text: string) => ReadonlyArray<ReplyPullRequestLink>;
 }
 
 export interface WordsHastOptions {
@@ -594,6 +597,32 @@ function linkText(value: string, walk: Walk): ElementContent[] | null {
         }
         linked.push(
           link(reference.url, reference.label, { dataPullRequestAutolink: reference.kind }),
+        );
+        start = reference.index + reference.text.length;
+      }
+      if (start < part.value.length) linked.push({ type: "text", value: part.value.slice(start) });
+      return linked;
+    });
+  }
+  // fork: pull request numbers in replies link; a guess carries the reference marker. See FORK.md.
+  const replyLinks = walk.options.extensions.replyPullRequestLinks;
+  if (replyLinks) {
+    parts = parts.flatMap((part) => {
+      if (part.type !== "text") return [part];
+      const found = replyLinks(part.value);
+      if (found.length === 0) return [part];
+      const linked: ElementContent[] = [];
+      let start = 0;
+      for (const reference of found) {
+        if (start < reference.index) {
+          linked.push({ type: "text", value: part.value.slice(start, reference.index) });
+        }
+        linked.push(
+          link(
+            reference.url,
+            reference.text,
+            reference.reference ? { dataPullRequestAutolink: "reference" } : {},
+          ),
         );
         start = reference.index + reference.text.length;
       }

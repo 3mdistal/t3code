@@ -24,6 +24,8 @@ import { readThreadTurnItems } from "../../state/entities";
 import { useV2ItemSupport } from "../../state/v2ItemSupport";
 import { TimelineRowCtx, TimelineRowActivityCtx, type TimelineRow } from "./timelineRowContext";
 import { MESSAGE_HEADING_LEVEL, MessageAuthorHeading } from "./TimelineRowParts";
+// fork: pull request numbers in replies link. See FORK.md.
+import { useReplyPullRequestLinkExtensions } from "./useReplyPullRequestLinks";
 
 export function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" }> }) {
   const ctx = use(TimelineRowCtx);
@@ -36,6 +38,9 @@ export function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind
   const text = liveText ?? row.message.text;
   const messageText =
     text || (row.message.streaming || row.suppressEmptyResponse ? "" : gt("(empty response)"));
+  // fork: bare pull request numbers link once the reply finishes; an extension would cost a streaming reply its
+  // block-by-block render. See FORK.md.
+  const pullRequestLinks = useReplyPullRequestLinkExtensions(ctx.threadRef ?? null);
 
   return (
     <>
@@ -63,6 +68,9 @@ export function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind
               lineBreaks={shouldPreserveAssistantLineBreaks(messageText)}
               skills={ctx.skills}
               headingLevelOffset={MESSAGE_HEADING_LEVEL}
+              {...(row.message.streaming || pullRequestLinks === undefined
+                ? {}
+                : { extensions: pullRequestLinks })}
               onUseArtifactTemplate={ctx.onUseArtifactTemplate}
               onRunShellCommand={ctx.onRunShellCommand}
               onImageExpand={ctx.onImageExpand}
