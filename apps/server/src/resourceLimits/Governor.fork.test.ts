@@ -3419,7 +3419,8 @@ it.effect("O6: a restart at each phase carries the move on without repeating it"
       ["confirmed", { cancelFailures: 1 }],
       ["moved", {}],
     ] as const;
-    yield* overflowTo({ moveAfterMs: 0 });
+    // Each lands within the last ones' hold there, so the cap leaves room for all of them.
+    yield* overflowTo({ moveAfterMs: 0, maxBusy: phases.length });
     yield* governor.pass(yield* tight);
     for (const [phase, fault] of phases) {
       const threadId = yield* heldThread(`o6:${phase}`);
@@ -3937,7 +3938,7 @@ it.effect(
     }).pipe(Effect.provide(layerTest)),
 );
 
-it.effect("CAP-2: once one is no longer busy there, the next thread in rank order moves", () =>
+it.effect("CAP-2: once one there frees its place, the next thread in rank order moves", () =>
   Effect.gen(function* () {
     const { governor, cloud, there } = yield* capReached;
     const older = yield* heldThread("cap2:older");
@@ -3948,9 +3949,10 @@ it.effect("CAP-2: once one is no longer busy there, the next thread in rank orde
     yield* governor.pass(yield* tight);
     assert.lengthOf(yield* cloud.attempts, 2);
 
-    // The first one finishes there, so one more may move: the ranked one, though the other has waited longer.
+    // The first one finishes there, so once its hold ends one more may move: the ranked one, though the other has
+    // waited longer.
     yield* cloud.fault((current) => ({ ...current, busy: new Set([there[1]!]) }));
-    yield* TestClock.adjust("15 seconds");
+    yield* TestClock.adjust(TIMING.movedSessionMs);
     yield* governor.pass(yield* tight);
     assert.equal(yield* phaseOf(ranked), "moved");
     assert.deepEqual(yield* runs(older), ["queued:held"]);
@@ -3962,7 +3964,7 @@ it.effect("CAP-2: once one is no longer busy there, the next thread in rank orde
     yield* governor.pass(yield* tight);
     assert.isUndefined(yield* phaseOf(older));
     yield* cloud.fault((current) => ({ ...current, busy: new Set([rankedThere]) }));
-    yield* TestClock.adjust("15 seconds");
+    yield* TestClock.adjust(TIMING.movedSessionMs);
     yield* governor.pass(yield* tight);
     assert.equal(yield* phaseOf(older), "moved");
     assert.lengthOf(yield* cloud.attempts, 4);
@@ -3972,8 +3974,9 @@ it.effect("CAP-2: once one is no longer busy there, the next thread in rank orde
 it.effect("CAP-3: a read there that fails, doesn't answer or lists only part counts as busy", () =>
   Effect.gen(function* () {
     const { governor, cloud } = yield* capReached;
-    // Neither moved thread is busy there, but the read fails.
+    // Neither moved thread is busy there, nor holds its place any more, but the read fails.
     yield* cloud.fault((current) => ({ ...current, busy: new Set(), listFailures: 1 }));
+    yield* TestClock.adjust(TIMING.movedSessionMs);
     const failed = yield* heldThread("cap3:failed");
     yield* TestClock.adjust("15 seconds");
     assert.lengthOf(cappedLogs(yield* logged(governor.pass(yield* tight))), 1);
@@ -3999,6 +4002,7 @@ it.effect("CAP-3: a read there that fails, doesn't answer or lists only part cou
 
     // More threads run there than one read lists, so the moved ones may be among the rest.
     yield* cloud.fault((current) => ({ ...current, otherBusy: 150 }));
+    yield* TestClock.adjust(TIMING.movedSessionMs);
     const crowded = yield* heldThread("cap3:crowded");
     const before = yield* cloud.lists;
     yield* TestClock.adjust("15 seconds");
@@ -4006,6 +4010,10 @@ it.effect("CAP-3: a read there that fails, doesn't answer or lists only part cou
     assert.equal((yield* cloud.lists) - before, 1);
     assert.deepEqual(yield* runs(crowded), ["queued:held"]);
     assert.deepEqual(Option.getOrThrow(yield* movedFile).retryAt, {});
+    yield* cloud.fault((current) => ({ ...current, otherBusy: 0 }));
+    yield* TestClock.adjust("15 seconds");
+    yield* governor.pass(yield* tight);
+    assert.equal(yield* phaseOf(crowded), "moved");
   }).pipe(Effect.provide(layerTest)),
 );
 
@@ -4013,22 +4021,25 @@ it.effect("CAP-3: a pass reads there once at most, however many threads have mov
   Effect.gen(function* () {
     const governor = yield* makeGovernor;
     const cloud = yield* makeCloud();
-    yield* overflowTo({ moveAfterMs: 0, maxBusy: 2 });
+    yield* overflowTo({ moveAfterMs: 60_000, maxBusy: 2 });
     yield* governor.pass(yield* tight);
-    // Under the cap, nothing is read; at it, one read a pass, as more pile up in moved.json.
+    // Under the cap, nothing is read; at it, one read a pass, as more pile up in moved.json. Each waits out the
+    // holds of the ones before.
     for (const [index, reads] of [0, 0, 1, 1, 1].entries()) {
       const threadId = yield* heldThread(`cap3:pile:${index}`);
       const before = yield* cloud.lists;
-      yield* TestClock.adjust("15 seconds");
+      yield* TestClock.adjust(TIMING.movedSessionMs);
       yield* governor.pass(yield* tight);
       assert.equal(yield* phaseOf(threadId), "moved");
       assert.equal((yield* cloud.lists) - before, reads, `move ${index}`);
     }
-    // With nothing due, nothing is read.
+    // A held thread that hasn't waited `moveAfterMs` isn't due, so nothing is read.
+    const fresh = yield* heldThread("cap3:fresh");
     const before = yield* cloud.lists;
     yield* TestClock.adjust("15 seconds");
-    yield* governor.pass(yield* tight);
+    assert.lengthOf(cappedLogs(yield* logged(governor.pass(yield* tight))), 0);
     assert.equal(yield* cloud.lists, before);
+    assert.deepEqual(yield* runs(fresh), ["queued:held"]);
   }).pipe(Effect.provide(layerTest)),
 );
 
@@ -4063,8 +4074,118 @@ it.effect(
       assert.equal((yield* cloud.launched).size, 1);
 
       yield* cloud.fault((current) => ({ ...current, busy: new Set() }));
+      yield* TestClock.adjust(TIMING.movedSessionMs);
+      yield* governor.pass(yield* tight);
+      assert.equal(yield* phaseOf(next), "moved");
+    }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("CAP-4: with maxBusy left out, three moved threads fill the places there", () =>
+  Effect.gen(function* () {
+    const governor = yield* makeGovernor;
+    const cloud = yield* makeCloud();
+    yield* overflowTo({ moveAfterMs: 0 });
+    yield* governor.pass(yield* tight);
+    for (const index of [1, 2, 3]) {
+      const threadId = yield* heldThread(`cap4:${index}`);
+      yield* TestClock.adjust("15 seconds");
+      yield* governor.pass(yield* tight);
+      assert.equal(yield* phaseOf(threadId), "moved");
+    }
+    assert.equal(yield* cloud.lists, 0);
+
+    // None was ever seen busy there, but each holds its place from when it landed.
+    const fourth = yield* heldThread("cap4:4");
+    yield* TestClock.adjust("15 seconds");
+    assert.lengthOf(cappedLogs(yield* logged(governor.pass(yield* tight))), 1);
+    assert.isUndefined(yield* phaseOf(fourth));
+    yield* TestClock.adjust(TIMING.movedSessionMs);
+    yield* governor.pass(yield* tight);
+    assert.equal(yield* phaseOf(fourth), "moved");
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect(
+  "CAP-6: a moved thread that finishes there keeps its place until movedSessionMs after it was last seen busy",
+  () =>
+    Effect.gen(function* () {
+      const { governor, cloud } = yield* capReached;
+      const waiting = yield* heldThread("cap6:waiting");
+      yield* TestClock.adjust("15 seconds");
+      yield* governor.pass(yield* tight);
+      assert.isUndefined(yield* phaseOf(waiting));
+
+      // Both finish there, and their sessions stay loaded a while; a read that finds them idle changes nothing.
+      yield* cloud.fault((current) => ({ ...current, busy: new Set() }));
+      yield* TestClock.adjust(TIMING.movedSessionMs - 15_000);
+      const logs = yield* logged(governor.pass(yield* tight));
+      assert.lengthOf(cappedLogs(logs), 1);
+      assert.notInclude(logs, "resource-limits.move-skipped");
+      assert.isUndefined(yield* phaseOf(waiting));
+
+      yield* TestClock.adjust("15 seconds");
+      yield* governor.pass(yield* tight);
+      assert.equal(yield* phaseOf(waiting), "moved");
+    }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect(
+  "CAP-6: after a restart, a thread that just moved keeps its place from when it moved",
+  () =>
+    Effect.gen(function* () {
+      const governor = yield* makeGovernor;
+      const cloud = yield* makeCloud();
+      yield* overflowTo({ moveAfterMs: 0, maxBusy: 1 });
+      yield* governor.pass(yield* tight);
+      const first = yield* heldThread("cap6:first");
+      yield* TestClock.adjust("15 seconds");
+      yield* governor.pass(yield* tight);
+      assert.equal(yield* phaseOf(first), "moved");
+
+      // It's done there at once, and the restart has only moved.json to go on.
+      yield* cloud.restart;
+      const next = yield* heldThread("cap6:next");
+      yield* TestClock.adjust(TIMING.movedSessionMs - 15_000);
+      assert.lengthOf(cappedLogs(yield* logged(governor.pass(yield* tight))), 1);
+      assert.isUndefined(yield* phaseOf(next));
       yield* TestClock.adjust("15 seconds");
       yield* governor.pass(yield* tight);
       assert.equal(yield* phaseOf(next), "moved");
+    }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect(
+  "CAP-7: at the cap, a due thread that can't move waits as before, and nothing is read there",
+  () =>
+    Effect.gen(function* () {
+      const { governor, cloud } = yield* capReached;
+      const blocked = ThreadId.make("thread:cap7:blocked");
+      yield* createThread(blocked);
+      yield* tagThreads({ [blocked]: "needs:pc" });
+      yield* send(blocked, "work", agent);
+      const before = yield* cloud.lists;
+      yield* TestClock.adjust("15 seconds");
+      const skipped = yield* logged(governor.pass(yield* tight));
+      assert.include(skipped, "resource-limits.move-skipped");
+      assert.lengthOf(cappedLogs(skipped), 0);
+      assert.equal(yield* cloud.lists, before);
+      assert.deepEqual(Object.keys(Option.getOrThrow(yield* movedFile).retryAt), [blocked]);
+
+      // While it waits out its skip, nothing is due, so a pass reads nothing and logs nothing.
+      yield* TestClock.adjust("15 seconds");
+      const quiet = yield* logged(governor.pass(yield* tight));
+      assert.notInclude(quiet, "resource-limits.move-skipped");
+      assert.lengthOf(cappedLogs(quiet), 0);
+      assert.equal(yield* cloud.lists, before);
+
+      // A thread that may move reads once, and the cap holds it.
+      const eligible = yield* heldThread("cap7:eligible");
+      yield* TestClock.adjust("15 seconds");
+      const capped = yield* logged(governor.pass(yield* tight));
+      assert.lengthOf(cappedLogs(capped), 1);
+      assert.notInclude(capped, "resource-limits.move-skipped");
+      assert.equal((yield* cloud.lists) - before, 1);
+      assert.isUndefined(yield* phaseOf(eligible));
+      assert.deepEqual(yield* runs(blocked), ["queued:held"]);
     }).pipe(Effect.provide(layerTest)),
 );

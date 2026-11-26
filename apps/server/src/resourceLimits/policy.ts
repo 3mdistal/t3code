@@ -55,6 +55,10 @@ export const TIMING = {
   moveRetryMs: 30 * 60_000,
   // A call to the linked machine runs inside the pass, so it ends well before a stalled pass makes readings stale.
   overflowCallMs: 20_000,
+  // The linked machine releases a provider session once it has been idle this long (`DEFAULT_IDLE_TIMEOUT_MS` in
+  // ProviderSessionManager.ts), so a moved thread keeps its place under `overflow.maxBusy` this long after it was
+  // last seen busy there, or landed.
+  movedSessionMs: 30 * 60_000,
 } as const;
 
 // CPU has no release line of its own; it releases this many points under the pause line.
@@ -1059,8 +1063,9 @@ export const BUSY_THERE = [
 
 /**
  * How many of the moves to `environmentId` count toward `overflow.maxBusy`: each move under way, `claiming`
- * included, and each moved thread whose thread there `busy` lists. With `busy` null (not read, or not readable),
- * every moved thread counts.
+ * included, and each moved thread whose thread there the read lists as busy, or whose session there may still be
+ * loaded: it was last seen busy there, or landed, under `TIMING.movedSessionMs` ago. With `read` null (not read, or
+ * not readable), every moved thread counts.
  */
 export function busyThere(
   moves: Iterable<{
@@ -1069,12 +1074,24 @@ export function busyThere(
     readonly threadId: string | null;
   }>,
   environmentId: string,
-  busy: ReadonlySet<string> | null,
+  read: {
+    readonly busy: ReadonlySet<string>;
+    /** When each thread there was last seen busy, or landed. */
+    readonly lastBusy: ReadonlyMap<string, number>;
+    readonly now: number;
+  } | null,
 ): number {
   let count = 0;
   for (const move of moves) {
     if (move.environmentId !== environmentId) continue;
-    if (move.phase !== "moved" || busy === null || busy.has(move.threadId ?? "")) count += 1;
+    const there = move.threadId ?? "";
+    const seenAt = read?.lastBusy.get(there);
+    const busy =
+      move.phase !== "moved" ||
+      read === null ||
+      read.busy.has(there) ||
+      (seenAt !== undefined && read.now - seenAt < TIMING.movedSessionMs);
+    if (busy) count += 1;
   }
   return count;
 }

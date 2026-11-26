@@ -269,8 +269,12 @@ by default), so tag it `needs:none` to let it move. Set `mode` to `off` to stop 
 
 Threads move a few at a time. While 3 threads this machine moved are busy on the
 linked machine (running, about to run, or waiting on you or on background work), the
-rest keep their place here; set `maxBusy` to change that number. If the linked machine
-doesn't answer, they wait too.
+rest keep their place here; set `maxBusy` to change that number. A moved thread still
+counts for 30 minutes after it was last seen busy there, or after it moved, since the
+linked machine keeps its session in memory that long. Once that many threads have
+moved there, this machine asks the linked machine which are busy before it moves
+another, and if it doesn't answer, the threads wait. The limit is soft: a moved thread
+that starts again on the linked machine just as another moves can put it one over.
 
 A repository you never want copied to the linked machine can still have its threads
 move, without their checkout. Add `checkoutFree` to `overflow`: `repositories` lists
