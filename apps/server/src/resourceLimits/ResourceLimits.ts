@@ -192,6 +192,8 @@ export interface LimitsSnapshot {
   readonly waiting: ReadonlyArray<WaitingThread>;
   /** Threads that continue on a linked machine, or are moving there. Nothing sent to one runs here. */
   readonly moved: ReadonlyMap<ThreadId, MovedThread>;
+  /** Threads whose runs start over the limits unless memory is critical (`standingThreads`), as of the last pass. */
+  readonly standing: ReadonlySet<string>;
 }
 
 export type Admission =
@@ -225,6 +227,7 @@ const UNLIMITED: LimitsSnapshot = {
   machine: "This machine",
   waiting: [],
   moved: new Map(),
+  standing: new Set(),
 };
 
 // A reference, like the pool catalog: harnesses without the limits admit everything.
@@ -335,6 +338,8 @@ const make = Effect.fn("makeResourceLimits")(function* () {
       // While anything waits, new work queues behind it, so the governor picks what starts next.
       if (isOff(current, now)) return ADMITTED;
       if (state === "ok" && current.waiting.length === 0) return ADMITTED;
+      // A standing thread waits only at the critical line, never behind the line.
+      if (state !== "critical" && current.standing.has(input.thread.id)) return ADMITTED;
       const launcher = input.message.senderThreadId ?? input.thread.lineage.parentThreadId;
       if (launcher != null && (yield* launchAnywayIn(launcher))) return ADMITTED;
     }

@@ -59,6 +59,7 @@ import {
   releaseOrder,
   type ResumeNote,
   type RunningTurn,
+  standingThreads,
   stoppableWork,
   stoppedNote,
   stoppedWorkNote,
@@ -174,6 +175,8 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
     inbox: path.join(dir, "inbox"),
     // The Task Priorities board's ranks, which teenylilconfig's task wake writes; see FORK.md.
     priority: path.join(dir, "priority.json"),
+    // Threads that don't wait for memory short of the critical line, which teenylilconfig's Plaud watcher writes.
+    standing: path.join(dir, "standing.json"),
     // T3's own record of each pass, which nothing else reads.
     passes: path.join(dir, "passes.json"),
   };
@@ -634,14 +637,18 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
         })
       : Effect.succeed(true);
 
-  const readPriority = (now: number) =>
-    fs.stat(files.priority).pipe(
+  // Files any local process can write, so an oversized one counts as none.
+  const readBounded = (file: string) =>
+    fs.stat(file).pipe(
       Effect.flatMap((info) =>
-        Number(info.size) > MAX_PRIORITY_BYTES ? Effect.succeed(null) : readJson(files.priority),
+        Number(info.size) > MAX_PRIORITY_BYTES ? Effect.succeed(null) : readJson(file),
       ),
       Effect.orElseSucceed((): unknown => null),
-      Effect.map((file) => priorityRanks(file, now)),
     );
+  const readPriority = (now: number) =>
+    readBounded(files.priority).pipe(Effect.map((file) => priorityRanks(file, now)));
+  const readStanding = (now: number) =>
+    readBounded(files.standing).pipe(Effect.map((file) => standingThreads(file, now)));
 
   // The board's best-ranked task goes first. A thread without a rank of its own, such as a task's helper or a
   // fork of its thread, takes the rank of the nearest thread above it that has one. A deleted thread ends the walk.
@@ -790,6 +797,7 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
     const effective = effectiveLimits(saved, platform, totalBytes);
     if (effective === null) return null;
     const switchedOffUntil = offUntil(yield* readJson(files.off), now);
+    const standing = yield* readStanding(now);
     const remembered = yield* Ref.get(memory);
     const cpuWindow =
       reading === null
@@ -805,6 +813,7 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
       cpuAverage,
       offUntil: switchedOffUntil,
       machine,
+      standing,
       state: reading === null ? "ok" : nextState(previous.state, reading, effective, cpuAverage),
     } as const;
     const state = liveState(next, now);
@@ -837,6 +846,7 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
       cpuAverage: next.cpuAverage,
       offUntil: next.offUntil,
       machine: next.machine,
+      standing: next.standing,
       state: next.state,
     }));
 
@@ -903,14 +913,18 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
       yield* ingestInbox(inbox, bySession, now, paused);
     }
 
-    // Critical: stop the newest running turn, one per interval, until memory is back.
+    // Critical: stop the newest running turn, one per interval, until memory is back. A standing thread's goes last.
     let lastInterruptAt = remembered.lastInterruptAt;
     let interruptedRunIds = remembered.interruptedRunIds;
     if (
       state === "critical" &&
       (lastInterruptAt === null || now - lastInterruptAt >= TIMING.interruptSpacingMs)
     ) {
-      const turn = newestInterruptible(runningTurns(runtime, now), new Set(interruptedRunIds));
+      const turn = newestInterruptible(
+        runningTurns(runtime, now),
+        new Set(interruptedRunIds),
+        standing,
+      );
       if (turn !== undefined) {
         const { threadId, runId } = turn;
         yield* record.phase("interrupt", { threadId });
@@ -932,13 +946,63 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
     }
 
     // Release the best-ranked board task first and the rest oldest first, spaced out, once the reading this pass
-    // took is back under the limits.
+    // took is back under the limits. A standing thread held at the critical line starts first once memory is above
+    // that line, one a pass and outside the spacing, as admission would let its new runs through by then.
     let lastReleaseAt = remembered.lastReleaseAt;
     const growingSince = remembered.growingSince.filter((at) => now - at < TIMING.sessionGrowthMs);
     const released = new Set<ThreadId>();
     const held = inspected.filter((item) => !dropped.has(item.entry.threadId) && item.held);
     // A thread moving to the linked machine stays here, held, until the move lands or fails.
     const ready = held.filter((item) => !item.blocked && !current.moved.has(item.entry.threadId));
+    const starts: Array<PassStart> = [];
+    const start = Effect.fn("ResourceLimitsGovernor.start")(function* ({
+      item,
+      rank,
+      rankFrom,
+    }: Ranked) {
+      const { threadId } = item.entry;
+      // A snooze this pass set is ours to lift, though the shell was read before it.
+      const entry = changed.get(threadId) ?? item.entry;
+      const shell =
+        item.shell !== null && entry.snoozedUntil !== item.entry.snoozedUntil
+          ? {
+              ...item.shell,
+              snoozedUntil:
+                entry.snoozedUntil === null ? null : DateTime.makeUnsafe(entry.snoozedUntil),
+            }
+          : item.shell;
+      const target = { ...item, entry, shell };
+      const snoozed = ourSnooze(target);
+      yield* record.phase("unsnooze", { threadId });
+      const unsnoozed = yield* unsnooze(target, now);
+      yield* record.phase("resume", { threadId });
+      const resumed = yield* dispatch({
+        type: "queue.resume",
+        commandId: CommandId.make(`limits:release:${threadId}:${now}`),
+        threadId,
+      });
+      starts.push({
+        threadId,
+        rank,
+        rankFrom,
+        heldMs: now - item.entry.heldAt,
+        unsnooze: !snoozed ? "none" : unsnoozed ? "ok" : "failed",
+        resume: resumed ? "ok" : "failed",
+      });
+      // A start that failed isn't a release: the thread keeps its place, and the next pass tries it again.
+      if (resumed) {
+        yield* Effect.logInfo("resource-limits.released", { threadId });
+        released.add(threadId);
+        lastReleaseAt = now;
+        growingSince.push(now);
+      }
+    });
+    // One whose start keeps failing doesn't hold up the line: the line goes on as if it weren't there.
+    const standingNext =
+      state !== "critical" && pause === null && !off
+        ? ready.find((item) => standing.has(item.entry.threadId))
+        : undefined;
+    if (standingNext !== undefined) yield* start(unranked(standingNext));
     const release =
       state !== "ok"
         ? { due: false, why: `state ${state}` }
@@ -947,45 +1011,19 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
           : off
             ? { due: true, why: "switched off" }
             : releaseDue({ now, lastReleaseAt, growingSince, reading, limits: effective });
-    const starts: Array<PassStart> = [];
     let ranks: number | null = null;
     if (release.due) {
       // Switched off, everything waiting goes at once.
-      const order = off ? { ranked: ready.map(unranked), ranks: null } : yield* byRank(ready, now);
+      const rest = ready.filter((item) => item !== standingNext);
+      const order = off ? { ranked: rest.map(unranked), ranks: null } : yield* byRank(rest, now);
       ranks = order.ranks;
-      for (const { item, rank, rankFrom } of off ? order.ranked : order.ranked.slice(0, 1)) {
-        const { threadId } = item.entry;
-        const target = { ...item, entry: changed.get(threadId) ?? item.entry };
-        const snoozed = ourSnooze(target);
-        yield* record.phase("unsnooze", { threadId });
-        const unsnoozed = yield* unsnooze(target, now);
-        yield* record.phase("resume", { threadId });
-        const resumed = yield* dispatch({
-          type: "queue.resume",
-          commandId: CommandId.make(`limits:release:${threadId}:${now}`),
-          threadId,
-        });
-        starts.push({
-          threadId,
-          rank,
-          rankFrom,
-          heldMs: now - item.entry.heldAt,
-          unsnooze: !snoozed ? "none" : unsnoozed ? "ok" : "failed",
-          resume: resumed ? "ok" : "failed",
-        });
-        // A start that failed isn't a release: the thread keeps its place, and the next pass tries it again.
-        if (!resumed) continue;
-        yield* Effect.logInfo("resource-limits.released", { threadId });
-        released.add(threadId);
-        lastReleaseAt = now;
-        growingSince.push(now);
-      }
+      for (const next of off ? order.ranked : order.ranked.slice(0, 1)) yield* start(next);
     }
 
     // A move under way takes its next step, and what's sent to a moved thread goes there, even during Pause all,
     // which uses no agent here. While this machine holds work and isn't paused, the best-ranked held thread that has
     // waited long enough and may move starts moving to the linked machine in the overflow settings, one at a time,
-    // and not in a pass where another launched or landed. It stays on the line, held, until its queue here empties.
+    // and not in a pass where another launched or landed; a standing thread, whose work is sent here, never moves.
     const mover = yield* limits.overflow;
     if (mover !== null) {
       yield* record.phase("overflow");
@@ -1003,10 +1041,15 @@ export const make = Effect.fn("makeResourceLimitsGovernor")(function* () {
           item.shell !== null &&
           item.held &&
           !item.blocked &&
-          !moved.has(item.entry.threadId),
+          !moved.has(item.entry.threadId) &&
+          !standing.has(item.entry.threadId),
       );
-      // A start tried here, even one that failed, keeps a move from starting this pass.
-      if (!stepped && !paused && !off && starts.length === 0 && movable.length > 0) {
+      // A start tried here, even one that failed, keeps a move from starting this pass, except a standing thread's
+      // that failed, which is tried every pass.
+      const tried = starts.filter(
+        (start) => start.resume === "ok" || !standing.has(start.threadId),
+      );
+      if (!stepped && !paused && !off && tried.length === 0 && movable.length > 0) {
         const { ranked } = yield* byRank(movable, now);
         yield* record.phase("overflow");
         yield* mover
