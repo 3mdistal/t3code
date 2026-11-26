@@ -351,6 +351,39 @@ passes the flag there too.
 - No test: the limit needs about a thousand submodules. The fork's tests for the other two checks went with
   upstream's in `apps/server/src/storageCleanup.test.ts`.
 
+### A desktop tab keeps drawing for its viewer while Windows hides T3 (`fork:`)
+
+Someone viewing a desktop tab from another device saw it freeze, or never draw, while T3's window on the PC was
+minimized, hidden or covered by other windows. In Electron 44.10.0 (Chromium 152) on the PC, a webview's screencast
+sent no frames in any of those states, and its `requestAnimationFrame` stopped, though direct screenshots and mouse
+input still worked. Each `capturePage()` on the guest drew one frame, which reached the screencast too, so a capture
+every 250 ms gave about 4 frames a second. A capture on the window's own page drew nothing. Electron 44 has no lasting
+way to keep a hidden page drawing: `incrementCapturerCount()` is gone, and `capturePage()` holds the page visible only
+while it runs.
+
+So while a tab streams, the host checks it every 250 ms. A frame no capture brought (any frame after a tick without
+a capture, or a second frame after a tick with one) means the window draws, so the tab gets no capture for the next
+1.5 s, and a page that changes once a second, like a clock, gets none once one of its frames lands that way.
+Otherwise the tab gets a `capturePage()` each tick for 3 s after an input, a stream's start included, and after that
+each tick only while each capture brings a frame, else every 2 s. So a page that changes keeps drawing at about 4
+frames a second while someone uses it or while it changes. A single frame after a capture can't hold that rate, since
+it may be the page's own: a clock in a window that shows, whose ticks keep landing just after captures, gets captures
+for the first 3 s and stops at the first capture that brings none. A still page gets no screencast frame from a
+capture, so it costs a copy every 2 s and no bandwidth. When a page that drew on its own stops, as when the window
+hides, the 3 s start over. A capture took 10 to 25 ms on the PC, so one is in flight about 4% of the time at the
+fastest rate.
+
+Upstream v0.1.12 marks a watched tab as painting (#39198), and prods a hidden guest with the same `capturePage()`
+while a screenshot or a focus-emulated command waits on a frame (#40263). That replaced the fork's own screenshot
+nudge, which this sync dropped. Upstream doesn't prod a stream, so the pump stays, rebuilt on upstream's prods: its
+capture counts in upstream's per-guest `nativeCaptures`, it starts none while one of either runs, and it skips a tick
+while a screenshot runs. Upstream lets two captures run at once, so a screenshot no longer waits for the stream's
+capture.
+
+- `apps/desktop/src/preview/DesktopBrowserHost.ts`: `pumpFrames`, started by each screencast the relay starts, and
+  its `captureFrame`; the `frames`, `inputs` and `captures` counts.
+- Test: `apps/desktop/src/preview/DesktopBrowserHost.fork.test.ts`.
+
 ### Links that open one thread (`fork:`)
 
 Alice's vault and task board link to agents' threads as `t3-thread://v1/<threadId>`, sometimes with a `#fragment`,
