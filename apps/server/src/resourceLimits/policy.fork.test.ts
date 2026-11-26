@@ -1133,8 +1133,14 @@ describe("moving a held thread", () => {
     { phase: "moved", environmentId: "cloud", threadId: "there:done" },
     { phase: "moved", environmentId: "elsewhere", threadId: "there:other" },
   ];
-  it.each<[string, Parameters<typeof busyThere>[0], ReadonlySet<string> | null, number]>([
-    ["moved threads busy there", moves, new Set(["there:busy", "there:other"]), 1],
+  const now = 100 * TIMING.movedSessionMs;
+  const listed = (busy: ReadonlyArray<string>, lastBusy: Record<string, number> = {}) => ({
+    busy: new Set(busy),
+    lastBusy: new Map(Object.entries(lastBusy)),
+    now,
+  });
+  it.each<[string, Parameters<typeof busyThere>[0], Parameters<typeof busyThere>[2], number]>([
+    ["moved threads busy there", moves, listed(["there:busy", "there:other"]), 1],
     ["unread, every moved thread there", moves, null, 2],
     [
       "a move under way, whatever the read says",
@@ -1143,10 +1149,19 @@ describe("moving a held thread", () => {
         environmentId: "cloud",
         threadId: phase === "claiming" || phase === "pending" ? null : `there:${phase}`,
       })),
-      new Set(),
+      listed([]),
       4,
     ],
-  ])("busyThere counts %s", (_name, input, busy, count) => {
-    expect(busyThere(input, "cloud", busy)).toBe(count);
+    [
+      "a moved thread seen busy, or landed, under movedSessionMs ago",
+      moves,
+      listed([], {
+        "there:busy": now - TIMING.movedSessionMs + 1,
+        "there:done": now - TIMING.movedSessionMs,
+      }),
+      1,
+    ],
+  ])("busyThere counts %s", (_name, input, read, count) => {
+    expect(busyThere(input, "cloud", read)).toBe(count);
   });
 });

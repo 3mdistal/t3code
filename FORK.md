@@ -1070,11 +1070,17 @@ Memory and CPU limits section of `docs/user/remote-access.md`.
   a Claude session, so moves stop while `maxBusy` of the threads moved there are busy (`busyThere` in `policy.ts`).
   A move under way counts, `claiming` included. A moved thread counts while its thread there is `queued`,
   `preparing`, `starting`, `running` or `waiting` (an unanswered question, or awaited background work), as one
-  `t3_thread_list` read there says (`allProjects`, those statuses, one page of 100, bounded by `overflowCallMs`). The
-  read is made only in a pass with a thread due, and only once the moves there could reach the cap, so a pass makes
-  at most one however many entries `moved.json` collects. A read that fails, times out or has a second page counts
-  every moved thread as busy. A capped pass logs `resource-limits.move-capped` once and gives no thread a
-  `moveRetryMs` wait, so the next pass with room moves the best-ranked one.
+  `t3_thread_list` read there says (`allProjects`, those statuses, one page of 100, bounded by `overflowCallMs`).
+  It also counts for `TIMING.movedSessionMs` (30 minutes) after a read last listed it, or after it landed, since the
+  cloud keeps an idle session loaded that long (`DEFAULT_IDLE_TIMEOUT_MS` in `ProviderSessionManager.ts`); without
+  that, threads with short turns could move one after another and leave far more than `maxBusy` sessions there. The
+  mover keeps those times in memory only, and a restart starts each `moved` entry's from its `at`, when its move
+  started. Due threads meet `moveBlocker` first, so one that can't move gets its usual skip and wait and asks the
+  cloud nothing. The read is made only once a due thread passes it, and only when the moves there could reach the
+  cap, so a pass makes at most one however many entries `moved.json` collects. A read that fails, times out or has a
+  second page counts every moved thread as busy. A capped pass logs `resource-limits.move-capped` once and gives no
+  thread a `moveRetryMs` wait, so the next pass with room moves the best-ranked one. The cap is soft: a moved thread
+  that wakes there between the read and the launch isn't counted, so the launch can put it one over.
 - Which threads may move is `moveBlocker` (what the PC knows) and `movePlan` (what the target has) in `policy.ts`:
   a top-level thread (no parent here, not delegated from elsewhere); every `needs:<capability>` tag in `provides`,
   with `assumeNeeds` standing in for a thread with no such tag, and `needs:none` needing nothing; no attachments on
@@ -1169,7 +1175,9 @@ Memory and CPU limits section of `docs/user/remote-access.md`.
 - Upstream files it changes: `apps/server/src/server.ts` (the layer, and the thread lock it shares).
   `MachineLimits.tsx` keeps `overflow` on save.
 - Known gaps: the PC can't see the cloud's free memory: `maxBusy` counts only the threads it moved there, not the
-  cloud's own threads or the children a moved thread delegates. The cloud has no rank file, so moved threads there
+  cloud's own threads or the children a moved thread delegates. A thread's 30 minutes run from the last read that
+  listed it busy, and reads are made only near the cap with a thread due, so one that finished between far-apart
+  reads frees its place at the next read, while its session there may still be loaded. The cloud has no rank file, so moved threads there
   queue only behind upstream's own cap. The thread there gets a summary, not the tool-level history. Forwarding
   carries an attachment's name, not the file. A moved thread's later messages leave its transcript here, as cancelled
   queued messages do. Eligibility is read when the move starts; the thread can't run here after that, but someone
@@ -1177,7 +1185,7 @@ Memory and CPU limits section of `docs/user/remote-access.md`.
   here, until someone removes its entry; the log says so each pass. A Resume during the brief claim is held, and stays
   held if the claim is then dropped (the remote check fails, or Pause all is set).
 - Tests: the `moveBlocker`, `movePlan`, `upstreamOf`, `moveBrief`, `threadThere`, `remoteHeadBlocker`,
-  `isDefiniteRefusal` and `busyThere` rows in `policy.fork.test.ts`, and O1 to O20 and CAP-1 to CAP-3 in
+  `isDefiniteRefusal` and `busyThere` rows in `policy.fork.test.ts`, and the O1 to O20 and CAP tests in
   `Governor.fork.test.ts`. Its fake cloud replays launches and sends by key, records every send, refuses a new launch
   onto a branch an earlier one took, answers reads decoded with the real `t3_thread_read` and `t3_thread_list`
   schemas, and can lose replies, stall, refuse, fail late and fail cancels here. They cover rank order, ineligible
@@ -1188,7 +1196,8 @@ Memory and CPU limits section of `docs/user/remote-access.md`.
   preparing there, a failed setup there, edited batch and forwarded messages, a rewound or deleted remote branch, a
   later move after a failed setup, a stalled launch, two moves in one pass, and a skip surviving a restart. The CAP
   tests cover the cap holding due threads with no wait and one log a pass, the next in rank order moving once a place
-  frees, a failed, stalled or partial read, one read a pass as moves pile up, and a move under way across a restart.
+  frees, a failed, stalled or partial read, one read a pass as moves pile up, a move under way across a restart, the
+  default of 3, a finished thread's 30 minutes and a restart's, and a thread that can't move skipped with no read.
 
 ### Awaited Claude tasks keep their wake owner (`fork:`)
 

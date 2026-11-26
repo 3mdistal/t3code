@@ -153,7 +153,10 @@ const MOVE_NOTE_PREFIX = "limits:moved:";
 /** Run statuses that mean the thread is working here. */
 const LIVE_RUN = new Set(["preparing", "starting", "running", "waiting"]);
 
-/** A read there is allowed in any modes, and comes from no thread, so it carries the narrowest. */
+/**
+ * A read there is allowed in any modes and comes from no thread, so it carries approval-required, the narrowest runtime
+ * mode, and the default interaction mode.
+ */
 const READ_MODES: Modes = { runtimeMode: "approval-required", interactionMode: "default" };
 
 const modesOf = (shell: OrchestrationV2ThreadShell): Modes => ({
@@ -189,8 +192,29 @@ export const makeOverflowMover = Effect.fn("makeOverflowMover")(function* (host:
   const movedFile = path.join(config.stateDir, "resource-limits", "moved.json");
   // The file is the record: what a restart left under way carries on from its phase, and skipped threads keep waiting.
   const file = yield* readJson(movedFile);
-  yield* limits.update((snapshot) => ({ ...snapshot, moved: movedThreads(file) }));
+  const saved = movedThreads(file);
+  yield* limits.update((snapshot) => ({ ...snapshot, moved: saved }));
   const retryAt = yield* Ref.make(moveRetries(file));
+  // When each moved thread there was last seen busy, or landed, by its ID there, for `busyThere`. A restart starts
+  // from each move's start time, the only one moved.json keeps, so a thread that just moved still counts.
+  const lastBusy = yield* Ref.make<ReadonlyMap<string, number>>(
+    new Map(
+      [...saved.values()].flatMap((entry) =>
+        entry.phase === "moved" && entry.threadId !== null ? [[entry.threadId, entry.at]] : [],
+      ),
+    ),
+  );
+  /** Marks these threads there busy at `now`, dropping marks too old to count. */
+  const sawBusy = (threadIds: Iterable<string>, now: number) =>
+    Ref.update(
+      lastBusy,
+      (current) =>
+        new Map(
+          [...current, ...[...threadIds].map((threadId) => [threadId, now] as const)].filter(
+            ([, at]) => now - at < TIMING.movedSessionMs,
+          ),
+        ),
+    );
   // Once a call to the linked machine times out, the rest of the pass doesn't wait on it again.
   const stalled = yield* Ref.make(false);
 
@@ -615,6 +639,7 @@ export const makeOverflowMover = Effect.fn("makeOverflowMover")(function* (host:
       if (!(yield* save(threadId, next))) return stepped;
       entry = next;
       stepped = true;
+      yield* sawBusy([entry.threadId!], now);
       yield* Effect.logInfo("resource-limits.moved", {
         threadId,
         environmentId: target,
@@ -778,6 +803,49 @@ export const makeOverflowMover = Effect.fn("makeOverflowMover")(function* (host:
     return "started" as const;
   });
 
+  /**
+   * True when `maxBusy` moves to `target` are busy there, which a capped pass logs. Unread, every moved thread counts
+   * as busy, so the linked machine is asked only once there are `maxBusy` of them, in one read however many have
+   * moved; a failed or partial read counts them all.
+   */
+  const capped = Effect.fn("Overflow.capped")(function* (
+    target: EnvironmentId,
+    maxBusy: number,
+    now: number,
+  ) {
+    const moves = [...(yield* limits.read).moved.values()];
+    if (busyThere(moves, target, null) < maxBusy) return false;
+    const listed = yield* call(host.threadsThere(target, READ_MODES, BUSY_THERE)).pipe(
+      Effect.result,
+    );
+    const page = listed._tag === "Success" ? listed.success : null;
+    const busy = new Set<string>(page?.threads.map((thread) => thread.threadId));
+    // A partial page still saw the threads it lists busy.
+    yield* sawBusy(
+      moves.flatMap(({ phase, threadId }) =>
+        phase === "moved" && threadId !== null && busy.has(threadId) ? [threadId] : [],
+      ),
+      now,
+    );
+    const count = busyThere(
+      moves,
+      target,
+      page?.nextCursor === null ? { busy, lastBusy: yield* Ref.get(lastBusy), now } : null,
+    );
+    if (count < maxBusy) return false;
+    // Not a skip: every thread keeps its place, with no wait, for the pass that finds room.
+    yield* Effect.logInfo("resource-limits.move-capped", {
+      busy: count,
+      maxBusy,
+      ...(listed._tag === "Failure"
+        ? { reason: failureMessage(listed.failure) }
+        : listed.success.nextCursor !== null
+          ? { reason: "more threads are busy there than one read lists" }
+          : {}),
+    });
+    return true;
+  });
+
   const move: OverflowMover["move"] = Effect.fn("Overflow.move")(function* (candidates, now) {
     const current = yield* settings.getSettings.pipe(Effect.orElseSucceed(() => null));
     const overflow = current?.resourceLimits.overflow;
@@ -798,35 +866,9 @@ export const makeOverflowMover = Effect.fn("makeOverflowMover")(function* (host:
         now - candidate.heldAt >= moveAfterMs &&
         (waitUntil.get(candidate.threadId) ?? 0) <= now,
     );
-    if (due.length === 0) return null;
     const target = overflow.environmentId;
-    // A few at a time. Unread, every moved thread counts as busy there, so the linked machine is asked only once
-    // there are `maxBusy` of them, in one read however many have moved; a failed or partial read counts them all.
     const maxBusy = overflow.maxBusy ?? OVERFLOW_DEFAULTS.maxBusy;
-    const moves = [...moved.values()];
-    if (busyThere(moves, target, null) >= maxBusy) {
-      const listed = yield* call(host.threadsThere(target, READ_MODES, BUSY_THERE)).pipe(
-        Effect.result,
-      );
-      const busy =
-        listed._tag === "Success" && listed.success.nextCursor === null
-          ? new Set<string>(listed.success.threads.map((thread) => thread.threadId))
-          : null;
-      const count = busyThere(moves, target, busy);
-      if (count >= maxBusy) {
-        // Not a skip: every thread keeps its place, with no wait, for the pass that finds room.
-        yield* Effect.logInfo("resource-limits.move-capped", {
-          busy: count,
-          maxBusy,
-          ...(listed._tag === "Failure"
-            ? { reason: failureMessage(listed.failure) }
-            : busy === null
-              ? { reason: "more threads are busy there than one read lists" }
-              : {}),
-        });
-        return null;
-      }
-    }
+    let room = false;
     let providers: MoveTarget["providers"] | undefined;
     for (const { threadId } of due) {
       const shell = yield* projections
@@ -865,6 +907,11 @@ export const makeOverflowMover = Effect.fn("makeOverflowMover")(function* (host:
       if (blocker !== null) {
         yield* skip(threadId, blocker, now);
         continue;
+      }
+      // Only a thread that may move asks the linked machine, and its answer stands for the rest of the pass.
+      if (!room) {
+        if (yield* capped(target, maxBusy, now)) return null;
+        room = true;
       }
       const modes = modesOf(shell);
       const there = yield* Effect.gen(function* () {
