@@ -1503,6 +1503,7 @@ cut patch keeps its entry above, which names the upstream pull request. These le
 | v0.1.11    | Storage cleanup reads git 2.56's message for a broken worktree           | #33423                                  |
 | v0.1.11    | Open approval opens a delegated child on its own machine                 | #28592                                  |
 | v0.1.11    | A steer sent before the provider turn starts waits in the queue          | #34581 (a steer waits for its turn)     |
+| v0.1.12    | A browser screenshot finishes while Windows hides T3                     | #40263 (upstream prods a hidden guest)  |
 
 ## Versions
 
