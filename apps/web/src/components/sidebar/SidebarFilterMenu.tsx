@@ -3,6 +3,7 @@ import type { EnvironmentMachineKind } from "@t3tools/contracts";
 import {
   CircleDotIcon,
   FolderIcon,
+  FolderPlusIcon,
   ListFilterIcon,
   MonitorIcon,
   PinIcon,
@@ -67,6 +68,8 @@ interface SidebarFilterMenuProps {
   readonly projectKeys: ReadonlyArray<string>;
   readonly onProjectKeysChange: (keys: readonly string[]) => void;
   readonly onProjectSettings: (key: string, event: ReactMouseEvent<HTMLElement>) => void;
+  /** Upstream's folder picker offers Add project, and this menu stands in for that picker. */
+  readonly onAddProject: () => void;
   readonly tags: ReadonlyArray<SidebarFilterCount<string>>;
   readonly statuses: ReadonlyArray<SidebarFilterCount<SidebarStatusFilter>>;
   readonly pinned: ReadonlyArray<SidebarFilterCount<SidebarPinFilter>>;
@@ -365,6 +368,11 @@ export function SidebarFilterMenu(props: SidebarFilterMenuProps) {
                   placeholder={gt("Project…")}
                   aria-label={gt("Search projects")}
                 />
+                <MenuItem onClick={props.onAddProject}>
+                  <FolderPlusIcon aria-hidden className="size-3.5" />
+                  <T>Add project</T>
+                </MenuItem>
+                <MenuSeparator />
                 {projects
                   .filter((project) => matchesSidebarFilterQuery(project.label, projectQuery))
                   .map(projectItem)}

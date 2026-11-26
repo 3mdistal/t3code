@@ -524,6 +524,8 @@ unless the user has set a manual project order. Filters never change the sort or
   has a meta line (a two-line folder row keeps them on line two), and a pinned card row shows its pin on the title
   line instead of in the project label. Upstream v0.1.12 shows the machine as the meta line's label (#40736), so the
   machine icon no longer needs a slot.
+- Upstream v0.1.12 moved Add project from a header button into the project picker (#33057), which the boring sidebar
+  swaps for Sort and Filter, so the Filter menu's Project list starts with Add project.
 - The thread on screen stays listed when it doesn't match a tag, status, pull request, pinned or machine filter. Picking projects hides
   other projects' threads, as the stock picker does. A tagged thread sits in one tag folder, a picked tag first,
   then the first by name. A thread with no run counts as Done. The Settled count adds older settled threads that
@@ -534,7 +536,8 @@ unless the user has set a manual project order. Filters never change the sort or
 - Upstream files it changes: `Sidebar.tsx` (the header buttons, and filtering, sorting and folders in the boring
   sidebar) and `SidebarThreadRow.tsx` (the icon slots, and the project icon on tag and status folder rows). It also
   extends the fork's `threadTags.ts` and `ThreadTagChips.tsx`.
-- Tests: `apps/web/src/components/sidebar/sidebarView.fork.test.ts`.
+- Tests: `apps/web/src/components/sidebar/sidebarView.fork.test.ts` and
+  `SidebarFilterMenu.fork.browser.test.tsx`.
 
 ### Working section and grouped rows in the boring sidebar (`fork:`)
 
