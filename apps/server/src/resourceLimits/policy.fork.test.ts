@@ -48,6 +48,7 @@ import {
   releaseDue,
   releaseOrder,
   SESSION_GIB,
+  standingThreads,
   stoppableWork,
   TIMING,
   writtenDuringPause,
@@ -467,6 +468,16 @@ describe("newestInterruptible", () => {
     expect(newestInterruptible(turns, new Set(["run:done"]))?.runId).toBe("run:new");
     expect(newestInterruptible(turns, new Set(["run:done", "run:new", "run:old"]))).toBeUndefined();
   });
+
+  it("leaves a standing thread's turn until no other is left", () => {
+    const turns = [turn("old", 1), turn("inbox", 3), turn("new", 2)];
+    const standing = new Set(["thread:inbox"]);
+    expect(newestInterruptible(turns, new Set(), standing)?.runId).toBe("run:new");
+    expect(newestInterruptible(turns, new Set(["run:new"]), standing)?.runId).toBe("run:old");
+    expect(newestInterruptible(turns, new Set(["run:new", "run:old"]), standing)?.runId).toBe(
+      "run:inbox",
+    );
+  });
 });
 
 describe("offUntil", () => {
@@ -713,6 +724,39 @@ describe("priorityRanks", () => {
   it("skips thread IDs longer than any T3 makes", () => {
     const ranks = priorityRanks({ version: 1, at, ranks: { ["x".repeat(513)]: 1, ok: 2 } }, at);
     expect([...ranks]).toEqual([["ok", 2]]);
+  });
+});
+
+describe("standingThreads", () => {
+  const at = 10 * 3_600_000;
+
+  it("reads the thread IDs from a fresh file", () => {
+    const standing = standingThreads(
+      { version: 1, at, source: "plaud-watch", threads: ["mcp:launch:inbox", "thread:b"] },
+      at + 60_000,
+    );
+    expect([...standing]).toEqual(["mcp:launch:inbox", "thread:b"]);
+  });
+
+  it("treats a day-old, future, malformed or missing file as none", () => {
+    const threads = ["thread:a"];
+    expect(standingThreads({ version: 1, at, threads }, at + TIMING.priorityStaleMs + 1).size).toBe(
+      0,
+    );
+    expect(standingThreads({ version: 1, at, threads }, at - TIMING.priorityAheadMs - 1).size).toBe(
+      0,
+    );
+    expect(standingThreads({ version: 2, at, threads }, at).size).toBe(0);
+    expect(standingThreads({ version: 1, at: String(at), threads }, at).size).toBe(0);
+    expect(standingThreads({ version: 1, at, threads: { "thread:a": true } }, at).size).toBe(0);
+    expect(standingThreads(null, at).size).toBe(0);
+  });
+
+  it("reads at most 20 IDs, skipping ones that aren't strings T3 could make", () => {
+    const many = Array.from({ length: 25 }, (_, index) => `thread:${index}`);
+    expect(standingThreads({ version: 1, at, threads: many }, at).size).toBe(20);
+    const mixed = [1, null, "", "x".repeat(513), "thread:ok"];
+    expect([...standingThreads({ version: 1, at, threads: mixed }, at)]).toEqual(["thread:ok"]);
   });
 });
 

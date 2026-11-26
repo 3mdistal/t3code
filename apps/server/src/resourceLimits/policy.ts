@@ -37,7 +37,8 @@ export const TIMING = {
   holdWriteMs: 60_000,
   // `memgate off` switches the limits off for 2 h by default; no switch outlasts a day.
   maxOffMs: 24 * 3_600_000,
-  // Task wake rewrites the ranks file every 10 minutes; one older than a day is left over, so it counts as none.
+  // Task wake rewrites the ranks file every 10 minutes; one older than a day is left over, so it counts as none. The
+  // standing threads' file, rewritten every 5 minutes, goes stale the same way.
   priorityStaleMs: 24 * 3_600_000,
   priorityAheadMs: 60_000,
   // The pause switch is read this often, so a change holds work almost at once.
@@ -403,14 +404,19 @@ export interface RunningTurn {
 /** A turn waiting on Alice has nothing running and keeps her question. One already stopping needs nothing. */
 export const interruptible = (turn: RunningTurn) => !turn.waitingOnUser && !turn.stopRequested;
 
-/** The newest running turn the critical line may interrupt, skipping ones waiting on Alice or stopping. */
+/**
+ * The newest running turn the critical line may interrupt, skipping ones waiting on Alice or stopping. A standing
+ * thread's turn goes only when no other is left.
+ */
 export function newestInterruptible(
   turns: ReadonlyArray<RunningTurn>,
   alreadyInterrupted: ReadonlySet<string>,
+  standing: ReadonlySet<string> = new Set(),
 ): RunningTurn | undefined {
-  return turns
+  const newestFirst = turns
     .filter((turn) => interruptible(turn) && !alreadyInterrupted.has(turn.runId))
-    .toSorted((left, right) => right.startedAt - left.startedAt)[0];
+    .toSorted((left, right) => right.startedAt - left.startedAt);
+  return newestFirst.find((turn) => !standing.has(turn.threadId)) ?? newestFirst[0];
 }
 
 const gib = (value: number | null) => (value === null ? "?" : `${value.toFixed(1)} GiB`);
@@ -639,6 +645,36 @@ export function priorityRanks(file: unknown, now: number): ReadonlyMap<string, n
     if (typeof rank === "number" && Number.isFinite(rank) && rank > 0) ranked.set(threadId, rank);
   }
   return ranked;
+}
+
+const MAX_STANDING = 20;
+
+/**
+ * Standing threads from `{ version: 1, at, threads: [threadId] }`: their runs start over the limits unless memory is
+ * critical, the critical line interrupts them last, and one held there starts first. Like the ranks, a file more than
+ * a day old, more than a minute ahead or malformed counts as none; at most 20 IDs of up to 512 characters are read.
+ */
+export function standingThreads(file: unknown, now: number): ReadonlySet<string> {
+  const standing = new Set<string>();
+  if (typeof file !== "object" || file === null) return standing;
+  const { version, at, threads } = file as {
+    readonly version?: unknown;
+    readonly at?: unknown;
+    readonly threads?: unknown;
+  };
+  if (version !== 1 || typeof at !== "number" || !Number.isFinite(at)) return standing;
+  if (now - at > TIMING.priorityStaleMs || at - now > TIMING.priorityAheadMs) return standing;
+  if (!Array.isArray(threads)) return standing;
+  for (const threadId of threads.slice(0, MAX_STANDING)) {
+    if (
+      typeof threadId === "string" &&
+      threadId !== "" &&
+      threadId.length <= MAX_THREAD_ID_LENGTH
+    ) {
+      standing.add(threadId);
+    }
+  }
+  return standing;
 }
 
 /**
