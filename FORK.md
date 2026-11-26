@@ -1215,7 +1215,9 @@ visible notice. Intentional Stop stays quiet. There is no migration, event type 
   published list, and a retired wake also ends its query's hold on the tasks it reported. Upstream #31840 keeps
   the old run's event reader open while its last consumed roster lists pending work, so `RunExecutionService.ts`
   carries no fork code. The fork's own share is the hold for awaited commands, the deadline, retries and the idle
-  check.
+  check. Upstream v0.1.12 refuses to settle while work in the session still runs (#31449), and wakes the agent when
+  Claude exits with work still in its roster (#30214). Neither sees a command that has finished but whose wake hasn't
+  arrived, which is the interval this hold covers.
 - `packages/provider-core/src/server/ProviderContinuationRequests.ts` and
   `apps/server/src/orchestration-v2/ProviderContinuationService.ts` carry the optional receipt and retry callback.
 - Tests: `Adapters/ClaudeWakeOwnership.fork.test.ts` and `ClaudeWakeOwnership.fork.test.ts`, with the real session
