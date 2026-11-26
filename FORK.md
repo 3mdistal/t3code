@@ -837,6 +837,16 @@ Users read about it in the Memory and CPU limits section of `docs/user/remote-ac
   timer's, leaves the session alone until the open ends. From then on the release's idle-generation guard keeps
   it. Checkpoint rollback opens a session and rolls back with no run, so a pass during a slow rollback can still
   close it, as before this patch.
+- A standing thread doesn't wait for memory short of the critical line. teenylilconfig's Plaud watcher names its
+  Plaud inbox thread in `standing.json` (below), because that thread files Alice's voice notes as they arrive. On
+  Nov 25 a 4-minute filing turn waited 24 minutes in line, then, as the newest turn running, was the first the
+  critical line interrupted, leaving two task notes unsent until Alice chose Resume. So a standing thread's runs start over
+  the limits, ahead of the line, unless memory is critical or Alice's pause is on; the critical line interrupts its
+  turn only when no other turn is left to interrupt; one held at the critical line starts again on the first pass
+  above it, one standing thread a pass, ahead of the line and outside its spacing, and one whose start fails doesn't
+  hold up the line or a move; and it never starts moving to the linked machine, since what sends it work sends it
+  here (a move already under way when the thread becomes standing finishes). Its children and forks don't inherit
+  any of this.
 - A wake a provider buffered (`isBufferedWake`) starts at once, over the limits and during a pause. It records a
   turn Claude's CLI started by itself when a background command finished, so holding it saved no memory: the turn
   ran anyway, with no T3 run, and every T3 tool it called failed with `parent_not_active` until the hold lifted
@@ -964,6 +974,10 @@ Users read about it in the Memory and CPU limits section of `docs/user/remote-ac
   - `priority.json`: teenylilconfig's task wake writes `{ version: 1, at, ranks }` from the board every 10 minutes,
     each ranked task's thread ID with its rank (1 is the top). One more than a day old, more than a minute
     ahead, over 1 MiB, or malformed counts as no ranks (`priorityRanks`).
+  - `standing.json`: teenylilconfig's Plaud watcher writes `{ version: 1, at, source, threads }` every 5 minutes,
+    with the IDs of the threads that don't wait for memory, and deletes it when it's removed. Each pass reads it.
+    One more than a day old, more than a minute ahead, over 1 MiB, or malformed counts as none, and at most 20 IDs
+    are read (`standingThreads`). Any local process can write it, as it can the other files here.
   - `passes.json`: T3's own record of its last 1,024 passes (`PassRecord.ts`), one JSON entry a line. Nothing
     outside T3 reads it. Held work barely moved on the PC for two and a half hours on Nov 16 while T3 read memory
     as fine, and the trace log keeps only 8 to 10 minutes, so nothing said why.
@@ -1022,7 +1036,7 @@ Users read about it in the Memory and CPU limits section of `docs/user/remote-ac
   `packages/client-runtime/src/load-balancing.fork.test.ts`,
   `packages/provider-core/src/server/subagentProjection.fork.test.ts`, `apps/server/src/mcp/heldRuns.fork.test.ts`,
   and `MachineLimits.logic.fork.test.ts`. `Governor.fork.test.ts` runs the real orchestrator with fake readings and a test clock.
-  Its D tests cover `passes.json`: a pass's decision fields and a run of repeats as one entry (D1), the phase and
+  Its R7 tests and O20 cover standing threads. Its D tests cover `passes.json`: a pass's decision fields and a run of repeats as one entry (D1), the phase and
   thread a stuck await shows (D2), the 1,024-entry bound and a last server's `unfinished` pass (D3), and a failed
   `queue.resume` keeping its thread in line and off the linked machine, tried once a pass (D4), and failed starts
   kept when a switched-off pass starts more than it lists (D5).

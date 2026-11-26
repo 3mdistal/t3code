@@ -884,6 +884,156 @@ it.effect("R6: an unreadable or day-old ranks file leaves the line oldest first"
   }).pipe(Effect.provide(layerTest)),
 );
 
+/** Writes the standing threads where teenylilconfig's Plaud watcher does, stamped now unless `at` says otherwise. */
+const writeStanding = (threads: ReadonlyArray<ThreadId>, at?: number) =>
+  Effect.gen(function* () {
+    const config = yield* ServerConfig.ServerConfig;
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const now = yield* Clock.currentTimeMillis;
+    const dir = path.join(config.stateDir, "resource-limits");
+    yield* fs.makeDirectory(dir, { recursive: true });
+    yield* fs.writeFileString(
+      path.join(dir, "standing.json"),
+      JSON.stringify({ version: 1, at: at ?? now, source: "plaud-watch", threads }),
+    );
+  });
+
+it.effect(
+  "R7: a standing thread's work starts over the limits, ahead of the line, and waits only at the critical line",
+  () =>
+    Effect.gen(function* () {
+      const governor = yield* makeGovernor;
+      const [inbox, other] = ["inbox", "other"].map((name) =>
+        ThreadId.make(`thread:r7:${name}`),
+      ) as [ThreadId, ThreadId];
+      yield* Effect.forEach([inbox, other], createThread);
+
+      // A day-old file names nothing, so the inbox waits in line like any thread.
+      yield* writeStanding([inbox], (yield* Clock.currentTimeMillis) - TIMING.priorityStaleMs - 1);
+      yield* governor.pass(yield* tight);
+      yield* send(other, "agent work", agent);
+      yield* send(inbox, "first recording", agent);
+      assert.deepEqual(yield* runs(inbox), ["queued:held"]);
+
+      // Once the file is fresh, the next pass starts the inbox's held work, still over the limits.
+      yield* writeStanding([inbox]);
+      yield* TestClock.adjust("15 seconds");
+      yield* governor.pass(yield* tight);
+      assert.deepEqual(yield* runs(inbox), ["starting"]);
+      assert.deepEqual(yield* runs(other), ["queued:held"]);
+
+      // Its next work starts at once, ahead of the thread still waiting.
+      yield* endRun(inbox);
+      yield* send(inbox, "second recording", agent);
+      assert.deepEqual(yield* runs(inbox), ["interrupted", "starting"]);
+
+      // At the critical line it waits.
+      yield* endRun(inbox);
+      yield* TestClock.adjust("15 seconds");
+      yield* governor.pass(yield* critical);
+      yield* send(inbox, "third recording", agent);
+      assert.deepEqual(yield* runs(inbox), ["interrupted", "interrupted", "queued:held"]);
+    }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect(
+  "R7: the critical line interrupts a standing thread's turn last, and it starts again first",
+  () =>
+    Effect.gen(function* () {
+      const governor = yield* makeGovernor;
+      const threads = ["old", "new", "inbox"].map((name) =>
+        ThreadId.make(`thread:r7-critical:${name}`),
+      );
+      for (const threadId of threads) {
+        yield* createThread(threadId);
+        yield* send(threadId, "work", alice);
+        yield* TestClock.adjust("10 seconds");
+      }
+      const [old, newer, inbox] = threads as [ThreadId, ThreadId, ThreadId];
+      yield* writeStanding([inbox]);
+
+      // The inbox's turn is the newest, and the turns around it go first.
+      yield* governor.pass(yield* critical);
+      assert.deepEqual(yield* runs(newer), ["interrupted", "queued:held"]);
+      assert.deepEqual(yield* runs(inbox), ["starting"]);
+      yield* TestClock.adjust(TIMING.interruptSpacingMs);
+      yield* governor.pass(yield* critical);
+      assert.deepEqual(yield* runs(old), ["interrupted", "queued:held"]);
+      assert.deepEqual(yield* runs(inbox), ["starting"]);
+
+      // With nothing else left, it goes too.
+      yield* TestClock.adjust(TIMING.interruptSpacingMs);
+      yield* governor.pass(yield* critical);
+      assert.deepEqual(yield* runs(inbox), ["interrupted", "queued:held"]);
+
+      // Above the critical line, though still over the limits, it starts again and the others keep waiting.
+      yield* TestClock.adjust("15 seconds");
+      yield* governor.pass(yield* tight);
+      assert.deepEqual(yield* runs(inbox), ["interrupted", "starting"]);
+      assert.deepEqual(yield* runs(newer), ["interrupted", "queued:held"]);
+      assert.deepEqual(yield* runs(old), ["interrupted", "queued:held"]);
+      // The same pass snoozed it for the hold, and its start lifts that snooze.
+      yield* governor.flushRecord();
+      const last = (yield* readPasses).passes.at(-1)!;
+      assert.deepInclude((last.starts as Array<object>)[0], {
+        threadId: inbox,
+        unsnooze: "ok",
+        resume: "ok",
+      });
+    }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("R7: standing threads held at the critical line start again one a pass", () =>
+  Effect.gen(function* () {
+    const governor = yield* makeGovernor;
+    const [first, second] = ["first", "second"].map((name) =>
+      ThreadId.make(`thread:r7-one:${name}`),
+    ) as [ThreadId, ThreadId];
+    yield* Effect.forEach([first, second], createThread);
+    yield* writeStanding([first, second]);
+    yield* governor.pass(yield* critical);
+    yield* send(first, "recording", agent);
+    yield* TestClock.adjust("1 second");
+    yield* send(second, "recording", agent);
+    assert.deepEqual(yield* runs(second), ["queued:held"]);
+
+    yield* TestClock.adjust("15 seconds");
+    yield* governor.pass(yield* tight);
+    assert.deepEqual(yield* runs(first), ["starting"]);
+    assert.deepEqual(yield* runs(second), ["queued:held"]);
+    yield* TestClock.adjust("15 seconds");
+    yield* governor.pass(yield* tight);
+    assert.deepEqual(yield* runs(second), ["starting"]);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("R7: a standing thread whose start keeps failing doesn't hold up the line", () =>
+  Effect.gen(function* () {
+    const [inbox, other] = ["inbox", "other"].map((name) =>
+      ThreadId.make(`thread:r7-failing:${name}`),
+    ) as [ThreadId, ThreadId];
+    const governor = yield* makeGovernorResuming((dispatch, command) =>
+      command.type === "queue.resume" && command.threadId === inbox
+        ? Effect.die("database is locked")
+        : dispatch(command),
+    );
+    yield* Effect.forEach([inbox, other], createThread);
+    yield* writeStanding([inbox]);
+    yield* governor.pass(yield* critical);
+    // The inbox has waited longest, so a line it held up would start nothing.
+    yield* send(inbox, "recording", agent);
+    yield* TestClock.adjust("1 second");
+    yield* send(other, "agent work", agent);
+    yield* TestClock.adjust("1 minute");
+
+    yield* governor.pass(yield* recovered);
+    assert.deepEqual(yield* runs(inbox), ["queued:held"]);
+    assert.deepEqual(yield* runs(other), ["starting"]);
+    assert.deepEqual(yield* waitingThreads, [inbox]);
+  }).pipe(Effect.provide(layerTest)),
+);
+
 /** The pass record as the governor last wrote it. */
 const readPasses = Effect.gen(function* () {
   const config = yield* ServerConfig.ServerConfig;
@@ -3632,4 +3782,26 @@ it.effect("O19: a needs: tag set after the first look, before the claim, stops t
     assert.isFalse((yield* limits.read).moved.has(threadId));
     assert.deepEqual(yield* runs(threadId), ["queued:held"]);
   }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect(
+  "O20: a standing thread held at the critical line stays here, and the next thread moves",
+  () =>
+    Effect.gen(function* () {
+      const governor = yield* makeGovernor;
+      const cloud = yield* makeCloud();
+      yield* overflowTo({ moveAfterMs: 0 });
+      yield* governor.pass(yield* critical);
+      // The inbox has waited longest, so it would move first if it could.
+      const inbox = yield* heldThread("o20:inbox", "recording");
+      yield* TestClock.adjust("1 second");
+      yield* heldThread("o20:other", "other work");
+      yield* writeStanding([inbox]);
+      yield* governor.pass(yield* critical);
+      const [launch] = yield* cloud.attempts;
+      assert.lengthOf(yield* cloud.attempts, 1);
+      assert.include(launch!.message, "other work");
+      assert.isUndefined(yield* phaseOf(inbox));
+      assert.deepEqual(yield* runs(inbox), ["queued:held"]);
+    }).pipe(Effect.provide(layerTest)),
 );
