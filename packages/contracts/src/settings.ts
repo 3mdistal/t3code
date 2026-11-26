@@ -780,7 +780,7 @@ export const CodexSettings = makeProviderSettingsSchema(
       Schema.annotateKey({
         title: "Review flagged commands in full access",
         description:
-          "Send commands Codex would refuse outright in full access to its auto-review. Connector calls aren't reviewed unless their own config asks. Takes effect after T3 restarts.",
+          "Send commands Codex flags in full access to its auto-review instead of running them. Connector calls aren't reviewed unless their own config asks. Takes effect after T3 restarts.",
         providerSettingsForm: { control: "switch" },
       }),
     ),

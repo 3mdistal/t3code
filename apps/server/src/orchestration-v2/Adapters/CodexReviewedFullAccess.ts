@@ -1,10 +1,10 @@
-// fork: full access can send flagged commands to Codex's auto-review instead of refusing them; see FORK.md.
+// fork: full access can send flagged commands to Codex's auto-review instead of running them; see FORK.md.
 import type * as CodexSchema from "effect-codex-app-server/schema";
 
 /**
- * Upstream's full access turns down every ask but MCP elicitations, so Codex refuses a flagged
- * command outright. This asks instead, and `auto_review` routes the ask to Codex's reviewer. The
- * sandbox stays off, so unflagged commands run as before.
+ * Upstream's full access accepts every command Codex flags (#40773). This asks instead, and
+ * `auto_review` routes the ask to Codex's reviewer. The sandbox stays off, so unflagged commands
+ * run as before.
  */
 export const CODEX_REVIEWED_FULL_ACCESS_TURN_DEFAULTS = {
   approvalPolicy: {

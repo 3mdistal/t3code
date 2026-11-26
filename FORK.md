@@ -1275,11 +1275,14 @@ changing it requires updating all three.
 
 ### Full access can review flagged commands (`fork:`)
 
-Upstream's full access turns down every ask but MCP elicitations (#37104 moved it off `never` so browser prompts
-reach T3), so Codex refuses any command its classifier flags, such as a forced delete, with "blocked by policy". The thread can't ask anyone, and agents tend to wrap the command
-in another shell to get past the classifier. The new Codex setting "Review flagged commands in full access" sends
-those commands to Codex's auto-review instead, using a granular approval policy with the sandbox still off. Unflagged
-commands run as before. A command Codex's own rules forbid stays forbidden.
+Upstream's full access uses a granular approval policy (#37104 moved it off `never` so browser prompts reach T3).
+Before v0.1.12 it turned down every ask but MCP elicitations, so Codex refused any command its classifier flags, such
+as a forced delete, with "blocked by policy", and agents wrapped the command in another shell to get past the
+classifier. Upstream v0.1.12 accepts those asks instead, so a flagged command runs unasked (#40773). The new Codex
+setting "Review flagged commands in full access" sends those commands to Codex's auto-review instead, using a granular
+approval policy with the sandbox still off, so the ask goes to Codex's reviewer and never reaches upstream's accept.
+Unflagged commands run as before. A command Codex's own rules forbid stays forbidden. Since #40773 the setting makes
+full access stricter than upstream's rather than looser; whether to keep it on by default is open.
 
 With `auto_review`, Codex also sends its reviewer any MCP call not annotated as safe, whatever the granular flags
 say. So the setting adds `default_tools_approval_mode = "approve"` to the thread config for T3's two servers, each
