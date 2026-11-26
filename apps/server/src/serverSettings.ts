@@ -47,6 +47,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 import { writeFileStringAtomically } from "@t3tools/shared/atomicWrite";
 import { resolveSymlinkTarget } from "@t3tools/shared/symlink";
 import * as ServerConfig from "./config.ts";
+import { watchOneFile } from "./watchOneFile.ts"; // fork: see FORK.md.
 import { type DeepPartial, deepMerge } from "@t3tools/shared/Struct";
 import { fromJsonStringPretty, fromLenientJson } from "@t3tools/shared/schemaJson";
 import {
@@ -1331,7 +1332,8 @@ const make = Effect.gen(function* () {
     const fileName = pathService.basename(filePath);
     const resolvedFilePath = pathService.resolve(filePath);
     const markReady = () => Deferred.doneUnsafe(ready, Exit.void);
-    return fs.watch(directory, { onReady: markReady }).pipe(
+    // fork: see FORK.md.
+    return watchOneFile(fs, filePath, directory, { onReady: markReady }).pipe(
       Stream.filter(
         (event) =>
           event.path === fileName ||
