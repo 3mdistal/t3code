@@ -110,7 +110,10 @@ export interface MovedThread {
 
 /** Moves held threads to the linked machine in the overflow settings; installed where the links are. */
 export interface OverflowMover {
-  /** Starts moving the first of these that may move, best first, unless a move is under way. Returns that thread. */
+  /**
+   * Starts moving the first of these that may move, best first, unless a move is under way or `maxBusy` moved threads
+   * are busy there. Returns that thread.
+   */
   readonly move: (
     candidates: ReadonlyArray<{ readonly threadId: ThreadId; readonly heldAt: number }>,
     now: number,

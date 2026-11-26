@@ -6,7 +6,9 @@ import {
   EventId,
   MessageId,
   OrchestratorMcpFailure,
+  OrchestratorMcpThreadListResult,
   OrchestratorMcpThreadReadResult,
+  type OrchestratorMcpThreadStatus,
   type OrchestrationV2ProviderThread,
   type OrchestrationV2Run,
   ProjectId,
@@ -2768,6 +2770,14 @@ interface CloudFaults {
   readonly onRemoteHead: Effect.Effect<void>;
   /** The checkout here has uncommitted changes. */
   readonly dirtyCheckout: boolean;
+  /** Threads there that `t3_thread_list` lists as running; the rest of those launched have finished. */
+  readonly busy: ReadonlySet<string>;
+  /** Other threads running there, such as code-work children, which it lists first. */
+  readonly otherBusy: number;
+  /** Lists that fail. */
+  readonly listFailures: number;
+  /** Lists that never answer, once they've signalled this. */
+  readonly stallLists: Deferred.Deferred<void> | null;
 }
 
 const decodeThreadRead = Schema.decodeSync(OrchestratorMcpThreadReadResult);
@@ -2828,6 +2838,47 @@ const threadReadThere = (threadId: string, first: RunThere | null, root = false)
     hasMore: false,
   });
 
+const decodeThreadList = Schema.decodeSync(OrchestratorMcpThreadListResult);
+
+/** A page of `t3_thread_list`, decoded with the real schema. */
+const threadListThere = (
+  threads: ReadonlyArray<{
+    readonly threadId: string;
+    readonly status: OrchestratorMcpThreadStatus;
+  }>,
+  nextCursor: number | null,
+  total: number,
+) =>
+  decodeThreadList({
+    projectId: null,
+    currentThreadId: null,
+    threads: threads.map(({ threadId, status }) => ({
+      threadId,
+      projectId: "project:cloud",
+      title: "moved",
+      createdBy: "agent",
+      creationSource: "mcp",
+      status,
+      latestRunId: "run:cloud:1",
+      providerInstanceId: instanceId,
+      model: modelSelection.model,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      linkedPullRequest: null,
+      settled: false,
+      settledAt: null,
+      snoozed: false,
+      snoozedUntil: null,
+      parentThreadId: null,
+      relationshipToParent: null,
+      itemCount: 1,
+      createdAt: "2026-11-16T10:00:00.000Z",
+      updatedAt: "2026-11-16T10:00:00.000Z",
+    })),
+    nextCursor,
+    total,
+  });
+
 /**
  * A linked machine with one matching project. It replays a launch or send by its request ID, as the real one does,
  * refuses a new launch onto a branch an earlier one took, records every call, and can lose replies, stall, fail late,
@@ -2848,6 +2899,10 @@ const makeCloud = Effect.fnUntraced(function* () {
     onProjects: Effect.void,
     onRemoteHead: Effect.void,
     dirtyCheckout: false,
+    busy: new Set(),
+    otherBusy: 0,
+    listFailures: 0,
+    stallLists: null,
   });
   const once = (hook: "onLaunch" | "onSend" | "onGitStatus" | "onProjects" | "onRemoteHead") =>
     Effect.gen(function* () {
@@ -2870,6 +2925,7 @@ const makeCloud = Effect.fnUntraced(function* () {
   );
   const failure = (message: string, code: OrchestratorMcpFailure["code"] = "orchestration_error") =>
     new OrchestratorMcpFailure({ code, message });
+  const lists = yield* Ref.make(0);
   const host: Overflow.OverflowHost = {
     project: () =>
       Effect.succeed({ workspaceRoot: "/repo", repositoryKey: "github.com/alice/repo" }),
@@ -2942,6 +2998,36 @@ const makeCloud = Effect.fnUntraced(function* () {
         const fault = yield* Ref.get(faults);
         return threadReadThere(threadId, fault.there, (yield* Ref.get(roots)).has(threadId));
       }),
+    threadsThere: (_environmentId, _modes, statuses) =>
+      Effect.gen(function* () {
+        const fault = yield* Ref.get(faults);
+        yield* Ref.update(lists, (count) => count + 1);
+        if (fault.stallLists !== null) {
+          yield* Deferred.succeed(fault.stallLists, undefined);
+          return yield* Effect.never;
+        }
+        if (fault.listFailures > 0) {
+          yield* Ref.update(faults, (current) => ({
+            ...current,
+            listFailures: current.listFailures - 1,
+          }));
+          return yield* failure("asleep");
+        }
+        const others = Array.from({ length: fault.otherBusy }, (_, index) => ({
+          threadId: `cloud:other:${index}`,
+          status: "running" as const,
+        }));
+        const moved = [...(yield* Ref.get(launched)).values()].map((threadId) => ({
+          threadId,
+          status: fault.busy.has(threadId) ? ("running" as const) : ("completed" as const),
+        }));
+        const listed = [...others, ...moved].filter(({ status }) => statuses.includes(status));
+        return threadListThere(
+          listed.slice(0, 100),
+          listed.length > 100 ? 100 : null,
+          listed.length,
+        );
+      }),
     send: (_environmentId, _modes, input) =>
       Effect.gen(function* () {
         const fault = yield* Ref.get(faults);
@@ -3007,6 +3093,8 @@ const makeCloud = Effect.fnUntraced(function* () {
     sendCalls: Ref.get(sendCalls),
     /** The git status, same-repository project and remote branch reads, in order. */
     gitReads: Ref.get(gitReads),
+    /** How many times it was asked which threads are busy there. */
+    lists: Ref.get(lists),
     fault: (change: (current: CloudFaults) => CloudFaults) => Ref.update(faults, change),
     restart: start,
   };
@@ -3052,6 +3140,7 @@ const movedFile = Effect.gen(function* () {
       (text) =>
         JSON.parse(text) as {
           threads: Record<string, { phase: string; threadId: string | null; batch: string[] }>;
+          retryAt: Record<string, number>;
         },
     ),
     Effect.option,
@@ -3803,5 +3892,179 @@ it.effect(
       assert.include(launch!.message, "other work");
       assert.isUndefined(yield* phaseOf(inbox));
       assert.deepEqual(yield* runs(inbox), ["queued:held"]);
+    }).pipe(Effect.provide(layerTest)),
+);
+
+/** A governor and a cloud with `maxBusy: 2`, where two moved threads are running. */
+const capReached = Effect.gen(function* () {
+  const governor = yield* makeGovernor;
+  const cloud = yield* makeCloud();
+  yield* overflowTo({ moveAfterMs: 0, maxBusy: 2 });
+  yield* governor.pass(yield* tight);
+  for (const name of ["first", "second"]) {
+    const threadId = yield* heldThread(`cap:${name}`);
+    yield* TestClock.adjust("15 seconds");
+    yield* governor.pass(yield* tight);
+    assert.equal(yield* phaseOf(threadId), "moved");
+  }
+  const there = [...(yield* cloud.launched).values()];
+  yield* cloud.fault((current) => ({ ...current, busy: new Set(there) }));
+  return { governor, cloud, there };
+});
+
+const cappedLogs = (logs: ReadonlyArray<string>) =>
+  logs.filter((name) => name === "resource-limits.move-capped");
+
+it.effect(
+  "CAP-1: while maxBusy moved threads are busy there, due threads stay here with no wait, logged once a pass",
+  () =>
+    Effect.gen(function* () {
+      const { governor, cloud } = yield* capReached;
+      const waiting = [yield* heldThread("cap1:one"), yield* heldThread("cap1:two")];
+      for (const _pass of [1, 2]) {
+        yield* TestClock.adjust("15 seconds");
+        const logs = yield* logged(governor.pass(yield* tight));
+        assert.lengthOf(cappedLogs(logs), 1);
+        assert.notInclude(logs, "resource-limits.move-skipped");
+      }
+      assert.lengthOf(yield* cloud.attempts, 2);
+      for (const threadId of waiting) {
+        assert.deepEqual(yield* runs(threadId), ["queued:held"]);
+        assert.isUndefined(yield* phaseOf(threadId));
+      }
+      assert.deepEqual(Option.getOrThrow(yield* movedFile).retryAt, {});
+      assert.includeMembers(yield* waitingThreads, waiting);
+    }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("CAP-2: once one is no longer busy there, the next thread in rank order moves", () =>
+  Effect.gen(function* () {
+    const { governor, cloud, there } = yield* capReached;
+    const older = yield* heldThread("cap2:older");
+    yield* TestClock.adjust("1 second");
+    const ranked = yield* heldThread("cap2:ranked");
+    yield* writeRanks({ [ranked]: 1 });
+    yield* TestClock.adjust("15 seconds");
+    yield* governor.pass(yield* tight);
+    assert.lengthOf(yield* cloud.attempts, 2);
+
+    // The first one finishes there, so one more may move: the ranked one, though the other has waited longer.
+    yield* cloud.fault((current) => ({ ...current, busy: new Set([there[1]!]) }));
+    yield* TestClock.adjust("15 seconds");
+    yield* governor.pass(yield* tight);
+    assert.equal(yield* phaseOf(ranked), "moved");
+    assert.deepEqual(yield* runs(older), ["queued:held"]);
+
+    // It runs there now, which fills the places again until the other one there finishes.
+    const rankedThere = [...(yield* cloud.launched).values()].find((id) => !there.includes(id))!;
+    yield* cloud.fault((current) => ({ ...current, busy: new Set([there[1]!, rankedThere]) }));
+    yield* TestClock.adjust("15 seconds");
+    yield* governor.pass(yield* tight);
+    assert.isUndefined(yield* phaseOf(older));
+    yield* cloud.fault((current) => ({ ...current, busy: new Set([rankedThere]) }));
+    yield* TestClock.adjust("15 seconds");
+    yield* governor.pass(yield* tight);
+    assert.equal(yield* phaseOf(older), "moved");
+    assert.lengthOf(yield* cloud.attempts, 4);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("CAP-3: a read there that fails, doesn't answer or lists only part counts as busy", () =>
+  Effect.gen(function* () {
+    const { governor, cloud } = yield* capReached;
+    // Neither moved thread is busy there, but the read fails.
+    yield* cloud.fault((current) => ({ ...current, busy: new Set(), listFailures: 1 }));
+    const failed = yield* heldThread("cap3:failed");
+    yield* TestClock.adjust("15 seconds");
+    assert.lengthOf(cappedLogs(yield* logged(governor.pass(yield* tight))), 1);
+    assert.deepEqual(yield* runs(failed), ["queued:held"]);
+    yield* TestClock.adjust("15 seconds");
+    yield* governor.pass(yield* tight);
+    assert.equal(yield* phaseOf(failed), "moved");
+
+    // A read that never answers ends with the call.
+    const stalled = yield* Deferred.make<void>();
+    yield* cloud.fault((current) => ({ ...current, stallLists: stalled }));
+    const unanswered = yield* heldThread("cap3:unanswered");
+    yield* TestClock.adjust("15 seconds");
+    const pass = yield* governor.pass(yield* tight).pipe(Effect.forkChild);
+    yield* Deferred.await(stalled);
+    yield* TestClock.adjust(TIMING.overflowCallMs);
+    yield* Fiber.join(pass);
+    assert.deepEqual(yield* runs(unanswered), ["queued:held"]);
+    yield* cloud.fault((current) => ({ ...current, stallLists: null }));
+    yield* TestClock.adjust("15 seconds");
+    yield* governor.pass(yield* tight);
+    assert.equal(yield* phaseOf(unanswered), "moved");
+
+    // More threads run there than one read lists, so the moved ones may be among the rest.
+    yield* cloud.fault((current) => ({ ...current, otherBusy: 150 }));
+    const crowded = yield* heldThread("cap3:crowded");
+    const before = yield* cloud.lists;
+    yield* TestClock.adjust("15 seconds");
+    yield* governor.pass(yield* tight);
+    assert.equal((yield* cloud.lists) - before, 1);
+    assert.deepEqual(yield* runs(crowded), ["queued:held"]);
+    assert.deepEqual(Option.getOrThrow(yield* movedFile).retryAt, {});
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("CAP-3: a pass reads there once at most, however many threads have moved", () =>
+  Effect.gen(function* () {
+    const governor = yield* makeGovernor;
+    const cloud = yield* makeCloud();
+    yield* overflowTo({ moveAfterMs: 0, maxBusy: 2 });
+    yield* governor.pass(yield* tight);
+    // Under the cap, nothing is read; at it, one read a pass, as more pile up in moved.json.
+    for (const [index, reads] of [0, 0, 1, 1, 1].entries()) {
+      const threadId = yield* heldThread(`cap3:pile:${index}`);
+      const before = yield* cloud.lists;
+      yield* TestClock.adjust("15 seconds");
+      yield* governor.pass(yield* tight);
+      assert.equal(yield* phaseOf(threadId), "moved");
+      assert.equal((yield* cloud.lists) - before, reads, `move ${index}`);
+    }
+    // With nothing due, nothing is read.
+    const before = yield* cloud.lists;
+    yield* TestClock.adjust("15 seconds");
+    yield* governor.pass(yield* tight);
+    assert.equal(yield* cloud.lists, before);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect(
+  "CAP-3: a move under way through a restart holds the next one, and counts once it lands there",
+  () =>
+    Effect.gen(function* () {
+      const governor = yield* makeGovernor;
+      const cloud = yield* makeCloud();
+      yield* overflowTo({ moveAfterMs: 0, maxBusy: 1 });
+      yield* governor.pass(yield* tight);
+      const first = yield* heldThread("cap3:first");
+      // It takes the launch and loses the reply, twice, so the move is still pending at the restart.
+      yield* cloud.fault((current) => ({ ...current, loseLaunchReplies: 2 }));
+      yield* governor.pass(yield* tight);
+      assert.equal(yield* phaseOf(first), "pending");
+      const next = yield* heldThread("cap3:next");
+      yield* TestClock.adjust("15 seconds");
+      yield* governor.pass(yield* tight);
+      assert.equal(yield* phaseOf(first), "pending");
+      assert.isUndefined(yield* phaseOf(next));
+
+      // Its thread there runs once the launch is found again after the restart.
+      yield* cloud.fault((current) => ({ ...current, busy: new Set([`cloud:${first}`]) }));
+      yield* cloud.restart;
+      for (const _pass of [1, 2]) {
+        yield* TestClock.adjust("15 seconds");
+        yield* governor.pass(yield* tight);
+      }
+      assert.equal(yield* phaseOf(first), "moved");
+      assert.isUndefined(yield* phaseOf(next));
+      assert.equal((yield* cloud.launched).size, 1);
+
+      yield* cloud.fault((current) => ({ ...current, busy: new Set() }));
+      yield* TestClock.adjust("15 seconds");
+      yield* governor.pass(yield* tight);
+      assert.equal(yield* phaseOf(next), "moved");
     }).pipe(Effect.provide(layerTest)),
 );

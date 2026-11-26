@@ -9,6 +9,7 @@ import * as DateTime from "effect/DateTime";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  busyThere,
   effectiveLimits,
   orphanedProcesses,
   stoppedWorkNoteQueued,
@@ -1125,5 +1126,27 @@ describe("moving a held thread", () => {
     ["task_not_found", false],
   ])("isDefiniteRefusal: %s", (code, definite) => {
     expect(isDefiniteRefusal({ code })).toBe(definite);
+  });
+
+  const moves = [
+    { phase: "moved", environmentId: "cloud", threadId: "there:busy" },
+    { phase: "moved", environmentId: "cloud", threadId: "there:done" },
+    { phase: "moved", environmentId: "elsewhere", threadId: "there:other" },
+  ];
+  it.each<[string, Parameters<typeof busyThere>[0], ReadonlySet<string> | null, number]>([
+    ["moved threads busy there", moves, new Set(["there:busy", "there:other"]), 1],
+    ["unread, every moved thread there", moves, null, 2],
+    [
+      "a move under way, whatever the read says",
+      ["claiming", "pending", "launched", "confirmed"].map((phase) => ({
+        phase,
+        environmentId: "cloud",
+        threadId: phase === "claiming" || phase === "pending" ? null : `there:${phase}`,
+      })),
+      new Set(),
+      4,
+    ],
+  ])("busyThere counts %s", (_name, input, busy, count) => {
+    expect(busyThere(input, "cloud", busy)).toBe(count);
   });
 });

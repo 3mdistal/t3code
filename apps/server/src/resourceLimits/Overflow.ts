@@ -7,8 +7,10 @@ import {
   type ModelSelection,
   OrchestratorMcpCapabilitiesResult,
   OrchestratorMcpFailure,
+  OrchestratorMcpThreadListResult,
   OrchestratorMcpThreadReadResult,
   OrchestratorMcpThreadSendResult,
+  type OrchestratorMcpThreadStatus,
   OVERFLOW_DEFAULTS,
   type OrchestrationV2ThreadShell,
   type ProjectId,
@@ -46,6 +48,8 @@ import { sourceControlDefinitions } from "../sourceControl/sourceControlDefiniti
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import { makeJsonFiles } from "./jsonFiles.ts";
 import {
+  BUSY_THERE,
+  busyThere,
   checkoutFreePlan,
   checkoutFreeRepository,
   isBufferedWake,
@@ -117,6 +121,12 @@ export interface OverflowHost {
     modes: Modes,
     threadId: string,
   ) => Effect.Effect<OrchestratorMcpThreadReadResult, OrchestratorMcpFailure>;
+  /** The first page of threads there, in every project, with one of these statuses. */
+  readonly threadsThere: (
+    environmentId: EnvironmentId,
+    modes: Modes,
+    statuses: ReadonlyArray<OrchestratorMcpThreadStatus>,
+  ) => Effect.Effect<OrchestratorMcpThreadListResult, OrchestratorMcpFailure>;
   readonly send: (
     environmentId: EnvironmentId,
     modes: Modes,
@@ -142,6 +152,9 @@ const MOVE_NOTE_PREFIX = "limits:moved:";
 
 /** Run statuses that mean the thread is working here. */
 const LIVE_RUN = new Set(["preparing", "starting", "running", "waiting"]);
+
+/** A read there is allowed in any modes, and comes from no thread, so it carries the narrowest. */
+const READ_MODES: Modes = { runtimeMode: "approval-required", interactionMode: "default" };
 
 const modesOf = (shell: OrchestrationV2ThreadShell): Modes => ({
   runtimeMode: shell.runtimeMode,
@@ -785,7 +798,35 @@ export const makeOverflowMover = Effect.fn("makeOverflowMover")(function* (host:
         now - candidate.heldAt >= moveAfterMs &&
         (waitUntil.get(candidate.threadId) ?? 0) <= now,
     );
+    if (due.length === 0) return null;
     const target = overflow.environmentId;
+    // A few at a time. Unread, every moved thread counts as busy there, so the linked machine is asked only once
+    // there are `maxBusy` of them, in one read however many have moved; a failed or partial read counts them all.
+    const maxBusy = overflow.maxBusy ?? OVERFLOW_DEFAULTS.maxBusy;
+    const moves = [...moved.values()];
+    if (busyThere(moves, target, null) >= maxBusy) {
+      const listed = yield* call(host.threadsThere(target, READ_MODES, BUSY_THERE)).pipe(
+        Effect.result,
+      );
+      const busy =
+        listed._tag === "Success" && listed.success.nextCursor === null
+          ? new Set<string>(listed.success.threads.map((thread) => thread.threadId))
+          : null;
+      const count = busyThere(moves, target, busy);
+      if (count >= maxBusy) {
+        // Not a skip: every thread keeps its place, with no wait, for the pass that finds room.
+        yield* Effect.logInfo("resource-limits.move-capped", {
+          busy: count,
+          maxBusy,
+          ...(listed._tag === "Failure"
+            ? { reason: failureMessage(listed.failure) }
+            : busy === null
+              ? { reason: "more threads are busy there than one read lists" }
+              : {}),
+        });
+        return null;
+      }
+    }
     let providers: MoveTarget["providers"] | undefined;
     for (const { threadId } of due) {
       const shell = yield* projections
@@ -1116,6 +1157,18 @@ const makeLiveHost = Effect.gen(function* () {
             arguments: { threadId, view: "messages", limit: 1, maxCharsPerItem: 1, runLimit: 50 },
             limits: modes,
             success: OrchestratorMcpThreadReadResult,
+          }),
+        ),
+      ),
+    threadsThere: (environmentId, modes, statuses) =>
+      requireLinks.pipe(
+        Effect.andThen(
+          peers.call({
+            environmentId,
+            tool: "t3_thread_list",
+            arguments: { allProjects: true, statuses, limit: 100 },
+            limits: modes,
+            success: OrchestratorMcpThreadListResult,
           }),
         ),
       ),

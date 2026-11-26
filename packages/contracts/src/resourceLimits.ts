@@ -1,7 +1,7 @@
 // fork: limits. Per-machine memory and CPU limits; see FORK.md.
 import * as Schema from "effect/Schema";
 
-import { EnvironmentId, NonNegativeInt } from "./baseSchemas.ts";
+import { EnvironmentId, NonNegativeInt, PositiveInt } from "./baseSchemas.ts";
 import { ModelSelection } from "./modelSelection.ts";
 
 const GiB = Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: 16_384 }));
@@ -31,7 +31,7 @@ const OverflowCheckoutFree = Schema.Struct({
  * Where a thread held here continues once it has waited `moveAfterMs`: a linked machine. `provides` lists what that
  * machine can do for a thread's `needs:<capability>` tags, and `assumeNeeds` is what a thread without any such tag
  * is taken to need. `fallbackModel` runs a thread whose own model isn't there. `checkoutFree` moves threads of
- * repositories that stay here. `mode` defaults to "auto".
+ * repositories that stay here. No move starts while `maxBusy` moved threads are busy there. `mode` defaults to auto.
  */
 export const ResourceLimitsOverflow = Schema.Struct({
   environmentId: EnvironmentId,
@@ -39,6 +39,7 @@ export const ResourceLimitsOverflow = Schema.Struct({
   provides: Schema.optionalKey(Schema.Array(Capability)),
   assumeNeeds: Schema.optionalKey(Schema.Array(Capability)),
   moveAfterMs: Schema.optionalKey(NonNegativeInt),
+  maxBusy: Schema.optionalKey(PositiveInt),
   fallbackModel: Schema.optionalKey(ModelSelection),
   checkoutFree: Schema.optionalKey(OverflowCheckoutFree),
 });
@@ -46,6 +47,7 @@ export type ResourceLimitsOverflow = typeof ResourceLimitsOverflow.Type;
 
 export const OVERFLOW_DEFAULTS = {
   moveAfterMs: 10 * 60 * 1000,
+  maxBusy: 3,
   assumeNeeds: ["vault", "content", "gateway"],
 } as const;
 

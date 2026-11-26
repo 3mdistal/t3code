@@ -8,6 +8,7 @@ import {
   type EffectiveResourceLimits,
   type MemoryPressureLevel,
   type OrchestrationV2ConversationMessage,
+  type OrchestratorMcpThreadStatus,
   resolveResourceLimits,
   type ResourceLimitsPause,
   type ResourceLimitsSettings,
@@ -1042,4 +1043,38 @@ export function threadThere(input: {
     };
   }
   return { state: "starting" };
+}
+
+/**
+ * A thread there with one of these statuses in `t3_thread_list` holds a session there, or is about to: `waiting`
+ * covers an unanswered question and awaited background work.
+ */
+export const BUSY_THERE = [
+  "queued",
+  "preparing",
+  "starting",
+  "running",
+  "waiting",
+] as const satisfies ReadonlyArray<OrchestratorMcpThreadStatus>;
+
+/**
+ * How many of the moves to `environmentId` count toward `overflow.maxBusy`: each move under way, `claiming`
+ * included, and each moved thread whose thread there `busy` lists. With `busy` null (not read, or not readable),
+ * every moved thread counts.
+ */
+export function busyThere(
+  moves: Iterable<{
+    readonly phase: string;
+    readonly environmentId: string;
+    readonly threadId: string | null;
+  }>,
+  environmentId: string,
+  busy: ReadonlySet<string> | null,
+): number {
+  let count = 0;
+  for (const move of moves) {
+    if (move.environmentId !== environmentId) continue;
+    if (move.phase !== "moved" || busy === null || busy.has(move.threadId ?? "")) count += 1;
+  }
+  return count;
 }

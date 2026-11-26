@@ -1058,12 +1058,23 @@ Memory and CPU limits section of `docs/user/remote-access.md`.
 
 - Settings, in the held machine's `resourceLimits.overflow` (no UI yet; the limits dialog keeps it when it saves):
   `environmentId`, `mode` (`auto` or `off`, default `auto`), `provides` (capabilities the target has),
-  `assumeNeeds` (default `vault`, `content`, `gateway`), `moveAfterMs` (default 10 minutes), an optional
-  `fallbackModel`, which counts only where the target lists it, and an optional `checkoutFree` (below).
+  `assumeNeeds` (default `vault`, `content`, `gateway`), `moveAfterMs` (default 10 minutes), `maxBusy` (default 3,
+  never unlimited; below), an optional `fallbackModel`, which counts only where the target lists it, and an optional
+  `checkoutFree` (below).
 - When: in the governor pass, while threads are waiting and nothing was released that pass, unless Pause all is on
   or the limits are switched off. It walks the release path's ranked list (board rank, then oldest) and starts
-  moving the first thread that has waited `moveAfterMs` and may move. One move is under way at a time, and a pass
-  in which a move launched or finished starts no other. The rest keep their place for the PC.
+  moving the first thread that has waited `moveAfterMs` and may move. One move is under way at a time, a pass
+  in which a move launched or finished starts no other, and none starts while `maxBusy` moved threads are busy
+  there. The rest keep their place for the PC.
+- A few at a time: on Nov 20 the PC held 46 threads, and the cloud machine's agents share about 10 GB at about 2 GiB
+  a Claude session, so moves stop while `maxBusy` of the threads moved there are busy (`busyThere` in `policy.ts`).
+  A move under way counts, `claiming` included. A moved thread counts while its thread there is `queued`,
+  `preparing`, `starting`, `running` or `waiting` (an unanswered question, or awaited background work), as one
+  `t3_thread_list` read there says (`allProjects`, those statuses, one page of 100, bounded by `overflowCallMs`). The
+  read is made only in a pass with a thread due, and only once the moves there could reach the cap, so a pass makes
+  at most one however many entries `moved.json` collects. A read that fails, times out or has a second page counts
+  every moved thread as busy. A capped pass logs `resource-limits.move-capped` once and gives no thread a
+  `moveRetryMs` wait, so the next pass with room moves the best-ranked one.
 - Which threads may move is `moveBlocker` (what the PC knows) and `movePlan` (what the target has) in `policy.ts`:
   a top-level thread (no parent here, not delegated from elsewhere); every `needs:<capability>` tag in `provides`,
   with `assumeNeeds` standing in for a thread with no such tag, and `needs:none` needing nothing; no attachments on
@@ -1157,24 +1168,27 @@ Memory and CPU limits section of `docs/user/remote-access.md`.
   into `ResourceLimits` (`setOverflow`) once the links are up. Without it nothing moves.
 - Upstream files it changes: `apps/server/src/server.ts` (the layer, and the thread lock it shares).
   `MachineLimits.tsx` keeps `overflow` on save.
-- Known gaps: the PC can't see the cloud's free memory, and the cloud has no rank file, so moved threads there queue
-  only behind upstream's own cap. The thread there gets a summary, not the tool-level history. Forwarding carries an
-  attachment's name, not the file. A moved thread's later messages leave its transcript here, as cancelled queued
-  messages do. Eligibility is read when the move starts; the thread can't run here after that, but someone working
-  in its checkout by hand isn't seen. A move whose link never answers again stays `pending`, holding its batch here,
-  until someone removes its entry; the log says so each pass. A Resume during the brief claim is held, and stays
+- Known gaps: the PC can't see the cloud's free memory: `maxBusy` counts only the threads it moved there, not the
+  cloud's own threads or the children a moved thread delegates. The cloud has no rank file, so moved threads there
+  queue only behind upstream's own cap. The thread there gets a summary, not the tool-level history. Forwarding
+  carries an attachment's name, not the file. A moved thread's later messages leave its transcript here, as cancelled
+  queued messages do. Eligibility is read when the move starts; the thread can't run here after that, but someone
+  working in its checkout by hand isn't seen. A move whose link never answers again stays `pending`, holding its batch
+  here, until someone removes its entry; the log says so each pass. A Resume during the brief claim is held, and stays
   held if the claim is then dropped (the remote check fails, or Pause all is set).
-- Tests: the `moveBlocker`, `movePlan`, `upstreamOf`, `moveBrief`, `threadThere`, `remoteHeadBlocker` and
-  `isDefiniteRefusal` rows in `policy.fork.test.ts`, and O1 to O17 in `Governor.fork.test.ts`. Its fake cloud
-  replays launches and sends by key, records every send, refuses a new launch onto a branch an earlier one took,
-  answers reads decoded with the real `t3_thread_read` schema, and can lose replies, stall, refuse, fail late and
-  fail cancels here. They cover rank order, ineligible threads, Pause all (also set during a move's reads),
-  forwarding (also during Pause all, after a failed send or cancel, across a restart, and with a message arriving
-  meanwhile), a queued buffered wake, a link down for hours without giving up and a refusal that does, a lost reply
-  with a message and a Resume during the move, a Resume during the claim and one just before it, a restart at each
-  phase, an unwritable `moved.json`, a first run that's queued or preparing there, a failed setup there, edited
-  batch and forwarded messages, a rewound or deleted remote branch, a later move after a failed setup, a stalled
-  launch, two moves in one pass, and a skip surviving a restart.
+- Tests: the `moveBlocker`, `movePlan`, `upstreamOf`, `moveBrief`, `threadThere`, `remoteHeadBlocker`,
+  `isDefiniteRefusal` and `busyThere` rows in `policy.fork.test.ts`, and O1 to O20 and CAP-1 to CAP-3 in
+  `Governor.fork.test.ts`. Its fake cloud replays launches and sends by key, records every send, refuses a new launch
+  onto a branch an earlier one took, answers reads decoded with the real `t3_thread_read` and `t3_thread_list`
+  schemas, and can lose replies, stall, refuse, fail late and fail cancels here. They cover rank order, ineligible
+  threads, Pause all (also set during a move's reads), forwarding (also during Pause all, after a failed send or
+  cancel, across a restart, and with a message arriving meanwhile), a queued buffered wake, a link down for hours
+  without giving up and a refusal that does, a lost reply with a message and a Resume during the move, a Resume during
+  the claim and one just before it, a restart at each phase, an unwritable `moved.json`, a first run that's queued or
+  preparing there, a failed setup there, edited batch and forwarded messages, a rewound or deleted remote branch, a
+  later move after a failed setup, a stalled launch, two moves in one pass, and a skip surviving a restart. The CAP
+  tests cover the cap holding due threads with no wait and one log a pass, the next in rank order moving once a place
+  frees, a failed, stalled or partial read, one read a pass as moves pile up, and a move under way across a restart.
 
 ### Awaited Claude tasks keep their wake owner (`fork:`)
 
