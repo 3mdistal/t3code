@@ -960,18 +960,21 @@ export function preferGitForWindowsBinary(
   env: NodeJS.ProcessEnv,
   isFile: (filePath: string) => boolean = isFileSync,
 ): string {
-  if (env.MSYSTEM) return executable;
+  return gitForWindowsBinaryCandidates(executable, env).find(isFile) ?? executable;
+}
+
+function gitForWindowsBinaryCandidates(
+  executable: string,
+  env: NodeJS.ProcessEnv,
+): ReadonlyArray<string> {
+  if (env.MSYSTEM) return [];
   const path = NodePath.win32;
-  if (path.basename(executable).toLowerCase() !== "git.exe") return executable;
+  if (path.basename(executable).toLowerCase() !== "git.exe") return [];
   const launcherDirectory = path.dirname(executable);
   const launcherFolder = path.basename(launcherDirectory).toLowerCase();
-  if (launcherFolder !== "cmd" && launcherFolder !== "bin") return executable;
+  if (launcherFolder !== "cmd" && launcherFolder !== "bin") return [];
   const installRoot = path.dirname(launcherDirectory);
-  for (const build of GIT_FOR_WINDOWS_BUILDS) {
-    const candidate = path.join(installRoot, build, "bin", "git.exe");
-    if (isFile(candidate)) return candidate;
-  }
-  return executable;
+  return GIT_FOR_WINDOWS_BUILDS.map((build) => path.join(installRoot, build, "bin", "git.exe"));
 }
 
 /** Git for Windows' bash beside a git.exe from its install, never WSL's System32 bash.exe. */
@@ -1015,20 +1018,46 @@ export function npmShimExecutable(
   readFile: (filePath: string) => string | undefined = readFileSyncOrUndefined,
   isFile: (filePath: string) => boolean = isFileSync,
 ): string | undefined {
+  if (NodePath.win32.extname(shimPath).toLowerCase() !== ".cmd") return undefined;
+  const executable = npmShimTarget(shimPath, readFile(shimPath));
+  return executable !== undefined && isFile(executable) ? executable : undefined;
+}
+
+function npmShimTarget(shimPath: string, contents: string | undefined): string | undefined {
   const path = NodePath.win32;
-  if (path.extname(shimPath).toLowerCase() !== ".cmd") return undefined;
   // Match exactly because preserved SET whitespace can select a different file.
-  const lines = readFile(shimPath)
-    ?.split(/\r?\n/)
-    .filter((line) => line.length > 0);
+  const lines = contents?.split(/\r?\n/).filter((line) => line.length > 0);
   if (lines?.length !== NPM_EXECUTABLE_SHIM_PREFIX.length + 1) return undefined;
   if (NPM_EXECUTABLE_SHIM_PREFIX.some((expected, index) => lines[index] !== expected)) {
     return undefined;
   }
   const target = NPM_EXECUTABLE_SHIM_RUN.exec(lines.at(-1)!)?.[1];
   if (target === undefined) return undefined;
-  const executable = path.join(path.dirname(shimPath), target);
-  return isFile(executable) ? executable : undefined;
+  return path.join(path.dirname(shimPath), target);
+}
+
+// fork: the same checks on the file pool, for the lookup before each Windows spawn; see FORK.md.
+const isFileOffThread = (filePath: string) =>
+  NodeFS.promises.stat(filePath).then(
+    (stats) => stats.isFile(),
+    () => false,
+  );
+
+async function preferGitForWindowsBinaryOffThread(
+  executable: string,
+  env: NodeJS.ProcessEnv,
+): Promise<string> {
+  for (const candidate of gitForWindowsBinaryCandidates(executable, env)) {
+    if (await isFileOffThread(candidate)) return candidate;
+  }
+  return executable;
+}
+
+async function npmShimExecutableOffThread(shimPath: string): Promise<string | undefined> {
+  if (NodePath.win32.extname(shimPath).toLowerCase() !== ".cmd") return undefined;
+  const contents = await NodeFS.promises.readFile(shimPath, "utf8").catch(() => undefined);
+  const executable = npmShimTarget(shimPath, contents);
+  return executable !== undefined && (await isFileOffThread(executable)) ? executable : undefined;
 }
 
 export type XcodeGitLocator = (env: NodeJS.ProcessEnv) => string | undefined;
@@ -1200,7 +1229,10 @@ export const resolveSpawnCommand = Effect.fnUntraced(function* (
     resolvedExecutable = cached.resolvedPath;
   } else {
     const found = yield* Effect.promise(async () => resolveExecutable(command, platform, env));
-    resolvedExecutable = found === undefined ? null : preferGitForWindowsBinary(found, env);
+    resolvedExecutable =
+      found === undefined
+        ? null
+        : yield* Effect.promise(() => preferGitForWindowsBinaryOffThread(found, env)); // fork
     if (!explicitPath && resolvedExecutable !== null) {
       cacheCommandResolution(cache, cacheKey, resolvedExecutable, nowNanos);
     }
@@ -1210,7 +1242,9 @@ export const resolveSpawnCommand = Effect.fnUntraced(function* (
   if (extension !== ".cmd" && extension !== ".bat") {
     return { command: resolvedCommand, args: [...args], shell: false };
   }
-  const shimExecutable = options.bypassNpmShim ? npmShimExecutable(resolvedCommand) : undefined;
+  const shimExecutable = options.bypassNpmShim
+    ? yield* Effect.promise(() => npmShimExecutableOffThread(resolvedCommand)) // fork
+    : undefined;
   if (shimExecutable !== undefined) {
     return { command: shimExecutable, args: [...args], shell: false };
   }

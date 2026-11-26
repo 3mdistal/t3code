@@ -286,6 +286,19 @@ target's directory for a rename through the same function.
 - `apps/server/src/keybindings.ts`, `apps/server/src/serverSettings.ts`: watch through it.
 - Test: `apps/server/src/watchOneFile.fork.test.ts`, which runs live watches.
 
+### Don't check Git for Windows or read npm shims on the event loop (`fork:`)
+
+On the PC any stat on the event loop can take seconds while Windows is slow. Upstream v0.1.12 searches PATH before
+each start on the file pool and reuses PATH listings (#27391, #40634), which covers what this patch first did with
+a five-minute cache and then an off-thread search, so the fork cut those. Two checks in `resolveSpawnCommand` still
+block there: the stats for Git for Windows' own `git.exe` behind its `cmd` launcher, and the read of an npm shim to
+run its program directly. They now run on the file pool too; the synchronous `preferGitForWindowsBinary` and
+`npmShimExecutable` stay for upstream's other callers.
+
+- `packages/shared/src/shell.ts`: `preferGitForWindowsBinaryOffThread` and `npmShimExecutableOffThread`, which share
+  `gitForWindowsBinaryCandidates` and `npmShimTarget` with the synchronous checks.
+- Test: `packages/shared/src/shell.fork.test.ts`.
+
 ### A CPU profile of each freeze on Windows (`fork:`)
 
 On the PC the server's event loop freezes for 4 to 13 seconds within a minute after every noon and midnight, and
