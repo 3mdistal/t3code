@@ -1140,6 +1140,21 @@ machine needs no patch: stock `t3_thread_launch` already takes that strategy.
   starts from the parent's commit and refuses `baseRef`. Upstream's "refuses worktree isolation for a task there"
   in `RemoteDelegation.test.ts` passes unchanged, as the missing `baseRef` refusal.
 
+### An agent recording's repaint ends with its recorder (`fork:`)
+
+Upstream v0.1.12 (#42445) repaints the newest frame of an agent's recording (`preview_recording_start`) at the
+recording's frame rate, so a still page records as repeated frames. Its timer stops when the recording stops or
+grows too large, but not when the `MediaRecorder` stops on its own, as on an encoding error: the repaint then ran
+until the encoder's page closed. The recorder's own stop now ends it too.
+
+This patch used to add the repaint itself, with the click ring fading on those repaints. Upstream's #42445 covers
+the repaint, so the fork cut it to this. A late decode painting over a newer frame and a hidden tab's first frame
+were cut at v0.1.11: upstream's #36215 hands the encoder one frame at a time, and its #25862 bounds every capture of
+the tab at 3 s, with the advice to show the T3 window.
+
+- `apps/server/src/preview/ServerBrowserPage.ts`: the recorder's `onstop` in `recordingEncoderScript`.
+- Test: `apps/server/src/preview/ServerBrowserPage.fork.test.ts`.
+
 ## Versions
 
 A release is `vX.Y.Z-alice.N`. `X.Y.Z` is the upstream stable tag the stack sits on, and `N` counts the fork's
