@@ -56,6 +56,7 @@ import {
   stoppableWork,
   TIMING,
   typedInContext,
+  withStoredTypedIn,
   writtenDuringPause,
 } from "./policy.ts";
 
@@ -311,6 +312,14 @@ describe("typed in an app", () => {
 
   it("can't set the pause switch", () => {
     expect(pauseOrder({ ...tagged, text: "stop all", attachments: [] })).toBeNull();
+  });
+
+  it("keeps the stored mark through an edit, and never takes one from the edit", () => {
+    const marked = { version: 1, records: [], typedIn: { app: "Content" } } as const;
+    const edited = { version: 1, records: [] } as const;
+    expect(withStoredTypedIn(edited, marked)).toEqual(marked);
+    expect(withStoredTypedIn(marked, undefined)).toEqual(edited);
+    expect(withStoredTypedIn(marked, edited)).toEqual(edited);
   });
 });
 

@@ -322,6 +322,18 @@ export function typedInContext(
 }
 
 /**
+ * The context an edit of a queued message stores: the client's, with the stored message's own `typedIn` mark, so an
+ * edit in T3 can neither add the mark nor drop it.
+ */
+export function withStoredTypedIn(
+  next: OrchestrationMessageContext,
+  stored: OrchestrationMessageContext | undefined,
+): OrchestrationMessageContext {
+  const { typedIn: _sent, ...rest } = next;
+  return stored?.typedIn === undefined ? rest : { ...rest, typedIn: stored.typedIn };
+}
+
+/**
  * The pause switch, from `pause.json`: `{ version: 1, mode, at }`, with `at` in epoch ms. T3 and teenylilconfig's
  * `memgate` and task wake all write it. It holds until someone resumes, so it has no expiry. A malformed file
  * counts as no pause, like the rest of the limits: a broken switch lets work through.
