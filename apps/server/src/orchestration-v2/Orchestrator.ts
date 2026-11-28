@@ -189,7 +189,7 @@ import {
 } from "./ProjectionStore.ts";
 import { ProviderAdapterRegistryV2 } from "./ProviderAdapterRegistry.ts";
 import { makePoolRouting, planQueuedRunRepin } from "./ProviderPoolDispatch.ts"; // fork: see FORK.md.
-import { pauseOrder } from "../resourceLimits/policy.ts"; // fork: limits, see FORK.md.
+import { isTypedInApp, pauseOrder, withStoredTypedIn } from "../resourceLimits/policy.ts"; // fork: limits, see FORK.md.
 import { makeLimitsAdmission } from "../resourceLimits/OrchestratorAdmission.ts"; // fork: limits, see FORK.md.
 import * as ProviderContinuationRequests from "@t3tools/provider-core/server/ProviderContinuationRequests";
 import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
@@ -8329,8 +8329,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     const worktreeSetupUnresolved = worktreeSetupPending(projection);
     const sentByUserFromClient =
       command.steerFollowUpOfRunId === undefined &&
-      command.createdBy === "user" &&
-      (command.creationSource === "web" || command.creationSource === "mobile") &&
+      ((command.createdBy === "user" &&
+        (command.creationSource === "web" || command.creationSource === "mobile")) ||
+        isTypedInApp(command)) && // fork: limits, see FORK.md.
       command.scheduledTaskId === undefined;
     const heldRunsToRelease =
       sentByUserFromClient &&
@@ -12695,7 +12696,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ...queuedMessage,
         text: command.text,
         ...editedAttachments,
-        ...(command.context ? { context: command.context } : {}),
+        ...(command.context
+          ? { context: withStoredTypedIn(command.context, queuedMessage.context) } // fork: limits, see FORK.md.
+          : {}),
         updatedAt: now,
       }),
     });
@@ -12711,7 +12714,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           ...queuedTurnItem,
           text: command.text,
           ...editedAttachments,
-          ...(command.context ? { context: command.context } : {}),
+          ...(command.context
+            ? { context: withStoredTypedIn(command.context, queuedTurnItem.context) } // fork: limits, see FORK.md.
+            : {}),
           updatedAt: now,
         }),
       });

@@ -5,6 +5,7 @@ import {
   EnvironmentId,
   EventId,
   MessageId,
+  type OrchestrationMessageContext,
   OrchestratorMcpFailure,
   OrchestratorMcpThreadListResult,
   OrchestratorMcpThreadReadResult,
@@ -177,6 +178,11 @@ const createThread = (threadId: ThreadId) =>
 
 const alice = { createdBy: "user", creationSource: "web" } as const;
 const agent = { createdBy: "agent", creationSource: "mcp" } as const;
+// What the MCP tools send for a tag in an app on `typedInApps`, such as a Content comment.
+const tagged = {
+  ...agent,
+  context: { version: 1, records: [], typedIn: { app: "Content" } },
+} as const;
 
 const send = (
   threadId: ThreadId,
@@ -186,6 +192,7 @@ const send = (
     readonly creationSource: "web" | "mcp";
     readonly scheduledTaskId?: ScheduledTaskId;
     readonly senderThreadId?: ThreadId;
+    readonly context?: OrchestrationMessageContext;
   },
   type: "start_immediately" | "queue_after_active" = "start_immediately",
 ) =>
@@ -1579,6 +1586,78 @@ it.effect("P2: Pause all lets a running turn finish, then its queue waits", () =
     yield* held;
     assert.deepEqual(yield* runs(threadId), ["interrupted", "queued:held"]);
   }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("P1: a tag from an app on typedInApps starts over the limits and in a pause", () =>
+  Effect.gen(function* () {
+    const governor = yield* makeGovernor;
+    const [tag, theirs, during] = ["tag", "theirs", "during"].map((name) =>
+      ThreadId.make(`thread:p1:typed-in:${name}`),
+    ) as [ThreadId, ThreadId, ThreadId];
+    yield* Effect.forEach([tag, theirs, during], createThread);
+
+    yield* governor.pass(yield* tight);
+    yield* send(tag, "tagged in a comment", tagged);
+    yield* send(theirs, "agent work", agent);
+    assert.deepEqual(yield* runs(tag), ["starting"]);
+    assert.deepEqual(yield* runs(theirs), ["queued:held"]);
+
+    yield* TestClock.adjust("1 second");
+    yield* writePause("finish");
+    yield* governor.followPause;
+    yield* send(during, "tagged during the pause", tagged);
+    assert.deepEqual(yield* runs(during), ["starting"]);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect(
+  "P2: a tag during the pause goes where her own typing would, held queue or busy turn",
+  () =>
+    Effect.gen(function* () {
+      const governor = yield* makeGovernor;
+      const threads = (name: string) =>
+        [
+          ThreadId.make(`thread:p2:typed:${name}`),
+          ThreadId.make(`thread:p2:tagged:${name}`),
+        ] as const;
+      const [typedHeld, taggedHeld] = threads("held");
+      const [typedBusy, taggedBusy] = threads("busy");
+      const all = [typedHeld, taggedHeld, typedBusy, taggedBusy];
+      yield* Effect.forEach(all, createThread);
+      yield* Effect.forEach(all, (thread) => send(thread, "first", alice));
+      yield* Effect.forEach([typedHeld, taggedHeld], (thread) =>
+        send(thread, "queued before the pause", alice, "queue_after_active"),
+      );
+
+      yield* TestClock.adjust("1 second");
+      yield* writePause("finish");
+      yield* governor.followPause;
+      yield* TestClock.adjust("1 second");
+
+      // Each thread's older queue is held once its turn ends; her message, or a tag, then starts at once.
+      for (const thread of [typedHeld, taggedHeld]) {
+        const held = yield* awaitRunUpdate(thread, (run) => run.queueHeld === true);
+        yield* endRun(thread);
+        yield* held;
+      }
+      yield* send(typedHeld, "during the pause", alice);
+      yield* send(taggedHeld, "during the pause", tagged);
+
+      // Behind a running turn, what's newer than the pause starts when the turn ends.
+      yield* send(typedBusy, "during the pause", alice, "queue_after_active");
+      yield* send(taggedBusy, "during the pause", tagged, "queue_after_active");
+      for (const thread of [typedBusy, taggedBusy]) {
+        const started = yield* awaitRunUpdate(thread, (run) => run.status === "starting");
+        yield* endRun(thread);
+        yield* started;
+      }
+
+      yield* TestClock.adjust("1 second");
+      assert.include(yield* runs(taggedHeld), "starting");
+      assert.deepEqual(yield* runs(taggedHeld), yield* runs(typedHeld));
+      assert.deepEqual(yield* runs(taggedBusy), ["interrupted", "starting"]);
+      assert.deepEqual(yield* runs(taggedBusy), yield* runs(typedBusy));
+    }).pipe(Effect.provide(layerTest)),
 );
 
 it.effect("P2: what Alice queued before the pause waits, and what she types during it starts", () =>

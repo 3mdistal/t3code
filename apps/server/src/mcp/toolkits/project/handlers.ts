@@ -39,6 +39,7 @@ import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import * as OrchestrationMcp from "../../OrchestratorMcpService.ts";
 import { newCommandId, readCaller, resolveProjectId, unavailable } from "../../threadAccess.ts";
+import { typedInMessageContext } from "../../typedInApps.ts"; // fork: limits, see FORK.md.
 import { ProjectToolkit } from "./tools.ts";
 
 const isAboveCeilingError = Schema.is(OrchestratorRuntimeModeAboveCeilingError);
@@ -403,6 +404,13 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
             )?.supportedRuntimeModes,
           });
         }
+        // fork: limits, see FORK.md.
+        const typedIn = yield* typedInMessageContext(
+          scope,
+          ServerSettings.ServerSettingsService.pipe(
+            Effect.flatMap((settings) => settings.getSettings),
+          ),
+        );
         const result = yield* ThreadMessageIntake.launchThread({
           commandId,
           threadId,
@@ -420,6 +428,7 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
                   ...(caller === undefined ? {} : { senderThreadId: caller.id }),
                   text: input.message ?? "",
                   attachments,
+                  ...(typedIn === undefined ? {} : { context: typedIn }), // fork: limits, see FORK.md.
                 },
               }),
           createdBy: "agent",

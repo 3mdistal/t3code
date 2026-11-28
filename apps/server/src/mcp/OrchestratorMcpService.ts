@@ -120,6 +120,7 @@ import * as ProjectService from "../project/ProjectService.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import { typedInMessageContext } from "./typedInApps.ts"; // fork: limits, see FORK.md.
 import {
   clientModeCeiling,
   type McpInvocationScope,
@@ -3684,6 +3685,7 @@ const make = Effect.gen(function* () {
         requestKey: key,
         operation: "thread-send",
       });
+      const typedIn = yield* typedInMessageContext(scope, serverSettings.getSettings); // fork: limits, see FORK.md.
       const result = yield* threadManagement
         .sendToThread({
           projectId: target.thread.projectId,
@@ -3703,6 +3705,7 @@ const make = Effect.gen(function* () {
           attachments: [],
           mode,
           ...(input.freshContext ? { freshContext: true } : {}),
+          ...(typedIn === undefined ? {} : { context: typedIn }), // fork: limits, see FORK.md.
           createdBy: "agent",
           creationSource: "mcp",
         })

@@ -836,6 +836,17 @@ Users read about it in the Memory and CPU limits section of `docs/user/remote-ac
   isn't a release: the thread keeps its place, the spacing doesn't move, no move to the linked machine starts that
   pass, and the next pass tries the same thread again, once a pass. It used to be logged as released and dropped
   from the list, which left its run held with nothing to release it.
+- A message an outside app sends for her counts as her own when the app is on the machine's
+  `resourceLimits.typedInApps` list, such as `["Content"]`: there, tagging an agent in a comment starts or messages a
+  thread while she waits on it, and a tag of hers was once held because the PC was over its limits. The list
+  holds the names apps sign in to T3 with (their OAuth `client_name`), ignoring case and outer spaces. The MCP
+  `t3_thread_launch` and `t3_thread_send` tools mark such a message with `context.typedIn` (`mcp/typedInApps.ts`)
+  only for a call from a listed app's own sign-in, never from an agent's thread or a linked machine. Only the server
+  sets the mark, and an edit of a queued message in T3 keeps the stored one (`withStoredTypedIn`). The `t3 thread`
+  CLI signs in as `t3 thread cli`, so it counts only if that name is listed. `isTypedInApp` reads the mark, and
+  `startsForAlice` lets it past the limits and a pause like her typing; like hers, it also resumes a thread's held
+  queue when it's sent (`dispatchMessage`'s `sentByUserFromClient`). It can't set the pause switch or say "launch
+  anyway". The list has no UI, and the limits dialog keeps it when it saves.
 - An idle session stays open while one of its threads has a run preparing, starting, running or waiting, or while
   an open is attaching a thread to it. A run marks its session busy only once its turn starts, so opening, resuming
   or compacting looked idle: on Nov 9 the pass closed one session during Alice's `/compact` and another while her
@@ -896,7 +907,11 @@ Users read about it in the Memory and CPU limits section of `docs/user/remote-ac
     every path that leaves a session idle goes through. `idleSessionsToClose` closes the oldest first by it.
   - `runtimeLayer.ts` wires the governor. `ws.ts` adds the limits to `serverGetHostResources`.
   - Contracts and `serverSettings.ts`: the `resourceLimits` settings key, the `resourceLimits` capability, and
-    `HostResourcesSnapshot.limits`.
+    `HostResourcesSnapshot.limits`. `composerContext.ts` adds the optional `typedIn` to `OrchestrationMessageContext`.
+  - `typedInApps`: `mcp/toolkits/project/handlers.ts` (`t3_thread_launch`) and `OrchestratorMcpService.ts`
+    (`sendToThread`) add the mark, and `ThreadManagementService.ts` passes a send's `context` to its dispatch. In
+    `Orchestrator.ts`, a marked message resumes held queues as a client message does, and editing a queued message
+    keeps its stored mark.
   - `LoadBalancingSettings.tsx` shows each machine's limits under its row, and hands a lone machine to
     `MachineLimitsSection`. `settingsSearch.ts` adds search terms.
   - `packages/client-runtime/src/load-balancing.ts`: Auto balance skips a machine over its limits.
@@ -940,10 +955,10 @@ Users read about it in the Memory and CPU limits section of `docs/user/remote-ac
     earlier version of the fork left held ones behind.
   - While paused, every run start waits in its thread's queue: agents, delegated children, schedules, queued
     messages, usage-limit resumes and restart continuations. The off switch and "launch anyway" don't pass it. A
-    message Alice types after the pause began still starts: at once in an idle thread, with its older queue waiting
-    again afterwards, or, when a turn is still running, behind what's already queued there, which then goes first. A
-    thread she hasn't typed in keeps waiting. Resume and Send now still start a thread by hand, and agents have no tool
-    for those.
+    message Alice types after the pause began, in T3 or an app on `typedInApps`, still starts: at once in an idle
+    thread, with its older queue waiting again afterwards, or, when a turn is still running, behind what's already
+    queued there, which then goes first. A thread she hasn't typed in keeps waiting. Resume and Send now still start
+    a thread by hand, and agents have no tool for those.
   - Resuming goes through the normal line: one thread at a time, board rank first, under the memory limits.
   - Set it from any thread by typing `pause all`, `stop all` or `resume all` as the whole message. Only a message
     Alice types herself counts. The model never sees it, and it asks for no thread title: `pauseOrderMessage` sets the switch, and `dispatchMessage`
@@ -1012,9 +1027,13 @@ Users read about it in the Memory and CPU limits section of `docs/user/remote-ac
 - Stock compatibility: holds, notices and resume notes reuse `run.updated`, `turn-item.updated` and system
   notifications. Pause all adds no event type, and stock T3 ignores `pause.json`, treating a typed order as an
   ordinary message. Stock T3 drops `resourceLimits` the next time it saves settings. The `held` fields are tool
-  output only, read from runs and notices already stored.
+  output only, read from runs and notices already stored. A message's `context.typedIn` is an optional key in its
+  stored payload, which stock T3 ignores when it decodes.
 - Known gaps:
   - Forks and merge-backs aren't held, during a pause either.
+  - An app chooses its own sign-in name, so a client that signs in as "Content" counts as Content. Each sign-in still
+    needs Alice's approval on that machine. The mark goes on everything a listed sign-in launches or sends, since T3
+    can't see who acted in the app; Content sends only for a person's comment.
   - Each machine has its own switch. An order typed in a thread pauses the machine that thread runs on, and Linux,
     which has no fork limits, treats the words as an ordinary message, though one gets no generated title.
   - Pause all holds what T3 runs. A steer into a turn that's still finishing joins that turn, and an agent CLI started
@@ -1043,7 +1062,7 @@ Users read about it in the Memory and CPU limits section of `docs/user/remote-ac
   `apps/server/src/orchestration-v2/LimitsSweepKeepsOpens.fork.test.ts`, `packages/shared/src/serverSettings.fork.test.ts`,
   `packages/client-runtime/src/load-balancing.fork.test.ts`,
   `packages/provider-core/src/server/subagentProjection.fork.test.ts`, `apps/server/src/mcp/heldRuns.fork.test.ts`,
-  and `MachineLimits.logic.fork.test.ts`. `Governor.fork.test.ts` runs the real orchestrator with fake readings and a test clock.
+  `apps/server/src/mcp/typedInApps.fork.test.ts`, and `MachineLimits.logic.fork.test.ts`. `Governor.fork.test.ts` runs the real orchestrator with fake readings and a test clock.
   Its R7 tests and O20 cover standing threads. Its D tests cover `passes.json`: a pass's decision fields and a run of repeats as one entry (D1), the phase and
   thread a stuck await shows (D2), the 1,024-entry bound and a last server's `unfinished` pass (D3), and a failed
   `queue.resume` keeping its thread in line and off the linked machine, tried once a pass (D4), and failed starts

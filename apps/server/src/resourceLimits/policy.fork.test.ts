@@ -1,4 +1,5 @@
 import {
+  EnvironmentId,
   MessageId,
   type OrchestratorMcpFailure,
   RunId,
@@ -23,6 +24,7 @@ import {
   checkoutFreeRepository,
   isAlicesMessage,
   isDefiniteRefusal,
+  isTypedInApp,
   interruptible,
   latestUserMessage,
   launchAnyway,
@@ -50,8 +52,11 @@ import {
   releaseOrder,
   SESSION_GIB,
   standingThreads,
+  startsForAlice,
   stoppableWork,
   TIMING,
+  typedInContext,
+  withStoredTypedIn,
   writtenDuringPause,
 } from "./policy.ts";
 
@@ -243,6 +248,78 @@ describe("isAlicesMessage", () => {
     expect(isAlicesMessage({ ...typed, senderThreadId: ThreadId.make("thread:other") })).toBe(
       false,
     );
+  });
+});
+
+describe("typed in an app", () => {
+  const content = { thread: undefined, client: { label: "Content" } };
+  const tagged = {
+    createdBy: "agent",
+    creationSource: "mcp",
+    context: typedInContext(content, ["content"]),
+  } as const;
+
+  it("marks a call from a listed app's own sign-in, ignoring case and outer spaces", () => {
+    expect(typedInContext(content, ["  CONTENT "])).toEqual({
+      version: 1,
+      records: [],
+      typedIn: { app: "Content" },
+    });
+    expect(typedInContext({ ...content, client: { label: " Content " } }, ["Content"])).toEqual(
+      typedInContext(content, ["Content"]),
+    );
+  });
+
+  it("marks nothing for an unlisted app, an agent's thread, the CLI or a linked machine", () => {
+    expect(typedInContext(content, undefined)).toBeUndefined();
+    expect(typedInContext(content, [])).toBeUndefined();
+    expect(typedInContext(content, ["Mail"])).toBeUndefined();
+    expect(typedInContext({ ...content, thread: { threadId: "t" } }, ["Content"])).toBeUndefined();
+    expect(
+      typedInContext({ ...content, client: { label: "t3 thread cli" } }, ["Content"]),
+    ).toBeUndefined();
+    expect(
+      typedInContext({ ...content, client: { label: "Content", linked: true } }, ["Content"]),
+    ).toBeUndefined();
+    expect(typedInContext({ ...content, client: undefined }, ["Content"])).toBeUndefined();
+    expect(typedInContext({ ...content, client: { label: "  " } }, ["", " "])).toBeUndefined();
+  });
+
+  it("counts a marked launch or send as Alice's start, but not as her typing in T3", () => {
+    expect(isTypedInApp(tagged)).toBe(true);
+    expect(startsForAlice(tagged)).toBe(true);
+    expect(isAlicesMessage(tagged)).toBe(false);
+  });
+
+  it("needs the mark, and nothing relayed from a thread, a schedule or a linked machine", () => {
+    expect(isTypedInApp({ createdBy: "agent", creationSource: "mcp" })).toBe(false);
+    expect(isTypedInApp({ ...tagged, creationSource: "server" })).toBe(false);
+    expect(isTypedInApp({ ...tagged, senderThreadId: ThreadId.make("thread:other") })).toBe(false);
+    expect(isTypedInApp({ ...tagged, scheduledTaskId: ScheduledTaskId.make("task") })).toBe(false);
+    expect(
+      isTypedInApp({
+        ...tagged,
+        linkedSender: {
+          environmentId: EnvironmentId.make("environment:mac"),
+          threadId: ThreadId.make("thread:mac"),
+          title: "On the Mac",
+        },
+      }),
+    ).toBe(false);
+    expect(startsForAlice({ createdBy: "agent", creationSource: "mcp" })).toBe(false);
+    expect(startsForAlice(undefined)).toBe(false);
+  });
+
+  it("can't set the pause switch", () => {
+    expect(pauseOrder({ ...tagged, text: "stop all", attachments: [] })).toBeNull();
+  });
+
+  it("keeps the stored mark through an edit, and never takes one from the edit", () => {
+    const marked = { version: 1, records: [], typedIn: { app: "Content" } } as const;
+    const edited = { version: 1, records: [] } as const;
+    expect(withStoredTypedIn(edited, marked)).toEqual(marked);
+    expect(withStoredTypedIn(marked, undefined)).toEqual(edited);
+    expect(withStoredTypedIn(marked, edited)).toEqual(edited);
   });
 });
 
@@ -645,6 +722,16 @@ describe("writtenDuringPause", () => {
     expect(writtenDuringPause({ createdBy: "agent", creationSource: "mcp" }, 200, pause)).toBe(
       false,
     );
+  });
+
+  it("counts a tag from an app on typedInApps like one she typed", () => {
+    const tagged = {
+      createdBy: "agent",
+      creationSource: "mcp",
+      context: { version: 1, records: [], typedIn: { app: "Content" } },
+    } as const;
+    expect(writtenDuringPause(tagged, 99, pause)).toBe(false);
+    expect(writtenDuringPause(tagged, 100, pause)).toBe(true);
   });
 });
 

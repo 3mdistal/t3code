@@ -11,11 +11,11 @@ import * as Effect from "effect/Effect";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import { ProjectionStoreV2 } from "../orchestration-v2/ProjectionStore.ts";
 import {
-  isAlicesMessage,
   isBufferedWake,
   pauseOrder,
   pauseOrderNotice,
   type Provenance,
+  startsForAlice,
   writtenDuringPause,
 } from "./policy.ts";
 import { ResourceLimits } from "./ResourceLimits.ts";
@@ -159,7 +159,7 @@ export const makeLimitsAdmission = Effect.gen(function* () {
     const alicesQueue = projection.runs.some((candidate) => {
       if (candidate.status !== "queued") return false;
       const queued = projection.messages.find((item) => item.id === candidate.userMessageId);
-      if (pause === null || queued === undefined) return isAlicesMessage(queued);
+      if (pause === null || queued === undefined) return startsForAlice(queued);
       // While every agent is paused, only what she has typed since counts, and what's ahead of it in the queue goes first.
       return writtenDuringPause(queued, DateTime.toEpochMillis(queued.createdAt), pause);
     });
