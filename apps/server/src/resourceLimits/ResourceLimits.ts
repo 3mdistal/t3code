@@ -26,7 +26,6 @@ import { makeJsonFiles } from "./jsonFiles.ts";
 import {
   effectiveLimits,
   type HostReading,
-  isAlicesMessage,
   isBufferedWake,
   latestUserMessage,
   launchAnyway,
@@ -36,6 +35,7 @@ import {
   type PauseOrder,
   pausedReason,
   type Provenance,
+  startsForAlice,
   TIMING,
   waitingReason,
   writtenDuringPause,
@@ -330,7 +330,7 @@ const make = Effect.fn("makeResourceLimits")(function* () {
     const current = yield* Ref.get(snapshot);
     const { pause } = current;
     if (pause === null) {
-      if (isAlicesMessage(input.message)) return ADMITTED;
+      if (startsForAlice(input.message)) return ADMITTED;
     } else if (writtenDuringPause(input.message, input.writtenAt ?? now, pause)) {
       return ADMITTED;
     }

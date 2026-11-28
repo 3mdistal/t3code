@@ -174,9 +174,13 @@ function MachineLimitsDialog({
 
   const save = () => {
     if (patch === null) return;
-    // The dialog doesn't edit overflow, and a patch replaces the whole object.
+    // The dialog doesn't edit overflow or typedInApps, and a patch replaces the whole object.
     updateSettings({
-      resourceLimits: saved.overflow === undefined ? patch : { ...patch, overflow: saved.overflow },
+      resourceLimits: {
+        ...patch,
+        ...(saved.overflow === undefined ? {} : { overflow: saved.overflow }),
+        ...(saved.typedInApps === undefined ? {} : { typedInApps: saved.typedInApps }),
+      },
     });
     onClose();
   };

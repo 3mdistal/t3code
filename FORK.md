@@ -822,7 +822,16 @@ Users read about it in the Memory and CPU limits section of `docs/user/remote-ac
   memory on macOS, plus CPU. Linux keeps upstream's cap and has no fork limits.
 - While a machine is over its limits, a run Alice didn't start herself from web or mobile waits in its thread's
   queue, held, with a `system_notice`. Her own messages always start, and so does a queue holding one of them.
-  Work launched from a thread whose latest message is her "launch anyway" starts too. Idle sessions close on
+  Work launched from a thread whose latest message is her "launch anyway" starts too.
+- A message an outside app sends for her counts as her own when the app is on the machine's
+  `resourceLimits.typedInApps` list, such as `["Content"]`: there, tagging an agent in a comment starts or messages a
+  thread while she waits on it, and a tag of hers was once held because the PC was over its limits. The list
+  holds the names apps sign in to T3 with (their OAuth `client_name`), ignoring case and outer spaces. The MCP
+  `t3_thread_launch` and `t3_thread_send` tools mark such a message with `context.typedIn` (`mcp/typedInApps.ts`)
+  only for a call from that app's own sign-in: never from an agent's thread, the CLI or a linked machine, and only
+  the server sets it. `isTypedInApp` reads the mark, and `startsForAlice` lets it past the limits and a pause like
+  her typing. It can't set the pause switch or say "launch anyway". The list has no UI, and the limits dialog keeps
+  it when it saves. Idle sessions close on
   every pass over the limits, before anything waits. Below the critical line, the newest running turn is
   interrupted every 30 s, and its thread queues a resume note. A held thread the Task Priorities board ranks
   starts first, best rank first. A thread without a rank, such as a task's helper or a fork of its thread, takes
@@ -896,7 +905,9 @@ Users read about it in the Memory and CPU limits section of `docs/user/remote-ac
     every path that leaves a session idle goes through. `idleSessionsToClose` closes the oldest first by it.
   - `runtimeLayer.ts` wires the governor. `ws.ts` adds the limits to `serverGetHostResources`.
   - Contracts and `serverSettings.ts`: the `resourceLimits` settings key, the `resourceLimits` capability, and
-    `HostResourcesSnapshot.limits`.
+    `HostResourcesSnapshot.limits`. `composerContext.ts` adds the optional `typedIn` to `OrchestrationMessageContext`.
+  - `typedInApps`: `mcp/toolkits/project/handlers.ts` (`t3_thread_launch`) and `OrchestratorMcpService.ts`
+    (`sendToThread`) add the mark, and `ThreadManagementService.ts` passes a send's `context` to its dispatch.
   - `LoadBalancingSettings.tsx` shows each machine's limits under its row, and hands a lone machine to
     `MachineLimitsSection`. `settingsSearch.ts` adds search terms.
   - `packages/client-runtime/src/load-balancing.ts`: Auto balance skips a machine over its limits.
@@ -940,7 +951,7 @@ Users read about it in the Memory and CPU limits section of `docs/user/remote-ac
     earlier version of the fork left held ones behind.
   - While paused, every run start waits in its thread's queue: agents, delegated children, schedules, queued
     messages, usage-limit resumes and restart continuations. The off switch and "launch anyway" don't pass it. A
-    message Alice types after the pause began still starts: at once in an idle thread, with its older queue waiting
+    message Alice types after the pause began, in T3 or an app on `typedInApps`, still starts: at once in an idle thread, with its older queue waiting
     again afterwards, or, when a turn is still running, behind what's already queued there, which then goes first. A
     thread she hasn't typed in keeps waiting. Resume and Send now still start a thread by hand, and agents have no tool
     for those.
@@ -1012,9 +1023,12 @@ Users read about it in the Memory and CPU limits section of `docs/user/remote-ac
 - Stock compatibility: holds, notices and resume notes reuse `run.updated`, `turn-item.updated` and system
   notifications. Pause all adds no event type, and stock T3 ignores `pause.json`, treating a typed order as an
   ordinary message. Stock T3 drops `resourceLimits` the next time it saves settings. The `held` fields are tool
-  output only, read from runs and notices already stored.
+  output only, read from runs and notices already stored. A message's `context.typedIn` is an optional key in its
+  stored payload, which stock T3 ignores when it decodes.
 - Known gaps:
   - Forks and merge-backs aren't held, during a pause either.
+  - An app chooses its own sign-in name, so a client that signs in as "Content" counts as Content. Each sign-in still
+    needs Alice's approval on that machine, and the mark goes only on what that sign-in sends.
   - Each machine has its own switch. An order typed in a thread pauses the machine that thread runs on, and Linux,
     which has no fork limits, treats the words as an ordinary message, though one gets no generated title.
   - Pause all holds what T3 runs. A steer into a turn that's still finishing joins that turn, and an agent CLI started
@@ -1043,7 +1057,7 @@ Users read about it in the Memory and CPU limits section of `docs/user/remote-ac
   `apps/server/src/orchestration-v2/LimitsSweepKeepsOpens.fork.test.ts`, `packages/shared/src/serverSettings.fork.test.ts`,
   `packages/client-runtime/src/load-balancing.fork.test.ts`,
   `packages/provider-core/src/server/subagentProjection.fork.test.ts`, `apps/server/src/mcp/heldRuns.fork.test.ts`,
-  and `MachineLimits.logic.fork.test.ts`. `Governor.fork.test.ts` runs the real orchestrator with fake readings and a test clock.
+  `apps/server/src/mcp/typedInApps.fork.test.ts`, and `MachineLimits.logic.fork.test.ts`. `Governor.fork.test.ts` runs the real orchestrator with fake readings and a test clock.
   Its R7 tests and O20 cover standing threads. Its D tests cover `passes.json`: a pass's decision fields and a run of repeats as one entry (D1), the phase and
   thread a stuck await shows (D2), the 1,024-entry bound and a last server's `unfinished` pass (D3), and a failed
   `queue.resume` keeping its thread in line and off the linked machine, tried once a pass (D4), and failed starts

@@ -217,6 +217,13 @@ nothing did.
 To let one thread's agents launch work anyway, send `launch anyway` in that thread.
 It counts while it's your latest message there.
 
+Some apps start or message a thread when you act in them, such as tagging an agent in
+a Content comment. To have that count as a message you sent yourself, so it starts
+even over the limits or during a pause, add the app's name to `typedInApps` under
+`resourceLimits` in that machine's `settings.json`, such as `"typedInApps": ["Content"]`.
+The name is the one the app signs in to T3 with. It counts only for what that app's
+own sign-in sends, never for an agent's thread or another machine.
+
 To hold every agent on a machine yourself, send one of these as the whole message, in
 any thread on that machine. T3 acts on it without starting a turn, and leaves a notice
 in the thread.

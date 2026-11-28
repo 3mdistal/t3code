@@ -5,6 +5,7 @@ import {
   EnvironmentId,
   EventId,
   MessageId,
+  type OrchestrationMessageContext,
   OrchestratorMcpFailure,
   OrchestratorMcpThreadListResult,
   OrchestratorMcpThreadReadResult,
@@ -177,6 +178,11 @@ const createThread = (threadId: ThreadId) =>
 
 const alice = { createdBy: "user", creationSource: "web" } as const;
 const agent = { createdBy: "agent", creationSource: "mcp" } as const;
+// What the MCP tools send for a tag in an app on `typedInApps`, such as a Content comment.
+const tagged = {
+  ...agent,
+  context: { version: 1, records: [], typedIn: { app: "Content" } },
+} as const;
 
 const send = (
   threadId: ThreadId,
@@ -186,6 +192,7 @@ const send = (
     readonly creationSource: "web" | "mcp";
     readonly scheduledTaskId?: ScheduledTaskId;
     readonly senderThreadId?: ThreadId;
+    readonly context?: OrchestrationMessageContext;
   },
   type: "start_immediately" | "queue_after_active" = "start_immediately",
 ) =>
@@ -1578,6 +1585,28 @@ it.effect("P2: Pause all lets a running turn finish, then its queue waits", () =
     yield* endRun(threadId);
     yield* held;
     assert.deepEqual(yield* runs(threadId), ["interrupted", "queued:held"]);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("P1: a tag from an app on typedInApps starts over the limits and in a pause", () =>
+  Effect.gen(function* () {
+    const governor = yield* makeGovernor;
+    const [tag, theirs, during] = ["tag", "theirs", "during"].map((name) =>
+      ThreadId.make(`thread:p1:typed-in:${name}`),
+    ) as [ThreadId, ThreadId, ThreadId];
+    yield* Effect.forEach([tag, theirs, during], createThread);
+
+    yield* governor.pass(yield* tight);
+    yield* send(tag, "tagged in a comment", tagged);
+    yield* send(theirs, "agent work", agent);
+    assert.deepEqual(yield* runs(tag), ["starting"]);
+    assert.deepEqual(yield* runs(theirs), ["queued:held"]);
+
+    yield* TestClock.adjust("1 second");
+    yield* writePause("finish");
+    yield* governor.followPause;
+    yield* send(during, "tagged during the pause", tagged);
+    assert.deepEqual(yield* runs(during), ["starting"]);
   }).pipe(Effect.provide(layerTest)),
 );
 

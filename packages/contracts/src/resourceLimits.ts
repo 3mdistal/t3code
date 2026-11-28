@@ -70,6 +70,12 @@ export const ResourceLimitsSettings = Schema.Struct({
   criticalHeadroomGiB: Schema.optionalKey(GiB),
   pauseCpuPercent: Schema.optionalKey(Percent),
   overflow: Schema.optionalKey(ResourceLimitsOverflow),
+  /**
+   * Outside apps whose messages are Alice typing, such as "Content", where tagging an agent in a comment starts or
+   * messages a thread. A thread one of these starts or messages runs past the limits and the pause like one she
+   * typed in T3. Names match the app's MCP sign-in name, ignoring case and outer spaces.
+   */
+  typedInApps: Schema.optionalKey(Schema.Array(OverflowText(200))),
 });
 export type ResourceLimitsSettings = typeof ResourceLimitsSettings.Type;
 

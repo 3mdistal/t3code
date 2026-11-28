@@ -7,6 +7,7 @@ import * as DateTime from "effect/DateTime";
 import {
   type EffectiveResourceLimits,
   type MemoryPressureLevel,
+  type OrchestrationMessageContext,
   type OrchestrationV2ConversationMessage,
   type OrchestratorMcpThreadStatus,
   resolveResourceLimits,
@@ -249,6 +250,8 @@ export type Provenance = Pick<
   | "senderThreadId"
   | "notification"
   | "delegatedCompletion"
+  | "linkedSender"
+  | "context"
 >;
 
 /**
@@ -275,6 +278,50 @@ export const isAlicesMessage = (message: Provenance | undefined) =>
   (message.creationSource === "web" || message.creationSource === "mobile") &&
   message.scheduledTaskId === undefined &&
   message.senderThreadId === undefined;
+
+/**
+ * Whether Alice typed this message in an outside app on the machine's `typedInApps` list, such as a Content comment
+ * tagging an agent. The MCP tools mark it (`typedInContext`) only for a call from that app's own sign-in, never one
+ * from an agent's thread, the CLI or a linked machine, so a launch or send from anywhere else stays an agent's.
+ */
+export const isTypedInApp = (message: Provenance | undefined) =>
+  message !== undefined &&
+  message.createdBy === "agent" &&
+  message.creationSource === "mcp" &&
+  message.context?.typedIn !== undefined &&
+  message.scheduledTaskId === undefined &&
+  message.senderThreadId === undefined &&
+  message.linkedSender === undefined;
+
+/** Whether a message starts the way one Alice typed does: past the limits, and past a pause it came after. */
+export const startsForAlice = (message: Provenance | undefined) =>
+  isAlicesMessage(message) || isTypedInApp(message);
+
+/** What an outside MCP caller presents, from `McpInvocationScope`. */
+export interface TypedInCaller {
+  readonly thread: unknown;
+  readonly client:
+    | { readonly label: string; readonly linked?: boolean | undefined }
+    | undefined;
+}
+
+/**
+ * The context the MCP launch and send tools put on a message from an app on `typedInApps`: undefined for any other
+ * caller, including every agent inside T3, which has a thread. Names match ignoring case and outer spaces.
+ */
+export function typedInContext(
+  caller: TypedInCaller,
+  apps: ReadonlyArray<string> | undefined,
+): OrchestrationMessageContext | undefined {
+  if (caller.thread !== undefined || caller.client === undefined || caller.client.linked === true) {
+    return undefined;
+  }
+  const label = caller.client.label.trim();
+  const listed = (apps ?? []).some((app) => app.trim().toLowerCase() === label.toLowerCase());
+  return listed && label.length > 0
+    ? { version: 1, records: [], typedIn: { app: label.slice(0, 200) } }
+    : undefined;
+}
 
 /**
  * The pause switch, from `pause.json`: `{ version: 1, mode, at }`, with `at` in epoch ms. T3 and teenylilconfig's
@@ -321,14 +368,15 @@ export function pauseOrder(
 }
 
 /**
- * Whether a message Alice typed came after the pause began. Those still start: at once in an idle thread, with its
- * older queue waiting again afterwards, or behind that older queue when a turn is still running.
+ * Whether a message Alice typed, in T3 or a `typedInApps` app, came after the pause began. Those still start: at
+ * once in an idle thread, with its older queue waiting again afterwards, or behind that older queue when a turn is
+ * still running.
  */
 export const writtenDuringPause = (
   message: Provenance,
   writtenAt: number,
   pause: ResourceLimitsPause,
-) => isAlicesMessage(message) && writtenAt >= pause.at;
+) => startsForAlice(message) && writtenAt >= pause.at;
 
 /** Whether a message contains the phrase as whole words, ignoring case, punctuation and spacing. */
 export function hasPhrase(text: string, phrase = LAUNCH_ANYWAY_PHRASE): boolean {

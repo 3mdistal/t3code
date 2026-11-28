@@ -311,10 +311,21 @@ export const GuestMessageAttribution = Schema.Struct({
 });
 export type GuestMessageAttribution = typeof GuestMessageAttribution.Type;
 
+/**
+ * fork: limits, see FORK.md. Marks a message an outside app sent for Alice as she typed it there, such as a
+ * Content comment tagging an agent. `app` is the app's sign-in name. Only the server sets it, and only for an
+ * app on the machine's `resourceLimits.typedInApps` list.
+ */
+export const TypedInAppAttribution = Schema.Struct({
+  app: TrimmedNonEmptyString.check(Schema.isMaxLength(200)),
+});
+export type TypedInAppAttribution = typeof TypedInAppAttribution.Type;
+
 /** Structured context riding on a user message. Undecodable records are dropped, not fatal. */
 export const OrchestrationMessageContext = Schema.Struct({
   version: Schema.Literal(1),
   guest: Schema.optional(GuestMessageAttribution),
+  typedIn: Schema.optional(TypedInAppAttribution), // fork: limits, see FORK.md.
   records: Schema.Array(Schema.Unknown)
     .check(
       Schema.isMaxLength(COMPOSER_CONTEXT_MAX_RECORDS),
