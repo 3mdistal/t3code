@@ -407,7 +407,9 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
         // fork: limits, see FORK.md.
         const typedIn = yield* typedInMessageContext(
           scope,
-          ServerSettings.ServerSettingsService.pipe(Effect.flatMap((settings) => settings.getSettings)),
+          ServerSettings.ServerSettingsService.pipe(
+            Effect.flatMap((settings) => settings.getSettings),
+          ),
         );
         const result = yield* ThreadMessageIntake.launchThread({
           commandId,

@@ -300,9 +300,7 @@ export const startsForAlice = (message: Provenance | undefined) =>
 /** What an outside MCP caller presents, from `McpInvocationScope`. */
 export interface TypedInCaller {
   readonly thread: unknown;
-  readonly client:
-    | { readonly label: string; readonly linked?: boolean | undefined }
-    | undefined;
+  readonly client: { readonly label: string; readonly linked?: boolean | undefined } | undefined;
 }
 
 /**

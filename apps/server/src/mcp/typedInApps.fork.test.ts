@@ -1,6 +1,11 @@
 // fork: limits. A launch or send from an app on `typedInApps` carries the mark that starts it like Alice's typing.
 import { assert, describe, it } from "@effect/vitest";
-import { EnvironmentId, ProviderInstanceId, type ServerSettings, ThreadId } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  ProviderInstanceId,
+  type ServerSettings,
+  ThreadId,
+} from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 
 import type { McpInvocationScope } from "./McpInvocationContext.ts";

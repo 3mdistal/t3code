@@ -10,12 +10,12 @@ import type { McpInvocationScope } from "./McpInvocationContext.ts";
  * The context for the message this call sends, or undefined. Settings are read only for an outside app's call, and
  * a failed read marks nothing, so the message waits like any agent's.
  */
-export const typedInMessageContext = <E>(
+export const typedInMessageContext = <E, R>(
   scope: McpInvocationScope,
-  getSettings: Effect.Effect<ServerSettings, E>,
-): Effect.Effect<OrchestrationMessageContext | undefined> =>
+  getSettings: Effect.Effect<ServerSettings, E, R>,
+): Effect.Effect<OrchestrationMessageContext | undefined, never, R> =>
   scope.thread !== undefined || scope.client === undefined
-    ? Effect.succeed(undefined)
+    ? Effect.undefined
     : getSettings.pipe(
         Effect.map((settings) => typedInContext(scope, settings.resourceLimits?.typedInApps)),
         Effect.orElseSucceed(() => undefined),
